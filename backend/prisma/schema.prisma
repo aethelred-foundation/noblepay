@@ -1,0 +1,619 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum PaymentStatus {
+  PENDING
+  SCREENING
+  APPROVED
+  SETTLED
+  CANCELLED
+  REFUNDED
+  FLAGGED
+  REJECTED
+}
+
+enum ComplianceStatus {
+  PENDING
+  PASSED
+  FAILED
+  UNDER_REVIEW
+  ESCALATED
+}
+
+enum KYCStatus {
+  UNVERIFIED
+  PENDING
+  VERIFIED
+  REJECTED
+  EXPIRED
+  SUSPENDED
+}
+
+enum BusinessTier {
+  STARTER
+  STANDARD
+  ENTERPRISE
+  INSTITUTIONAL
+}
+
+enum EventType {
+  PAYMENT_CREATED
+  PAYMENT_SCREENED
+  PAYMENT_APPROVED
+  PAYMENT_SETTLED
+  PAYMENT_CANCELLED
+  PAYMENT_REFUNDED
+  PAYMENT_FLAGGED
+  COMPLIANCE_SCREENING
+  COMPLIANCE_PASSED
+  COMPLIANCE_FAILED
+  COMPLIANCE_ESCALATED
+  BUSINESS_REGISTERED
+  BUSINESS_VERIFIED
+  BUSINESS_SUSPENDED
+  BUSINESS_UPGRADED
+  SANCTIONS_UPDATED
+  TEE_ATTESTATION
+  API_KEY_CREATED
+  API_KEY_REVOKED
+  SYSTEM_EVENT
+}
+
+enum Severity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum TEENodeStatus {
+  ACTIVE
+  INACTIVE
+  DEREGISTERED
+  MAINTENANCE
+}
+
+enum APIKeyStatus {
+  ACTIVE
+  REVOKED
+  EXPIRED
+}
+
+// ─── Models ─────────────────────────────────────────────────────────────────
+
+model Business {
+  id                String       @id @default(uuid())
+  address           String       @unique
+  licenseNumber     String       @unique @map("license_number")
+  businessName      String       @map("business_name")
+  jurisdiction      String
+  businessType      String       @map("business_type")
+  kycStatus         KYCStatus    @default(UNVERIFIED) @map("kyc_status")
+  tier              BusinessTier @default(STARTER)
+  complianceOfficer String?      @map("compliance_officer")
+  contactEmail      String       @map("contact_email")
+  registeredAt      DateTime     @default(now()) @map("registered_at")
+  lastVerified      DateTime?    @map("last_verified")
+  dailyLimit        Decimal      @default(10000) @map("daily_limit") @db.Decimal(36, 18)
+  monthlyLimit      Decimal      @default(100000) @map("monthly_limit") @db.Decimal(36, 18)
+
+  apiKeys  APIKey[]
+  payments Payment[]
+
+  @@map("businesses")
+}
+
+model Payment {
+  id             String        @id @default(uuid())
+  paymentId      String        @unique @map("payment_id") // bytes32 hash
+  sender         String
+  recipient      String
+  amount         Decimal       @db.Decimal(36, 18)
+  currency       String
+  purposeHash    String?       @map("purpose_hash")
+  status         PaymentStatus @default(PENDING)
+  riskScore      Int?          @map("risk_score")
+  teeAttestation String?       @map("tee_attestation")
+  initiatedAt    DateTime      @default(now()) @map("initiated_at")
+  screenedAt     DateTime?     @map("screened_at")
+  settledAt      DateTime?     @map("settled_at")
+  refundedAt     DateTime?     @map("refunded_at")
+  blockNumber    BigInt?       @map("block_number")
+  txHash         String?       @map("tx_hash")
+  businessId     String        @map("business_id")
+
+  business         Business                @relation(fields: [businessId], references: [id])
+  screenings       ComplianceScreening[]
+  travelRuleRecord TravelRuleRecord?
+
+  @@index([sender])
+  @@index([recipient])
+  @@index([status])
+  @@index([initiatedAt])
+  @@index([businessId])
+  @@map("payments")
+}
+
+model ComplianceScreening {
+  id                 String           @id @default(uuid())
+  paymentId          String           @map("payment_id")
+  sanctionsClear     Boolean          @map("sanctions_clear")
+  amlRiskScore       Int              @map("aml_risk_score")
+  travelRuleCompliant Boolean         @map("travel_rule_compliant")
+  status             ComplianceStatus @default(PENDING)
+  flagReason         String?          @map("flag_reason")
+  investigationHash  String?          @map("investigation_hash")
+  screenedBy         String           @map("screened_by") // TEE node address
+  screeningDuration  Int              @map("screening_duration") // milliseconds
+  createdAt          DateTime         @default(now()) @map("created_at")
+
+  payment Payment @relation(fields: [paymentId], references: [paymentId])
+
+  @@index([paymentId])
+  @@index([status])
+  @@map("compliance_screenings")
+}
+
+model AuditLog {
+  id           String    @id @default(uuid())
+  eventId      String    @unique @map("event_id") // deterministic hash
+  eventType    EventType @map("event_type")
+  actor        String
+  description  String
+  severity     Severity  @default(INFO)
+  blockNumber  BigInt?   @map("block_number")
+  txHash       String?   @map("tx_hash")
+  previousHash String?   @map("previous_hash")
+  metadata     Json?
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  @@index([eventType])
+  @@index([actor])
+  @@index([severity])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model TravelRuleRecord {
+  id              String   @id @default(uuid())
+  paymentId       String   @unique @map("payment_id")
+  originatorHash  String   @map("originator_hash")
+  beneficiaryHash String   @map("beneficiary_hash")
+  amount          Decimal  @db.Decimal(36, 18)
+  currency        String
+  shared          Boolean  @default(false)
+  sharedWith      String[] @map("shared_with")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  payment Payment @relation(fields: [paymentId], references: [paymentId])
+
+  @@map("travel_rule_records")
+}
+
+model TEENode {
+  id               String        @id @default(uuid())
+  address          String        @unique
+  status           TEENodeStatus @default(ACTIVE)
+  lastHeartbeat    DateTime?     @map("last_heartbeat")
+  attestationValid Boolean       @default(false) @map("attestation_valid")
+  registeredAt     DateTime      @default(now()) @map("registered_at")
+
+  @@index([status])
+  @@map("tee_nodes")
+}
+
+model APIKey {
+  id         String       @id @default(uuid())
+  businessId String       @map("business_id")
+  keyHash    String       @unique @map("key_hash")
+  name       String
+  lastUsed   DateTime?    @map("last_used")
+  status     APIKeyStatus @default(ACTIVE)
+  createdAt  DateTime     @default(now()) @map("created_at")
+  revokedAt  DateTime?    @map("revoked_at")
+
+  business Business @relation(fields: [businessId], references: [id])
+
+  @@index([businessId])
+  @@map("api_keys")
+}
+
+// ─── Treasury ───────────────────────────────────────────────────────────────
+
+enum ProposalStatus {
+  PENDING
+  APPROVED
+  EXECUTED
+  REJECTED
+  EXPIRED
+}
+
+enum ProposalType {
+  TRANSFER
+  POLICY_CHANGE
+  YIELD_ALLOCATION
+  EMERGENCY
+}
+
+model TreasuryProposal {
+  id            String         @id @default(uuid())
+  type          ProposalType
+  title         String
+  description   String
+  amount        Decimal?       @db.Decimal(36, 18)
+  currency      String?
+  recipient     String?
+  status        ProposalStatus @default(PENDING)
+  requiredSigs  Int            @map("required_sigs")
+  currentSigs   Int            @default(0) @map("current_sigs")
+  signers       String[]
+  approvedBy    String[]       @map("approved_by")
+  timelockUntil DateTime?      @map("timelock_until")
+  executedAt    DateTime?      @map("executed_at")
+  createdBy     String         @map("created_by")
+  businessId    String         @map("business_id")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  expiresAt     DateTime       @map("expires_at")
+  metadata      Json?
+
+  @@index([status])
+  @@index([createdBy])
+  @@index([businessId])
+  @@map("treasury_proposals")
+}
+
+model SpendingPolicy {
+  id            String   @id @default(uuid())
+  category      String
+  dailyLimit    Decimal  @map("daily_limit") @db.Decimal(36, 18)
+  monthlyLimit  Decimal  @map("monthly_limit") @db.Decimal(36, 18)
+  requiresMultiSig Boolean @default(false) @map("requires_multi_sig")
+  approvalThreshold Int   @default(1) @map("approval_threshold")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("spending_policies")
+}
+
+model YieldStrategy {
+  id             String   @id @default(uuid())
+  name           String
+  protocol       String
+  apy            Decimal  @db.Decimal(10, 4)
+  allocatedAmount Decimal @map("allocated_amount") @db.Decimal(36, 18)
+  currency       String
+  riskLevel      String   @map("risk_level")
+  isActive       Boolean  @default(true) @map("is_active")
+  lastHarvestAt  DateTime? @map("last_harvest_at")
+  totalYieldEarned Decimal @default(0) @map("total_yield_earned") @db.Decimal(36, 18)
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@map("yield_strategies")
+}
+
+// ─── Liquidity Pools ────────────────────────────────────────────────────────
+
+model LiquidityPool {
+  id            String   @id @default(uuid())
+  tokenA        String   @map("token_a")
+  tokenB        String   @map("token_b")
+  reserveA      Decimal  @map("reserve_a") @db.Decimal(36, 18)
+  reserveB      Decimal  @map("reserve_b") @db.Decimal(36, 18)
+  totalLiquidity Decimal @map("total_liquidity") @db.Decimal(36, 18)
+  feeRate       Decimal  @map("fee_rate") @db.Decimal(10, 6)
+  volume24h     Decimal  @default(0) @map("volume_24h") @db.Decimal(36, 18)
+  feesCollected Decimal  @default(0) @map("fees_collected") @db.Decimal(36, 18)
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  positions LPPosition[]
+
+  @@unique([tokenA, tokenB])
+  @@map("liquidity_pools")
+}
+
+model LPPosition {
+  id           String   @id @default(uuid())
+  poolId       String   @map("pool_id")
+  provider     String
+  liquidity    Decimal  @db.Decimal(36, 18)
+  lowerTick    Int      @map("lower_tick")
+  upperTick    Int      @map("upper_tick")
+  feesEarned   Decimal  @default(0) @map("fees_earned") @db.Decimal(36, 18)
+  createdAt    DateTime @default(now()) @map("created_at")
+
+  pool LiquidityPool @relation(fields: [poolId], references: [id])
+
+  @@index([poolId])
+  @@index([provider])
+  @@map("lp_positions")
+}
+
+// ─── Payment Streams ────────────────────────────────────────────────────────
+
+enum StreamStatus {
+  ACTIVE
+  PAUSED
+  COMPLETED
+  CANCELLED
+}
+
+model PaymentStream {
+  id           String       @id @default(uuid())
+  sender       String
+  recipient    String
+  totalAmount  Decimal      @map("total_amount") @db.Decimal(36, 18)
+  ratePerSecond Decimal     @map("rate_per_second") @db.Decimal(36, 18)
+  currency     String
+  startTime    DateTime     @map("start_time")
+  endTime      DateTime     @map("end_time")
+  cliffEnd     DateTime?    @map("cliff_end")
+  withdrawn    Decimal      @default(0) @db.Decimal(36, 18)
+  status       StreamStatus @default(ACTIVE)
+  purpose      String?
+  createdAt    DateTime     @default(now()) @map("created_at")
+  pausedAt     DateTime?    @map("paused_at")
+
+  @@index([sender])
+  @@index([recipient])
+  @@index([status])
+  @@map("payment_streams")
+}
+
+// ─── FX Hedging ─────────────────────────────────────────────────────────────
+
+enum HedgeType {
+  FORWARD
+  OPTION
+  SWAP
+}
+
+enum HedgeStatus {
+  OPEN
+  CLOSED
+  EXPIRED
+  EXERCISED
+}
+
+model FXHedge {
+  id           String      @id @default(uuid())
+  businessId   String      @map("business_id")
+  type         HedgeType
+  baseCurrency String      @map("base_currency")
+  quoteCurrency String     @map("quote_currency")
+  notional     Decimal     @db.Decimal(36, 18)
+  strikeRate   Decimal     @map("strike_rate") @db.Decimal(18, 8)
+  spotRate     Decimal     @map("spot_rate") @db.Decimal(18, 8)
+  premium      Decimal?    @db.Decimal(36, 18)
+  maturityDate DateTime    @map("maturity_date")
+  status       HedgeStatus @default(OPEN)
+  pnl          Decimal?    @db.Decimal(36, 18)
+  createdAt    DateTime    @default(now()) @map("created_at")
+  closedAt     DateTime?   @map("closed_at")
+
+  @@index([businessId])
+  @@index([status])
+  @@map("fx_hedges")
+}
+
+// ─── Invoice Financing ──────────────────────────────────────────────────────
+
+enum InvoiceStatus {
+  DRAFT
+  SUBMITTED
+  FINANCED
+  SETTLED
+  OVERDUE
+  DISPUTED
+  WRITTEN_OFF
+}
+
+model Invoice {
+  id             String        @id @default(uuid())
+  invoiceNumber  String        @unique @map("invoice_number")
+  issuer         String
+  debtor         String
+  amount         Decimal       @db.Decimal(36, 18)
+  currency       String
+  issueDate      DateTime      @map("issue_date")
+  dueDate        DateTime      @map("due_date")
+  status         InvoiceStatus @default(DRAFT)
+  financedAmount Decimal?      @map("financed_amount") @db.Decimal(36, 18)
+  discountRate   Decimal?      @map("discount_rate") @db.Decimal(10, 4)
+  creditScore    String?       @map("credit_score")
+  settledAt      DateTime?     @map("settled_at")
+  disputeReason  String?       @map("dispute_reason")
+  createdAt      DateTime      @default(now()) @map("created_at")
+  metadata       Json?
+
+  @@index([issuer])
+  @@index([debtor])
+  @@index([status])
+  @@index([dueDate])
+  @@map("invoices")
+}
+
+model CreditScore {
+  id             String   @id @default(uuid())
+  businessId     String   @unique @map("business_id")
+  score          Int
+  grade          String
+  paymentHistory Decimal  @map("payment_history") @db.Decimal(5, 2)
+  avgDaysLate    Decimal  @map("avg_days_late") @db.Decimal(10, 2)
+  defaultRate    Decimal  @map("default_rate") @db.Decimal(5, 4)
+  totalInvoices  Int      @map("total_invoices")
+  lastUpdated    DateTime @map("last_updated") @updatedAt
+
+  @@map("credit_scores")
+}
+
+// ─── Cross-Chain ────────────────────────────────────────────────────────────
+
+enum TransferStatus {
+  INITIATED
+  RELAYING
+  CONFIRMING
+  COMPLETED
+  FAILED
+  STUCK
+  RECOVERED
+}
+
+model CrossChainTransfer {
+  id              String         @id @default(uuid())
+  sourceChain     String         @map("source_chain")
+  destChain       String         @map("dest_chain")
+  sender          String
+  recipient       String
+  amount          Decimal        @db.Decimal(36, 18)
+  currency        String
+  status          TransferStatus @default(INITIATED)
+  sourceTxHash    String?        @map("source_tx_hash")
+  destTxHash      String?        @map("dest_tx_hash")
+  relayNode       String?        @map("relay_node")
+  bridgeFee       Decimal?       @map("bridge_fee") @db.Decimal(36, 18)
+  estimatedTime   Int?           @map("estimated_time_secs")
+  initiatedAt     DateTime       @default(now()) @map("initiated_at")
+  completedAt     DateTime?      @map("completed_at")
+  metadata        Json?
+
+  @@index([sourceChain, destChain])
+  @@index([sender])
+  @@index([status])
+  @@map("crosschain_transfers")
+}
+
+model RelayNode {
+  id            String   @id @default(uuid())
+  address       String   @unique
+  chains        String[]
+  stake         Decimal  @db.Decimal(36, 18)
+  successRate   Decimal  @map("success_rate") @db.Decimal(5, 4)
+  avgLatency    Int      @map("avg_latency_ms")
+  totalRelayed  Int      @default(0) @map("total_relayed")
+  isActive      Boolean  @default(true) @map("is_active")
+  registeredAt  DateTime @default(now()) @map("registered_at")
+
+  @@map("relay_nodes")
+}
+
+// ─── Regulatory Reporting ───────────────────────────────────────────────────
+
+enum ReportStatus {
+  DRAFT
+  GENERATED
+  SUBMITTED
+  ACKNOWLEDGED
+  REJECTED_BY_REGULATOR
+}
+
+model RegulatoryReport {
+  id             String       @id @default(uuid())
+  templateId     String       @map("template_id")
+  businessId     String       @map("business_id")
+  jurisdiction   String
+  reportType     String       @map("report_type")
+  periodStart    DateTime     @map("period_start")
+  periodEnd      DateTime     @map("period_end")
+  status         ReportStatus @default(DRAFT)
+  contentHash    String?      @map("content_hash")
+  submittedAt    DateTime?    @map("submitted_at")
+  submittedBy    String?      @map("submitted_by")
+  regulatorRef   String?      @map("regulator_ref")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  metadata       Json?
+
+  @@index([businessId])
+  @@index([jurisdiction])
+  @@index([status])
+  @@map("regulatory_reports")
+}
+
+// ─── AI Compliance ──────────────────────────────────────────────────────────
+
+model AIDecision {
+  id             String   @id @default(uuid())
+  modelId        String   @map("model_id")
+  modelVersion   String   @map("model_version")
+  paymentId      String   @map("payment_id")
+  decision       String
+  confidence     Decimal  @db.Decimal(5, 4)
+  riskScore      Int      @map("risk_score")
+  explanation    String
+  features       Json
+  escalated      Boolean  @default(false)
+  overriddenBy   String?  @map("overridden_by")
+  overrideReason String?  @map("override_reason")
+  createdAt      DateTime @default(now()) @map("created_at")
+
+  @@index([modelId])
+  @@index([paymentId])
+  @@index([escalated])
+  @@map("ai_decisions")
+}
+
+model AIModelRegistry {
+  id           String   @id @default(uuid())
+  name         String   @unique
+  version      String
+  type         String
+  accuracy     Decimal  @db.Decimal(5, 4)
+  precision    Decimal  @db.Decimal(5, 4)
+  recall       Decimal  @db.Decimal(5, 4)
+  f1Score      Decimal  @map("f1_score") @db.Decimal(5, 4)
+  isActive     Boolean  @default(true) @map("is_active")
+  lastTrained  DateTime @map("last_trained")
+  totalDecisions Int    @default(0) @map("total_decisions")
+  deployedAt   DateTime @default(now()) @map("deployed_at")
+
+  @@map("ai_model_registry")
+}
+
+// ─── Alerts ─────────────────────────────────────────────────────────────────
+
+enum AlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum AlertStatus {
+  ACTIVE
+  ACKNOWLEDGED
+  RESOLVED
+  DISMISSED
+}
+
+model Alert {
+  id            String        @id @default(uuid())
+  type          String
+  severity      AlertSeverity @default(MEDIUM)
+  status        AlertStatus   @default(ACTIVE)
+  title         String
+  description   String
+  source        String
+  entityId      String?       @map("entity_id")
+  acknowledgedBy String?      @map("acknowledged_by")
+  resolvedBy    String?       @map("resolved_by")
+  resolvedAt    DateTime?     @map("resolved_at")
+  createdAt     DateTime      @default(now()) @map("created_at")
+  metadata      Json?
+
+  @@index([severity])
+  @@index([status])
+  @@index([type])
+  @@index([createdAt])
+  @@map("alerts")
+}

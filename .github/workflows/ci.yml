@@ -1,0 +1,371 @@
+# ============================================================================
+# NoblePay CI Pipeline
+# ============================================================================
+# Branch protection rules (apply via Settings > Branches > main):
+#   - Require status checks to pass before merging:
+#       * backend
+#       * frontend
+#       * contracts
+#       * gateway
+#       * compliance
+#       * security-gate
+#   - Require branches to be up to date before merging
+#   - Require pull request reviews before merging (minimum 1)
+#   - Do not allow bypassing the above settings
+# ============================================================================
+
+name: NoblePay CI
+
+on:
+  push:
+    branches: [main, develop, "release/**"]
+    paths:
+      - "backend/**"
+      - "contracts/**"
+      - "crates/**"
+      - "services/**"
+      - "src/**"
+      - "package.json"
+      - "tsconfig.json"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "backend/**"
+      - "contracts/**"
+      - "crates/**"
+      - "services/**"
+      - "src/**"
+      - "package.json"
+      - "tsconfig.json"
+      - ".github/workflows/ci.yml"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# ---------------------------------------------------------------------------
+# Job: backend — Node.js API with Prisma, lint, tests, coverage enforcement
+# ---------------------------------------------------------------------------
+jobs:
+  backend:
+    name: Backend API
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: noblepay
+          POSTGRES_PASSWORD: noblepay_ci
+          POSTGRES_DB: noblepay
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://noblepay:noblepay_ci@localhost:5432/noblepay
+      SHADOW_DATABASE_URL: postgresql://noblepay:noblepay_ci@localhost:5432/noblepay_shadow
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create shadow database
+        run: PGPASSWORD=noblepay_ci psql -h localhost -U noblepay -d noblepay -c "CREATE DATABASE noblepay_shadow;"
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Validate Prisma schema
+        run: npx prisma validate
+
+      - name: Deploy migration to CI database
+        run: npx prisma migrate deploy
+
+      - name: Check migration status
+        run: npx prisma migrate status
+
+      - name: Check schema drift
+        run: npx prisma migrate diff --from-migrations prisma/migrations --to-schema-datamodel prisma/schema.prisma --shadow-database-url "$SHADOW_DATABASE_URL" --exit-code
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Run tests with coverage
+        run: |
+          npx jest --runInBand --forceExit --detectOpenHandles --coverage \
+            --coverageReporters=text --coverageReporters=json-summary --coverageReporters=lcov
+
+      - name: Enforce security-critical module coverage (>= 90%)
+        run: |
+          echo "Checking coverage for security-critical modules..."
+
+          CRITICAL_MODULES=(
+            "src/middleware/auth"
+            "src/middleware/rbac"
+            "src/services/treasury"
+            "src/services/payment"
+            "src/services/compliance"
+            "src/routes/payments"
+            "src/routes/treasury"
+          )
+
+          COVERAGE_FILE="coverage/coverage-summary.json"
+
+          if [ ! -f "$COVERAGE_FILE" ]; then
+            echo "::error::Coverage summary not found at $COVERAGE_FILE"
+            exit 1
+          fi
+
+          FAILED=0
+
+          for MODULE in "${CRITICAL_MODULES[@]}"; do
+            # Find matching keys in coverage JSON (file paths contain the module path)
+            MATCHING_FILES=$(node -e "
+              const cov = require('./${COVERAGE_FILE}');
+              const matches = Object.keys(cov).filter(k => k !== 'total' && k.includes('${MODULE}'));
+              if (matches.length === 0) {
+                console.log('SKIP');
+              } else {
+                let totalStatements = 0, coveredStatements = 0;
+                let totalBranches = 0, coveredBranches = 0;
+                let totalFunctions = 0, coveredFunctions = 0;
+                let totalLines = 0, coveredLines = 0;
+                for (const m of matches) {
+                  totalStatements += cov[m].statements.total;
+                  coveredStatements += cov[m].statements.covered;
+                  totalBranches += cov[m].branches.total;
+                  coveredBranches += cov[m].branches.covered;
+                  totalFunctions += cov[m].functions.total;
+                  coveredFunctions += cov[m].functions.covered;
+                  totalLines += cov[m].lines.total;
+                  coveredLines += cov[m].lines.covered;
+                }
+                const stmtPct = totalStatements > 0 ? (coveredStatements / totalStatements * 100).toFixed(2) : 100;
+                const brPct = totalBranches > 0 ? (coveredBranches / totalBranches * 100).toFixed(2) : 100;
+                const fnPct = totalFunctions > 0 ? (coveredFunctions / totalFunctions * 100).toFixed(2) : 100;
+                const lnPct = totalLines > 0 ? (coveredLines / totalLines * 100).toFixed(2) : 100;
+                console.log(stmtPct + '|' + brPct + '|' + fnPct + '|' + lnPct);
+              }
+            ")
+
+            if [ "$MATCHING_FILES" = "SKIP" ]; then
+              echo "  Warning: ${MODULE} — no coverage data found (file may not exist yet), skipping"
+              continue
+            fi
+
+            IFS='|' read -r STMT_PCT BR_PCT FN_PCT LN_PCT <<< "$MATCHING_FILES"
+            THRESHOLD=90
+
+            echo "  ${MODULE}:"
+            echo "    statements=${STMT_PCT}% branches=${BR_PCT}% functions=${FN_PCT}% lines=${LN_PCT}%"
+
+            for METRIC_NAME in STMT_PCT BR_PCT FN_PCT LN_PCT; do
+              METRIC_VAL=${!METRIC_NAME}
+              BELOW=$(node -e "console.log(parseFloat('${METRIC_VAL}') < ${THRESHOLD} ? 'yes' : 'no')")
+              if [ "$BELOW" = "yes" ]; then
+                echo "::error::${MODULE} ${METRIC_NAME} coverage is ${METRIC_VAL}% (threshold: ${THRESHOLD}%)"
+                FAILED=1
+              fi
+            done
+          done
+
+          if [ "$FAILED" -eq 1 ]; then
+            echo ""
+            echo "::error::Security-critical module coverage below 90% threshold. Fix coverage before merging."
+            exit 1
+          fi
+
+          echo ""
+          echo "All security-critical modules meet the 90% coverage threshold."
+
+  # ---------------------------------------------------------------------------
+  # Job: frontend — Next.js build, lint, type-check, and tests
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run type-check
+
+      - name: Build
+        run: npm run build
+
+      - name: Run tests
+        run: npm run test:ci
+
+  # ---------------------------------------------------------------------------
+  # Job: contracts — Hardhat compile, test, and exploit simulation
+  # ---------------------------------------------------------------------------
+  contracts:
+    name: Smart Contracts
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: contracts
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: contracts/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Compile contracts
+        run: npx hardhat compile
+
+      - name: Run contract tests
+        run: npx hardhat test
+
+      - name: Run exploit simulation tests
+        run: npx hardhat test test/ExploitSimulations.test.js
+
+  # ---------------------------------------------------------------------------
+  # Job: gateway — Go API gateway with race detection
+  # ---------------------------------------------------------------------------
+  gateway:
+    name: Gateway (Go)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/gateway
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache-dependency-path: services/gateway/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Run tests with race detector
+        run: go test ./... -v -race -count=1 -timeout 300s
+
+  # ---------------------------------------------------------------------------
+  # Job: compliance — Rust TEE compliance engine
+  # ---------------------------------------------------------------------------
+  compliance:
+    name: Compliance Engine (Rust)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/noblepay-compliance
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/noblepay-compliance/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('crates/noblepay-compliance/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check (default features)
+        run: cargo check
+
+      - name: Run tests (default features)
+        run: cargo test
+
+      - name: Run tests (mock-tee feature)
+        run: cargo test --features mock-tee
+
+      - name: Clippy lint
+        run: cargo clippy -- -D warnings
+
+  # ---------------------------------------------------------------------------
+  # Job: security-gate — Final gate ensuring all CI jobs passed
+  # ---------------------------------------------------------------------------
+  security-gate:
+    name: Security Gate
+    runs-on: ubuntu-latest
+    needs: [backend, frontend, contracts, gateway, compliance]
+    if: always()
+
+    steps:
+      - name: Evaluate job results
+        run: |
+          echo "============================================"
+          echo "  NoblePay CI Security Gate"
+          echo "============================================"
+          echo ""
+          echo "Job Results:"
+          echo "  backend:    ${{ needs.backend.result }}"
+          echo "  frontend:   ${{ needs.frontend.result }}"
+          echo "  contracts:  ${{ needs.contracts.result }}"
+          echo "  gateway:    ${{ needs.gateway.result }}"
+          echo "  compliance: ${{ needs.compliance.result }}"
+          echo ""
+
+          if [[ "${{ needs.backend.result }}" != "success" || \
+                "${{ needs.frontend.result }}" != "success" || \
+                "${{ needs.contracts.result }}" != "success" || \
+                "${{ needs.gateway.result }}" != "success" || \
+                "${{ needs.compliance.result }}" != "success" ]]; then
+            echo "::error::One or more required CI jobs failed. All jobs must pass before merge."
+            exit 1
+          fi
+
+          echo "All CI jobs passed. Merge is allowed."

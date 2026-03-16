@@ -1,0 +1,33 @@
+[package]
+name = "noblepay-compliance"
+version = "0.1.0"
+edition = "2021"
+description = "NoblePay TEE Compliance Engine — sanctions screening, AML risk scoring, and travel rule verification inside AWS Nitro Enclaves"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+sha3 = "0.10"
+hex = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+anyhow = "1.0"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+reqwest = { version = "0.11", features = ["json"] }
+dashmap = "5.5"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+tokio = { version = "1.35", features = ["test-util"] }
+
+[features]
+default = []
+mock-tee = []
+nitro = []
+sgx = []

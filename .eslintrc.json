@@ -1,0 +1,25 @@
+{
+  "extends": "next/core-web-vitals",
+  "rules": {
+    "@next/next/no-img-element": "warn"
+  },
+  "overrides": [
+    {
+      "files": ["**/__tests__/**/*", "**/*.test.{ts,tsx}"],
+      "plugins": ["jest-dom", "testing-library"],
+      "extends": [
+        "plugin:jest-dom/recommended",
+        "plugin:testing-library/react"
+      ],
+      "rules": {
+        "testing-library/no-node-access": "off",
+        "testing-library/no-container": "off",
+        "testing-library/no-unnecessary-act": "off",
+        "jest-dom/prefer-empty": "off",
+        "jest-dom/prefer-to-have-style": "off",
+        "jest-dom/prefer-to-have-class": "off",
+        "jest-dom/prefer-in-document": "off"
+      }
+    }
+  ]
+}
