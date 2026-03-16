@@ -49,15 +49,6 @@ const nextConfig = {
     ];
   },
 
-  async rewrites() {
-    return [
-      {
-        source: '/api/:path*',
-        destination: 'http://localhost:3003/v1/:path*',
-      },
-    ];
-  },
-
   webpack: (config, { isServer, dev }) => {
     if (!isServer) {
       config.resolve.fallback = {
@@ -70,7 +61,6 @@ const nextConfig = {
         os: false,
       };
 
-      // Suppress MetaMask SDK React Native import warning
       config.resolve.alias = {
         ...config.resolve.alias,
         '@react-native-async-storage/async-storage': false,
