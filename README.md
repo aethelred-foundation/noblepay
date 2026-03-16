@@ -16,7 +16,7 @@
     <a href="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white"><img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
   </p>
   <p>
-    <a href="https://thenoble.one">Launch App</a> &middot;
+    <a href="https://app.thenoble.one">Launch App</a> &middot;
     <a href="https://docs.thenoble.one">Documentation</a> &middot;
     <a href="https://api.thenoble.one/docs">API Reference</a> &middot;
     <a href="https://discord.gg/aethelred">Discord</a>
