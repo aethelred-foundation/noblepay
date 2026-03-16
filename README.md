@@ -6,7 +6,7 @@
     <a href="https://github.com/aethelred-foundation/noblepay/actions/workflows/ci-cd.yml"><img src="https://img.shields.io/github/actions/workflow/status/aethelred-foundation/noblepay/ci-cd.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
     <a href="https://codecov.io/gh/aethelred-foundation/noblepay"><img src="https://img.shields.io/codecov/c/github/aethelred-foundation/noblepay?style=flat-square&label=coverage" alt="Coverage"></a>
     <a href="security_best_practices_report.md"><img src="https://img.shields.io/badge/audit-12_contracts_reviewed-informational?style=flat-square" alt="Audit"></a>
-    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue?style=flat-square" alt="License"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
   </p>
   <p>
     <a href="https://img.shields.io/badge/TypeScript-5.3-3178C6?style=flat-square&logo=typescript&logoColor=white"><img src="https://img.shields.io/badge/TypeScript-5.3-3178C6?style=flat-square&logo=typescript&logoColor=white" alt="TypeScript"></a>
@@ -16,9 +16,9 @@
     <a href="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white"><img src="https://img.shields.io/badge/Python-3.11-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python"></a>
   </p>
   <p>
-    <a href="https://noblepay.aethelred.io">Launch App</a> &middot;
-    <a href="https://docs.aethelred.io/noblepay">Documentation</a> &middot;
-    <a href="https://api.noblepay.aethelred.io/docs">API Reference</a> &middot;
+    <a href="https://thenoble.one">Launch App</a> &middot;
+    <a href="https://docs.thenoble.one">Documentation</a> &middot;
+    <a href="https://api.thenoble.one/docs">API Reference</a> &middot;
     <a href="https://discord.gg/aethelred">Discord</a>
   </p>
 </div>
@@ -406,14 +406,14 @@ POST /v1/invoices/finance            # Submit invoice for financing
 ### WebSocket
 
 ```javascript
-const ws = new WebSocket('wss://api.noblepay.aethelred.io/ws');
+const ws = new WebSocket('wss://api.thenoble.one/ws');
 
 ws.send(JSON.stringify({ method: 'subscribe', channel: 'payments', filter: { business: '0x...' } }));
 ws.send(JSON.stringify({ method: 'subscribe', channel: 'compliance.alerts' }));
 ws.send(JSON.stringify({ method: 'subscribe', channel: 'fx.rates', pairs: ['USD/EUR', 'GBP/JPY'] }));
 ```
 
-Full reference: [api.noblepay.aethelred.io/docs](https://api.noblepay.aethelred.io/docs)
+Full reference: [api.thenoble.one/docs](https://api.thenoble.one/docs)
 
 ---
 
@@ -431,7 +431,7 @@ We welcome contributions. Please see the [Contributing Guide](CONTRIBUTING.md) b
 
 ## License
 
-MIT — see [LICENSE](LICENSE) for details.
+Apache 2.0 — see [LICENSE](LICENSE) for details.
 
 ---
 
@@ -442,7 +442,7 @@ MIT — see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <a href="https://docs.aethelred.io/noblepay">Docs</a> &middot;
+  <a href="https://docs.thenoble.one">Docs</a> &middot;
   <a href="https://discord.gg/aethelred">Discord</a> &middot;
   <a href="https://twitter.com/aethelred">Twitter</a> &middot;
   <a href="mailto:support@aethelred.io">Support</a>
