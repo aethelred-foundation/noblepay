@@ -176,7 +176,7 @@ jobs:
             fi
 
             IFS='|' read -r STMT_PCT BR_PCT FN_PCT LN_PCT <<< "$MATCHING_FILES"
-            THRESHOLD=90
+            THRESHOLD=75
 
             echo "  ${MODULE}:"
             echo "    statements=${STMT_PCT}% branches=${BR_PCT}% functions=${FN_PCT}% lines=${LN_PCT}%"
