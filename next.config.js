@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  turbopack: false,
+  
 
   images: {
     domains: ['localhost', 'api.aethelred.io', 'noblepay.aethelred.network'],
