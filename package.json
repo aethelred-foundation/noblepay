@@ -7,7 +7,7 @@
     "dev": "next dev -p ${PORT:-3002}",
     "build": "next build",
     "start": "next start -p 3002",
-    "lint": "next lint",
+    "lint": "eslint src/ --ext .ts,.tsx,.js,.jsx",
     "lint:fix": "next lint --fix",
     "type-check": "tsc --noEmit",
     "format": "prettier --write .",
