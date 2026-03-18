@@ -3,7 +3,7 @@
   <h1>NoblePay</h1>
   <p><strong>Enterprise cross-border payments. TEE compliance. On-chain settlement.</strong></p>
   <p>
-    <a href="https://github.com/aethelred-foundation/noblepay/actions/workflows/ci-cd.yml"><img src="https://img.shields.io/github/actions/workflow/status/aethelred-foundation/noblepay/ci-cd.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
+    <a href="https://github.com/aethelred-foundation/noblepay/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/aethelred-foundation/noblepay/ci.yml?branch=main&style=flat-square&label=CI" alt="CI"></a>
     <a href="https://codecov.io/gh/aethelred-foundation/noblepay"><img src="https://img.shields.io/codecov/c/github/aethelred-foundation/noblepay?style=flat-square&label=coverage" alt="Coverage"></a>
     <a href="security_best_practices_report.md"><img src="https://img.shields.io/badge/audit-12_contracts_reviewed-informational?style=flat-square" alt="Audit"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue?style=flat-square" alt="License"></a>
