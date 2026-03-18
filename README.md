@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="Noble Pay Logo-Light.jpg" alt="NoblePay" width="200" />
+  <img src="README-logo.png" alt="NoblePay" width="200" />
   <h1>NoblePay</h1>
   <p><strong>Enterprise cross-border payments. TEE compliance. On-chain settlement.</strong></p>
   <p>
