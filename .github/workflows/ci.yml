@@ -193,12 +193,12 @@ jobs:
 
           if [ "$FAILED" -eq 1 ]; then
             echo ""
-            echo "::error::Security-critical module coverage below 90% threshold. Fix coverage before merging."
+            echo "::error::Security-critical module coverage below ${THRESHOLD}% threshold. Fix coverage before merging."
             exit 1
           fi
 
           echo ""
-          echo "All security-critical modules meet the 90% coverage threshold."
+          echo "All security-critical modules meet the ${THRESHOLD}% coverage threshold."
 
   # ---------------------------------------------------------------------------
   # Job: frontend — Next.js build, lint, type-check, and tests
@@ -231,7 +231,7 @@ jobs:
         run: npm run build
 
       - name: Run tests
-        run: npm run test:ci || true
+        run: npm run test:ci
 
   # ---------------------------------------------------------------------------
   # Job: contracts — Hardhat compile, test, and exploit simulation
@@ -293,7 +293,7 @@ jobs:
         run: go vet ./...
 
       - name: Run tests with race detector
-        run: go test ./... -v -race -count=1 -timeout 300s -run "^(?!TestExploit_TimestampEdgeCases).*$" || true
+        run: go test ./... -v -race -count=1 -timeout 300s
 
   # ---------------------------------------------------------------------------
   # Job: compliance — Rust TEE compliance engine
