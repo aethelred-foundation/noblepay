@@ -20,3 +20,6 @@ coverage/
 
 # Debug
 npm-debug.log*
+
+# Vercel
+.vercel/

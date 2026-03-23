@@ -4,8 +4,12 @@ const nextConfig = {
   
 
   images: {
-    domains: ['localhost', 'api.aethelred.io', 'noblepay.aethelred.network'],
-    formats: ['image/webp', 'image/avif'],
+    remotePatterns: [
+      { protocol: 'https', hostname: 'api.aethelred.io' },
+      { protocol: 'https', hostname: '*.aethelred.network' },
+      { protocol: 'https', hostname: '*.aethelred.io' },
+    ],
+    formats: ['image/avif', 'image/webp'],
     deviceSizes: [640, 750, 828, 1080, 1200, 1920, 2048, 3840],
     imageSizes: [16, 32, 48, 64, 96, 128, 256, 384],
   },
@@ -13,8 +17,7 @@ const nextConfig = {
   compress: true,
 
   experimental: {
-    externalDir: true,
-    scrollRestoration: true,
+    optimizePackageImports: ['lucide-react', 'recharts'],
   },
 
   typescript: {
