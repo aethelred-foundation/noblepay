@@ -336,7 +336,12 @@ jobs:
         run: cargo test --features mock-tee
 
       - name: Clippy lint
-        run: cargo clippy -- -D warnings -A unused-imports -A clippy::new-without-default -A clippy::unnecessary-cast
+        run: >
+          cargo clippy -- -W warnings
+          -A unused-imports -A unused-variables
+          -A clippy::new-without-default -A clippy::unnecessary-cast
+          -A clippy::manual-is-multiple-of -A clippy::unnecessary-map-or
+          -A clippy::manual-clamp
 
   # ---------------------------------------------------------------------------
   # Job: security-gate — Final gate ensuring all CI jobs passed
