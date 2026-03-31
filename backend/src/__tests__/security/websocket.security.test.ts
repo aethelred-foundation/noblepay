@@ -48,13 +48,15 @@ function createMockHTTPServer() {
   return {} as any;
 }
 
-function getConnectionHandler(): Function {
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
+function getConnectionHandler(): (...args: unknown[]) => void {
   const entry = mockWSSInstance.on.mock.calls.find((c: any) => c[0] === "connection");
   if (!entry) throw new Error("No connection handler registered on WSS");
   return entry[1];
 }
 
-function getWSHandler(ws: any, event: string): Function {
+// eslint-disable-next-line @typescript-eslint/no-unsafe-function-type
+function getWSHandler(ws: any, event: string): (...args: unknown[]) => void {
   const entry = ws.on.mock.calls.find((c: any) => c[0] === event);
   if (!entry) throw new Error(`No '${event}' handler registered on ws mock`);
   return entry[1];
@@ -62,7 +64,7 @@ function getWSHandler(ws: any, event: string): Function {
 
 /** Connect a client to the service and return helpers. */
 function connectClient(
-  connectionHandler: Function,
+  connectionHandler: (...args: unknown[]) => void,
   opts: { token?: string; ip?: string } = {},
 ) {
   const ws = createMockWS();
