@@ -490,14 +490,12 @@ export class FXService {
     switch (position.type) {
       case "FORWARD":
         return (notional * rateDiff / position.entryRate).toFixed(2);
-      case "OPTION_CALL": {
+      case "OPTION_CALL":
         const callPayoff = Math.max(0, currentRate - (position.strikeRate || position.entryRate));
         return (notional * callPayoff / position.entryRate - parseFloat(position.premium)).toFixed(2);
-      }
-      case "OPTION_PUT": {
+      case "OPTION_PUT":
         const putPayoff = Math.max(0, (position.strikeRate || position.entryRate) - currentRate);
         return (notional * putPayoff / position.entryRate - parseFloat(position.premium)).toFixed(2);
-      }
       default:
         return "0";
     }

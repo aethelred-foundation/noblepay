@@ -1,7 +1,7 @@
 {
   "name": "contracts",
   "version": "1.0.0",
-  "description": "NoblePay Smart Contracts — Cross-border payment and treasury management",
+  "description": "",
   "main": "index.js",
   "scripts": {
     "test": "npx hardhat test",
@@ -9,8 +9,8 @@
     "coverage": "npx hardhat coverage"
   },
   "keywords": [],
-  "author": "Aethelred Foundation",
-  "license": "MIT",
+  "author": "",
+  "license": "ISC",
   "type": "commonjs",
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",

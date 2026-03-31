@@ -176,7 +176,7 @@ jobs:
             fi
 
             IFS='|' read -r STMT_PCT BR_PCT FN_PCT LN_PCT <<< "$MATCHING_FILES"
-            THRESHOLD=50
+            THRESHOLD=90
 
             echo "  ${MODULE}:"
             echo "    statements=${STMT_PCT}% branches=${BR_PCT}% functions=${FN_PCT}% lines=${LN_PCT}%"
@@ -193,12 +193,12 @@ jobs:
 
           if [ "$FAILED" -eq 1 ]; then
             echo ""
-            echo "::error::Security-critical module coverage below ${THRESHOLD}% threshold. Fix coverage before merging."
+            echo "::error::Security-critical module coverage below 90% threshold. Fix coverage before merging."
             exit 1
           fi
 
           echo ""
-          echo "All security-critical modules meet the ${THRESHOLD}% coverage threshold."
+          echo "All security-critical modules meet the 90% coverage threshold."
 
   # ---------------------------------------------------------------------------
   # Job: frontend — Next.js build, lint, type-check, and tests
@@ -219,7 +219,7 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm ci
 
       - name: Lint
         run: npm run lint
@@ -333,7 +333,7 @@ jobs:
         run: cargo test --features mock-tee
 
       - name: Clippy lint
-        run: cargo clippy -- -D clippy::correctness -W clippy::suspicious -W clippy::style -A unused-imports -A unused-variables -A clippy::new-without-default -A clippy::unnecessary-cast
+        run: cargo clippy -- -D warnings
 
   # ---------------------------------------------------------------------------
   # Job: security-gate — Final gate ensuring all CI jobs passed

@@ -48,13 +48,13 @@ function createMockHTTPServer() {
   return {} as any;
 }
 
-function getConnectionHandler(): (...args: unknown[]) => void {
+function getConnectionHandler(): Function {
   const entry = mockWSSInstance.on.mock.calls.find((c: any) => c[0] === "connection");
   if (!entry) throw new Error("No connection handler registered on WSS");
   return entry[1];
 }
 
-function getWSHandler(ws: any, event: string): (...args: unknown[]) => void {
+function getWSHandler(ws: any, event: string): Function {
   const entry = ws.on.mock.calls.find((c: any) => c[0] === event);
   if (!entry) throw new Error(`No '${event}' handler registered on ws mock`);
   return entry[1];
@@ -62,7 +62,7 @@ function getWSHandler(ws: any, event: string): (...args: unknown[]) => void {
 
 /** Connect a client to the service and return helpers. */
 function connectClient(
-  connectionHandler: (...args: unknown[]) => void,
+  connectionHandler: Function,
   opts: { token?: string; ip?: string } = {},
 ) {
   const ws = createMockWS();
