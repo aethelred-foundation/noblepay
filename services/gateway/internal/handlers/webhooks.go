@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"strconv"
 	"sync"
@@ -61,10 +60,15 @@ func verifyTimestamp(tsHeader string) error {
 	if err != nil {
 		return fmt.Errorf("invalid timestamp format")
 	}
+	// Reject obviously invalid timestamps (before 2020 or after 2100)
+	// to avoid time.Duration overflow on extreme values.
+	if ts < 1577836800 || ts > 4102444800 {
+		return fmt.Errorf("timestamp outside valid range")
+	}
 	webhookTime := time.Unix(ts, 0)
 	diff := time.Since(webhookTime)
 	if diff < 0 {
-		diff = time.Duration(math.Abs(float64(diff)))
+		diff = -diff
 	}
 	if diff > webhookTimestampTolerance {
 		return fmt.Errorf("timestamp outside tolerance window")
