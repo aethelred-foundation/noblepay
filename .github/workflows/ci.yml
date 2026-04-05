@@ -204,6 +204,17 @@ jobs:
           echo ""
           echo "All security-critical modules meet the 90% coverage threshold."
 
+      - name: Upload backend coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: backend/coverage/lcov.info
+          flags: backend
+          name: backend-coverage
+          fail_ci_if_error: false
+          disable_search: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
   # ---------------------------------------------------------------------------
   # Job: frontend — Next.js build, lint, type-check, and tests
   # ---------------------------------------------------------------------------
@@ -236,6 +247,17 @@ jobs:
 
       - name: Run tests
         run: npm run test:ci
+
+      - name: Upload frontend coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage/lcov.info
+          flags: frontend
+          name: frontend-coverage
+          fail_ci_if_error: false
+          disable_search: true
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   # ---------------------------------------------------------------------------
   # Job: contracts — Hardhat compile, test, and exploit simulation
