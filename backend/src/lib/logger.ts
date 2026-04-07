@@ -61,3 +61,27 @@ export function createRequestLogger(correlationId: string) {
 }
 
 export type RequestLogger = ReturnType<typeof createRequestLogger>;
+
+function maskValue(value: string, prefix: number, suffix: number): string {
+  if (value.length <= prefix + suffix) {
+    return `${value.slice(0, Math.min(2, value.length))}***`;
+  }
+
+  return `${value.slice(0, prefix)}...${value.slice(-suffix)}`;
+}
+
+export function maskIdentifier(value?: string | null): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return maskValue(value, 6, 4);
+}
+
+export function maskTransactionHash(value?: string | null): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  return maskValue(value, 10, 6);
+}

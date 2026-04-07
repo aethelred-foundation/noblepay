@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 /**
  * BranchMax5 — targets modifier else-paths, not-found guards, and
@@ -37,49 +39,49 @@ describe("BranchMax5", function () {
     // Guard: if (inv.issuedAt == 0) revert InvoiceNotFound() — financeInvoice
     it("financeInvoice with non-existent invoice reverts", async function () {
       const { inv, factor } = await loadFixture(deployIF);
-      await expect(inv.connect(factor).financeInvoice(FAKE_ID, 1000, 500)).to.be.reverted;
+      await expect(inv.connect(factor).financeInvoice(FAKE_ID, 1000, 500)).to.be.revert(ethers);
     });
 
     // Guard: if (inv.issuedAt == 0) — repayInvoice
     it("repayInvoice with non-existent invoice reverts", async function () {
       const { inv, debtor } = await loadFixture(deployIF);
-      await expect(inv.connect(debtor).repayInvoice(FAKE_ID, 1000)).to.be.reverted;
+      await expect(inv.connect(debtor).repayInvoice(FAKE_ID, 1000)).to.be.revert(ethers);
     });
 
     // Guard: if (inv.issuedAt == 0) — markOverdue
     it("markOverdue with non-existent invoice reverts", async function () {
       const { inv, creditor } = await loadFixture(deployIF);
-      await expect(inv.connect(creditor).markOverdue(FAKE_ID)).to.be.reverted;
+      await expect(inv.connect(creditor).markOverdue(FAKE_ID)).to.be.revert(ethers);
     });
 
     // Guard: if (inv.issuedAt == 0) — initiateDispute
     it("initiateDispute with non-existent invoice reverts", async function () {
       const { inv, debtor } = await loadFixture(deployIF);
-      await expect(inv.connect(debtor).initiateDispute(FAKE_ID, "test")).to.be.reverted;
+      await expect(inv.connect(debtor).initiateDispute(FAKE_ID, "test")).to.be.revert(ethers);
     });
 
     // Guard: if (d.initiatedAt == 0) — resolveDispute
     it("resolveDispute with non-existent dispute reverts", async function () {
       const { inv, arbiter } = await loadFixture(deployIF);
-      await expect(inv.connect(arbiter).resolveDispute(FAKE_ID, 1, 0, 0)).to.be.reverted;
+      await expect(inv.connect(arbiter).resolveDispute(FAKE_ID, 1, 0, 0)).to.be.revert(ethers);
     });
 
     // Guard: if (inv.issuedAt == 0) — depositCollateral
     it("depositCollateral with non-existent invoice reverts", async function () {
       const { inv, usdc, debtor } = await loadFixture(deployIF);
-      await expect(inv.connect(debtor).depositCollateral(FAKE_ID, usdc.target, 1000)).to.be.reverted;
+      await expect(inv.connect(debtor).depositCollateral(FAKE_ID, usdc.target, 1000)).to.be.revert(ethers);
     });
 
     // Guard: if (inv.issuedAt == 0) — releaseCollateral
     it("releaseCollateral with non-existent invoice reverts", async function () {
       const { inv, debtor } = await loadFixture(deployIF);
-      await expect(inv.connect(debtor).releaseCollateral(FAKE_ID, debtor.address)).to.be.reverted;
+      await expect(inv.connect(debtor).releaseCollateral(FAKE_ID, debtor.address)).to.be.revert(ethers);
     });
 
     // Guard: if (inv.issuedAt == 0) — cancelInvoice
     it("cancelInvoice with non-existent invoice reverts", async function () {
       const { inv, creditor } = await loadFixture(deployIF);
-      await expect(inv.connect(creditor).cancelInvoice(FAKE_ID)).to.be.reverted;
+      await expect(inv.connect(creditor).cancelInvoice(FAKE_ID)).to.be.revert(ethers);
     });
 
     // Guard: if (parent.issuedAt == 0) — createChainedInvoice
@@ -88,7 +90,7 @@ describe("BranchMax5", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(debtor).createChainedInvoice(
         FAKE_ID, debtor.address, FACE, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // depositCollateral with unsupported token
@@ -100,7 +102,7 @@ describe("BranchMax5", function () {
       );
       const r = await tx.wait();
       const invId = r.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated").args[0];
-      await expect(inv.connect(debtor).depositCollateral(invId, other.address, 1000)).to.be.reverted;
+      await expect(inv.connect(debtor).depositCollateral(invId, other.address, 1000)).to.be.revert(ethers);
     });
 
     // releaseCollateral already released
@@ -116,7 +118,7 @@ describe("BranchMax5", function () {
       await inv.connect(creditor).cancelInvoice(invId);
       await inv.connect(debtor).releaseCollateral(invId, debtor.address);
       // Try again - should revert
-      await expect(inv.connect(debtor).releaseCollateral(invId, debtor.address)).to.be.reverted;
+      await expect(inv.connect(debtor).releaseCollateral(invId, debtor.address)).to.be.revert(ethers);
     });
 
     // releaseCollateral with zero collateral
@@ -129,7 +131,7 @@ describe("BranchMax5", function () {
       const r = await tx.wait();
       const invId = r.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated").args[0];
       await inv.connect(creditor).cancelInvoice(invId);
-      await expect(inv.connect(debtor).releaseCollateral(invId, debtor.address)).to.be.reverted;
+      await expect(inv.connect(debtor).releaseCollateral(invId, debtor.address)).to.be.revert(ethers);
     });
 
     // batch create invoices with unsupported token
@@ -138,7 +140,7 @@ describe("BranchMax5", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).batchCreateInvoices(
         [debtor.address], [FACE], other.address, [mat], [DOC], 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // batch create invoices with grace period too long
@@ -147,7 +149,7 @@ describe("BranchMax5", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).batchCreateInvoices(
         [debtor.address], [FACE], usdc.target, [mat], [DOC], 91n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // batch create invoices with excessive penalty
@@ -156,7 +158,7 @@ describe("BranchMax5", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).batchCreateInvoices(
         [debtor.address], [FACE], usdc.target, [mat], [DOC], 7n * 86400n, 2001
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // chained invoice — face value 0
@@ -171,7 +173,7 @@ describe("BranchMax5", function () {
       const mat2 = BigInt(await time.latest()) + 60n * 86400n;
       await expect(inv.connect(debtor).createChainedInvoice(
         invId, creditor.address, 0, mat2, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // chained invoice — maturity in past
@@ -185,7 +187,7 @@ describe("BranchMax5", function () {
       const invId = r.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated").args[0];
       await expect(inv.connect(debtor).createChainedInvoice(
         invId, creditor.address, FACE, 1, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // chained invoice — excessive grace
@@ -200,7 +202,7 @@ describe("BranchMax5", function () {
       const mat2 = BigInt(await time.latest()) + 60n * 86400n;
       await expect(inv.connect(debtor).createChainedInvoice(
         invId, creditor.address, FACE, mat2, DOC, 91n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // chained invoice — excessive penalty
@@ -215,7 +217,7 @@ describe("BranchMax5", function () {
       const mat2 = BigInt(await time.latest()) + 60n * 86400n;
       await expect(inv.connect(debtor).createChainedInvoice(
         invId, creditor.address, FACE, mat2, DOC, 7n * 86400n, 2001
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     // resolve dispute with PENDING outcome reverts
@@ -232,7 +234,7 @@ describe("BranchMax5", function () {
       const dr = await dtx.wait();
       const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DisputeInitiated");
       // Try resolve with PENDING (0) — should revert
-      await expect(inv.connect(arbiter).resolveDispute(dev.args[0], 0, 0, 0)).to.be.reverted;
+      await expect(inv.connect(arbiter).resolveDispute(dev.args[0], 0, 0, 0)).to.be.revert(ethers);
     });
 
     // dispute on already-disputed reverts
@@ -250,7 +252,7 @@ describe("BranchMax5", function () {
       const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DisputeInitiated");
       await inv.connect(arbiter).resolveDispute(dev.args[0], 1, 0, 0);
       // Try again
-      await expect(inv.connect(arbiter).resolveDispute(dev.args[0], 1, 0, 0)).to.be.reverted;
+      await expect(inv.connect(arbiter).resolveDispute(dev.args[0], 1, 0, 0)).to.be.revert(ethers);
     });
   });
 
@@ -272,32 +274,32 @@ describe("BranchMax5", function () {
 
     it("approveProposal non-existent reverts", async function () {
       const { mst, s1 } = await loadFixture(deployMST);
-      await expect(mst.connect(s1).approveProposal(FAKE_ID)).to.be.reverted;
+      await expect(mst.connect(s1).approveProposal(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("rejectProposal non-existent reverts", async function () {
       const { mst, s1 } = await loadFixture(deployMST);
-      await expect(mst.connect(s1).rejectProposal(FAKE_ID)).to.be.reverted;
+      await expect(mst.connect(s1).rejectProposal(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("executeProposal non-existent reverts", async function () {
       const { mst, s1 } = await loadFixture(deployMST);
-      await expect(mst.connect(s1).executeProposal(FAKE_ID)).to.be.reverted;
+      await expect(mst.connect(s1).executeProposal(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("cancelProposal non-existent reverts", async function () {
       const { mst, s1 } = await loadFixture(deployMST);
-      await expect(mst.connect(s1).cancelProposal(FAKE_ID)).to.be.reverted;
+      await expect(mst.connect(s1).cancelProposal(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("revokeRecurringPayment non-existent reverts", async function () {
       const { mst, s1 } = await loadFixture(deployMST);
-      await expect(mst.connect(s1).revokeRecurringPayment(FAKE_ID)).to.be.reverted;
+      await expect(mst.connect(s1).revokeRecurringPayment(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("executeRecurringPayment non-existent reverts", async function () {
       const { mst, s1 } = await loadFixture(deployMST);
-      await expect(mst.connect(s1).executeRecurringPayment(FAKE_ID)).to.be.reverted;
+      await expect(mst.connect(s1).executeRecurringPayment(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("approveYieldProtocol with zero address reverts", async function () {
@@ -341,7 +343,7 @@ describe("BranchMax5", function () {
       await mst.connect(s4).rejectProposal(pid);
       await mst.connect(s5).rejectProposal(pid);
       // Now try to reject again on already-REJECTED proposal
-      await expect(mst.connect(admin).rejectProposal(pid)).to.be.reverted;
+      await expect(mst.connect(admin).rejectProposal(pid)).to.be.revert(ethers);
     });
 
     it("approve non-PENDING proposal reverts", async function () {
@@ -358,7 +360,7 @@ describe("BranchMax5", function () {
       await mst.connect(s3).rejectProposal(pid);
       await mst.connect(s4).rejectProposal(pid);
       await mst.connect(s5).rejectProposal(pid);
-      await expect(mst.connect(admin).approveProposal(pid)).to.be.reverted;
+      await expect(mst.connect(admin).approveProposal(pid)).to.be.revert(ethers);
     });
   });
 
@@ -387,24 +389,24 @@ describe("BranchMax5", function () {
 
     it("settlePayment non-existent reverts", async function () {
       const { np, sender } = await loadFixture(deployNP);
-      await expect(np.connect(sender).settlePayment(FAKE_ID)).to.be.reverted;
+      await expect(np.connect(sender).settlePayment(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("refundPayment non-existent reverts", async function () {
       const { np, sender } = await loadFixture(deployNP);
-      await expect(np.connect(sender).refundPayment(FAKE_ID)).to.be.reverted;
+      await expect(np.connect(sender).refundPayment(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("cancelPayment non-existent reverts", async function () {
       const { np, sender } = await loadFixture(deployNP);
-      await expect(np.connect(sender).cancelPayment(FAKE_ID)).to.be.reverted;
+      await expect(np.connect(sender).cancelPayment(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("compliance on non-existent payment reverts", async function () {
       const { np, teeNode } = await loadFixture(deployNP);
       await expect(np.connect(teeNode).submitComplianceResult(
         FAKE_ID, true, 30, true, ethers.ZeroHash, "0x"
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("monthly volume limit exceeded", async function () {
@@ -459,22 +461,22 @@ describe("BranchMax5", function () {
       const { ccr, relay1 } = await loadFixture(deployCCR);
       await ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") });
       const destTx = ethers.keccak256(ethers.toUtf8Bytes("dest"));
-      await expect(ccr.connect(relay1).submitRelayProof(FAKE_ID, destTx, "0x")).to.be.reverted;
+      await expect(ccr.connect(relay1).submitRelayProof(FAKE_ID, destTx, "0x")).to.be.revert(ethers);
     });
 
     it("confirmTransfer non-existent reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).confirmTransfer(FAKE_ID)).to.be.reverted;
+      await expect(ccr.connect(admin).confirmTransfer(FAKE_ID)).to.be.revert(ethers);
     });
 
     it("markTransferFailed non-existent reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).markTransferFailed(FAKE_ID, "fail")).to.be.reverted;
+      await expect(ccr.connect(admin).markTransferFailed(FAKE_ID, "fail")).to.be.revert(ethers);
     });
 
     it("recoverTransfer non-existent reverts", async function () {
       const { ccr, sender } = await loadFixture(deployCCR);
-      await expect(ccr.connect(sender).recoverTransfer(FAKE_ID)).to.be.reverted;
+      await expect(ccr.connect(sender).recoverTransfer(FAKE_ID)).to.be.revert(ethers);
     });
   });
 
@@ -503,7 +505,7 @@ describe("BranchMax5", function () {
       const poolId = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated").args[0];
       // Use a fake positionId that was never created — position not active
       const fakePos = ethers.keccak256(ethers.toUtf8Bytes("fake-position"));
-      await expect(pool.connect(lp1).removeLiquidity(poolId, fakePos)).to.be.reverted;
+      await expect(pool.connect(lp1).removeLiquidity(poolId, fakePos)).to.be.revert(ethers);
     });
   });
 });

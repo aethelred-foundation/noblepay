@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 /**
  * BranchMax3 — targets uncovered branches in:
@@ -260,7 +262,7 @@ describe("BranchMax3", function () {
       );
       const r = await tx.wait();
       const pid = r.logs.find(l => l.fragment && l.fragment.name === "ProposalCreated").args[0];
-      await expect(mst.connect(s2).cancelProposal(pid)).to.be.reverted;
+      await expect(mst.connect(s2).cancelProposal(pid)).to.be.revert(ethers);
     });
 
     it("reverts execute after expiry", async function () {
@@ -320,7 +322,7 @@ describe("BranchMax3", function () {
       const { mst, budgetMgr } = await loadFixture(deployMST);
       await expect(mst.connect(budgetMgr).createBudget(
         "Ops", 0, 1000000, 1000, 5000, 10000, 1
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts proposal with budget exceeded", async function () {
@@ -774,7 +776,7 @@ describe("BranchMax3", function () {
     it("reverts cancel by non-sender", async function () {
       const { np, usdc, sender, recipient, other } = await loadFixture(deployNP);
       const pid = await initPayment(np, sender, recipient, usdc);
-      await expect(np.connect(other).cancelPayment(pid)).to.be.reverted;
+      await expect(np.connect(other).cancelPayment(pid)).to.be.revert(ethers);
     });
 
     it("reverts settle on non-PASSED payment", async function () {
@@ -822,7 +824,7 @@ describe("BranchMax3", function () {
       const { np, usdc, sender, recipient } = await loadFixture(deployNP);
       await expect(np.connect(sender).initiatePaymentBatch(
         [recipient.address], [1000, 2000], [usdc.target], [PURPOSE], ["0x414544"]
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("setFees", async function () {
@@ -920,14 +922,14 @@ describe("BranchMax3", function () {
       const { sp, sender, recipient } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createStream(
         recipient.address, ethers.ZeroAddress, ethers.parseUnits("1000", 6), 3600, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("createStream with cliff > MAX_CLIFF_PERIOD reverts", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createStream(
         recipient.address, token.target, ethers.parseUnits("1000", 6), 400 * 86400, 366 * 86400
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("createBatchStreams", async function () {
@@ -942,14 +944,14 @@ describe("BranchMax3", function () {
       const { sp, token, sender } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createBatchStreams(
         [], token.target, [], 3600, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("createBatchStreams length mismatch reverts", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createBatchStreams(
         [recipient.address], token.target, [1000, 2000], 3600, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("createBatchStreams too many reverts", async function () {
@@ -958,7 +960,7 @@ describe("BranchMax3", function () {
       const amounts = Array(51).fill(1000);
       await expect(sp.connect(sender).createBatchStreams(
         recipients, token.target, amounts, 3600, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("pauseStream already paused reverts", async function () {
@@ -968,7 +970,7 @@ describe("BranchMax3", function () {
       const r = await tx.wait();
       const sid = r.logs.find(l => l.fragment && l.fragment.name === "StreamCreated").args[0];
       await sp.connect(sender).pauseStream(sid);
-      await expect(sp.connect(sender).pauseStream(sid)).to.be.reverted;
+      await expect(sp.connect(sender).pauseStream(sid)).to.be.revert(ethers);
     });
 
     it("withdraw nothing available reverts", async function () {
@@ -980,7 +982,7 @@ describe("BranchMax3", function () {
       // Withdraw immediately after creation - might have ~0 available
       // Actually some time has passed so let's try on paused stream
       await sp.connect(sender).pauseStream(sid);
-      await expect(sp.connect(recipient).withdraw(sid)).to.be.reverted;
+      await expect(sp.connect(recipient).withdraw(sid)).to.be.revert(ethers);
     });
 
     it("pause and unpause contract", async function () {
@@ -1020,7 +1022,7 @@ describe("BranchMax3", function () {
     it("reverts excessive protocol fee in constructor", async function () {
       const IF = await ethers.getContractFactory("InvoiceFinancing");
       const [a, t] = await ethers.getSigners();
-      await expect(IF.deploy(a.address, t.address, 2001)).to.be.reverted;
+      await expect(IF.deploy(a.address, t.address, 2001)).to.be.revert(ethers);
     });
 
     it("batch create invoices succeeds", async function () {

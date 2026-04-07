@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("ComplianceOracle", function () {
   async function deployFixture() {
@@ -273,7 +275,7 @@ describe("ComplianceOracle", function () {
 
     it("should revert pause for non-admin", async function () {
       const { oracle, other } = await loadFixture(deployFixture);
-      await expect(oracle.connect(other).pause()).to.be.reverted;
+      await expect(oracle.connect(other).pause()).to.be.revert(ethers);
     });
   });
 });

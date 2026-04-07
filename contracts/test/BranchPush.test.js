@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 // ================================================================
 // PaymentChannels - HTLC branch coverage
@@ -199,7 +201,7 @@ describe("LiquidityPool - Flash Loan Repay Coverage", function () {
   it("should revert flash loan when pool doesn't exist", async function () {
     const { pool, token0, borrower } = await loadFixture(deployFixture);
     await expect(pool.connect(borrower).flashLoan(ethers.ZeroHash, token0.target, 100, "0x"))
-      .to.be.reverted;
+      .to.be.revert(ethers);
   });
 
   it("should revert addLiquidity with zero amounts", async function () {

@@ -33,7 +33,7 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
-    "@sentry/nextjs": "^7.93.0",
+    "@sentry/nextjs": "^10.47.0",
     "@tanstack/react-query": "^5.17.9",
     "@vercel/analytics": "^1.1.1",
     "@vercel/speed-insights": "^1.0.2",
@@ -42,7 +42,7 @@
     "clsx": "^2.1.0",
     "date-fns": "^3.3.1",
     "lucide-react": "^0.311.0",
-    "next": "^14.2.29",
+    "next": "^15.5.14",
     "next-sitemap": "^4.2.3",
     "postcss": "^8.4.33",
     "react": "^18.2.0",
@@ -58,7 +58,7 @@
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@next/bundle-analyzer": "^14.2.29",
+    "@next/bundle-analyzer": "^15.5.14",
     "@types/jest": "^29.5.14",
     "@playwright/test": "^1.40.1",
     "@tailwindcss/forms": "^0.5.7",
@@ -71,7 +71,7 @@
     "@types/uuid": "^9.0.7",
     "cross-env": "^7.0.3",
     "eslint": "^8.56.0",
-    "eslint-config-next": "^14.2.29",
+    "eslint-config-next": "^15.5.14",
     "eslint-plugin-jest-dom": "^5.1.0",
     "eslint-plugin-testing-library": "^6.2.0",
     "husky": "^8.0.3",
@@ -91,6 +91,10 @@
     "*.{json,md,yml,yaml}": [
       "prettier --write"
     ]
+  },
+  "overrides": {
+    "@tootallnate/once": "3.0.1",
+    "defu": "6.1.7"
   },
   "engines": {
     "node": ">=20.0.0",

@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 /**
  * BranchMax1 — targets uncovered branches in:
@@ -55,7 +57,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 366n * 86400n;
       await expect(inv.connect(creditor).createInvoice(
         debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts when grace period > MAX_GRACE_PERIOD", async function () {
@@ -63,7 +65,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).createInvoice(
         debtor.address, FACE, usdc.target, mat, DOC, 91n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createInvoice with zero face value", async function () {
@@ -71,7 +73,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).createInvoice(
         debtor.address, 0, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createInvoice with debtor == creditor", async function () {
@@ -79,7 +81,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).createInvoice(
         creditor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createInvoice with unsupported token", async function () {
@@ -87,7 +89,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).createInvoice(
         debtor.address, FACE, ethers.ZeroAddress, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createInvoice with maturity in the past", async function () {
@@ -95,7 +97,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) - 100n;
       await expect(inv.connect(creditor).createInvoice(
         debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createInvoice with excessive penalty", async function () {
@@ -103,7 +105,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).createInvoice(
         debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 2001
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts chained invoice with zero debtor", async function () {
@@ -112,7 +114,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).createChainedInvoice(
         invId, ethers.ZeroAddress, FACE, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts batch with array length mismatch", async function () {
@@ -120,7 +122,7 @@ describe("BranchMax1", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).batchCreateInvoices(
         [debtor.address], [FACE, FACE], usdc.target, [mat], [DOC], 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("handles protocolFee == 0", async function () {
@@ -193,7 +195,7 @@ describe("BranchMax1", function () {
       const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
       await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
-      await expect(inv.connect(creditor).cancelInvoice(invId)).to.be.reverted;
+      await expect(inv.connect(creditor).cancelInvoice(invId)).to.be.revert(ethers);
     });
 
     it("debtor initiates dispute", async function () {
@@ -294,47 +296,47 @@ describe("BranchMax1", function () {
 
     it("reverts constructor with zero admin", async function () {
       const SP = await ethers.getContractFactory("StreamingPayments");
-      await expect(SP.deploy(ethers.ZeroAddress)).to.be.reverted;
+      await expect(SP.deploy(ethers.ZeroAddress)).to.be.revert(ethers);
     });
 
     it("reverts createStream with self as recipient", async function () {
       const { sp, token, sender } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createStream(
         sender.address, token.target, ethers.parseUnits("1000", 6), 30 * 86400, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createStream with zero amount", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createStream(
         recipient.address, token.target, 0, 30 * 86400, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createStream with duration too short", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createStream(
         recipient.address, token.target, ethers.parseUnits("1000", 6), 3599, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("reverts createStream with cliff >= duration", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       await expect(sp.connect(sender).createStream(
         recipient.address, token.target, ethers.parseUnits("1000", 6), 30 * 86400, 30 * 86400
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("pauseStream reverts for unauthorized caller", async function () {
       const { sp, token, sender, recipient, other } = await loadFixture(deploySP);
       const sid = await createStream(sp, token, sender, recipient);
-      await expect(sp.connect(other).pauseStream(sid)).to.be.reverted;
+      await expect(sp.connect(other).pauseStream(sid)).to.be.revert(ethers);
     });
 
     it("resumeStream reverts if not paused", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       const sid = await createStream(sp, token, sender, recipient);
-      await expect(sp.connect(sender).resumeStream(sid)).to.be.reverted;
+      await expect(sp.connect(sender).resumeStream(sid)).to.be.revert(ethers);
     });
 
     it("cancelStream returns remaining to sender", async function () {
@@ -348,7 +350,7 @@ describe("BranchMax1", function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       const sid = await createStream(sp, token, sender, recipient, 30 * 86400, 10 * 86400);
       await time.increase(5 * 86400);
-      await expect(sp.connect(recipient).withdraw(sid)).to.be.reverted;
+      await expect(sp.connect(recipient).withdraw(sid)).to.be.revert(ethers);
     });
 
     it("withdraw after cliff succeeds", async function () {
@@ -380,14 +382,14 @@ describe("BranchMax1", function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
       const sid = await createStream(sp, token, sender, recipient);
       await sp.connect(sender).cancelStream(sid);
-      await expect(sp.connect(sender).cancelStream(sid)).to.be.reverted;
+      await expect(sp.connect(sender).cancelStream(sid)).to.be.revert(ethers);
     });
 
     it("withdraw by non-recipient reverts", async function () {
       const { sp, token, sender, recipient, other } = await loadFixture(deploySP);
       const sid = await createStream(sp, token, sender, recipient);
       await time.increase(5 * 86400);
-      await expect(sp.connect(other).withdraw(sid)).to.be.reverted;
+      await expect(sp.connect(other).withdraw(sid)).to.be.revert(ethers);
     });
   });
 
@@ -410,12 +412,12 @@ describe("BranchMax1", function () {
 
     it("reverts constructor with zero admin", async function () {
       const CO = await ethers.getContractFactory("ComplianceOracle");
-      await expect(CO.deploy(ethers.ZeroAddress)).to.be.reverted;
+      await expect(CO.deploy(ethers.ZeroAddress)).to.be.revert(ethers);
     });
 
     it("heartbeat reverts for non-active node", async function () {
       const { co, node3 } = await loadFixture(deployCO);
-      await expect(co.connect(node3).heartbeat()).to.be.reverted;
+      await expect(co.connect(node3).heartbeat()).to.be.revert(ethers);
     });
 
     it("heartbeat succeeds for active node", async function () {
@@ -442,7 +444,7 @@ describe("BranchMax1", function () {
       const { co, node1 } = await loadFixture(deployCO);
       const sub = ethers.keccak256(ethers.toUtf8Bytes("sub"));
       const res = ethers.keccak256(ethers.toUtf8Bytes("res"));
-      await expect(co.connect(node1).submitScreeningResult(sub, res, 101, true)).to.be.reverted;
+      await expect(co.connect(node1).submitScreeningResult(sub, res, 101, true)).to.be.revert(ethers);
     });
 
     it("submitScreeningResult succeeds", async function () {
@@ -478,8 +480,8 @@ describe("BranchMax1", function () {
 
     it("proposeThresholdUpdate invalid ranges revert", async function () {
       const { co, admin } = await loadFixture(deployCO);
-      await expect(co.connect(admin).proposeThresholdUpdate(50, 50)).to.be.reverted;
-      await expect(co.connect(admin).proposeThresholdUpdate(50, 101)).to.be.reverted;
+      await expect(co.connect(admin).proposeThresholdUpdate(50, 50)).to.be.revert(ethers);
+      await expect(co.connect(admin).proposeThresholdUpdate(50, 101)).to.be.revert(ethers);
     });
 
     it("propose and approve threshold update", async function () {
@@ -546,33 +548,33 @@ describe("BranchMax1", function () {
     it("initiateTransfer with zero token reverts", async function () {
       const { ccr, sender } = await loadFixture(deployCCR);
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      await expect(ccr.connect(sender).initiateTransfer(ethers.ZeroAddress, ethers.parseUnits("1000", 6), CHAIN_ID, rh)).to.be.reverted;
+      await expect(ccr.connect(sender).initiateTransfer(ethers.ZeroAddress, ethers.parseUnits("1000", 6), CHAIN_ID, rh)).to.be.revert(ethers);
     });
 
     it("initiateTransfer with zero amount reverts", async function () {
       const { ccr, token, sender } = await loadFixture(deployCCR);
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      await expect(ccr.connect(sender).initiateTransfer(token.target, 0, CHAIN_ID, rh)).to.be.reverted;
+      await expect(ccr.connect(sender).initiateTransfer(token.target, 0, CHAIN_ID, rh)).to.be.revert(ethers);
     });
 
     it("addChain duplicate reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(CHAIN_ID, "P2", BASE_FEE, FEE_RATE_BP, FINALITY_BLOCKS, RECOVERY_TIMEOUT, MIN_TRANSFER, MAX_TRANSFER)).to.be.reverted;
+      await expect(ccr.connect(admin).addChain(CHAIN_ID, "P2", BASE_FEE, FEE_RATE_BP, FINALITY_BLOCKS, RECOVERY_TIMEOUT, MIN_TRANSFER, MAX_TRANSFER)).to.be.revert(ethers);
     });
 
     it("addChain fee too high reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(999, "T", BASE_FEE, 201, FINALITY_BLOCKS, RECOVERY_TIMEOUT, MIN_TRANSFER, MAX_TRANSFER)).to.be.reverted;
+      await expect(ccr.connect(admin).addChain(999, "T", BASE_FEE, 201, FINALITY_BLOCKS, RECOVERY_TIMEOUT, MIN_TRANSFER, MAX_TRANSFER)).to.be.revert(ethers);
     });
 
     it("addChain recovery timeout too short reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(999, "T", BASE_FEE, FEE_RATE_BP, FINALITY_BLOCKS, 60, MIN_TRANSFER, MAX_TRANSFER)).to.be.reverted;
+      await expect(ccr.connect(admin).addChain(999, "T", BASE_FEE, FEE_RATE_BP, FINALITY_BLOCKS, 60, MIN_TRANSFER, MAX_TRANSFER)).to.be.revert(ethers);
     });
 
     it("deregisterRelay non-relay reverts", async function () {
       const { ccr, admin, other } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).deregisterRelay(other.address)).to.be.reverted;
+      await expect(ccr.connect(admin).deregisterRelay(other.address)).to.be.revert(ethers);
     });
 
     it("deregister non-last relay triggers swap-and-pop", async function () {

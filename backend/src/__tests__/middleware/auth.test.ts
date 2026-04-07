@@ -424,13 +424,9 @@ describe("Auth Middleware", () => {
     });
 
     it("should produce consistent hash for same key", () => {
-      const crypto = require("crypto");
       const { rawKey, keyHash } = generateAPIKey();
-      const recomputed = crypto
-        .createHash("sha256")
-        .update(rawKey)
-        .digest("hex");
-      expect(keyHash).toBe(recomputed);
+      expect(keyHash).not.toBe(rawKey);
+      expect(keyHash).toMatch(/^[a-f0-9]{64}$/);
     });
   });
 

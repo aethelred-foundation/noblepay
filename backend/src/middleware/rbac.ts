@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from "express";
-import { logger } from "../lib/logger";
+import { logger, maskIdentifier } from "../lib/logger";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -201,7 +201,7 @@ export function requirePermission(...required: Permission[]) {
 
     if (missing.length > 0) {
       logger.warn("RBAC: Permission denied", {
-        userId: req.userId,
+        userRef: maskIdentifier(req.userId),
         role,
         required,
         missing,
@@ -248,7 +248,7 @@ export function requireRole(...roles: Role[]) {
 
     if (!hasAccess) {
       logger.warn("RBAC: Role denied", {
-        userId: req.userId,
+        userRef: maskIdentifier(req.userId),
         userRole,
         requiredRoles: roles,
         path: req.path,

@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 /**
  * BranchMax4 — targets remaining uncovered branches:
@@ -75,19 +77,19 @@ describe("BranchMax4", function () {
       const invId = await createAndFinanceInvoice(inv, creditor, debtor, factor, usdc, 5n);
       await inv.connect(debtor).repayInvoice(invId, FACE);
       // Now try to mark overdue - should revert since settled
-      await expect(inv.connect(creditor).markOverdue(invId)).to.be.reverted;
+      await expect(inv.connect(creditor).markOverdue(invId)).to.be.revert(ethers);
     });
 
     it("initiateDispute on SETTLED invoice reverts", async function () {
       const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
       const invId = await createAndFinanceInvoice(inv, creditor, debtor, factor, usdc, 30n);
       await inv.connect(debtor).repayInvoice(invId, FACE);
-      await expect(inv.connect(debtor).initiateDispute(invId, "late")).to.be.reverted;
+      await expect(inv.connect(debtor).initiateDispute(invId, "late")).to.be.revert(ethers);
     });
 
     it("setProtocolFee > 1000 reverts", async function () {
       const { inv, admin } = await loadFixture(deployIF);
-      await expect(inv.connect(admin).setProtocolFee(1001)).to.be.reverted;
+      await expect(inv.connect(admin).setProtocolFee(1001)).to.be.revert(ethers);
     });
 
     it("setSupportedToken with zero address reverts", async function () {
@@ -113,7 +115,7 @@ describe("BranchMax4", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).createInvoice(
         debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("batch create with maturity in past reverts", async function () {
@@ -121,7 +123,7 @@ describe("BranchMax4", function () {
       const pastMat = BigInt(await time.latest()) - 100n;
       await expect(inv.connect(creditor).batchCreateInvoices(
         [debtor.address], [FACE], usdc.target, [pastMat], [DOC], 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("batch create with zero face value reverts", async function () {
@@ -129,7 +131,7 @@ describe("BranchMax4", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).batchCreateInvoices(
         [debtor.address], [0], usdc.target, [mat], [DOC], 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("batch create with debtor == sender reverts", async function () {
@@ -137,7 +139,7 @@ describe("BranchMax4", function () {
       const mat = BigInt(await time.latest()) + 30n * 86400n;
       await expect(inv.connect(creditor).batchCreateInvoices(
         [creditor.address], [FACE], usdc.target, [mat], [DOC], 7n * 86400n, 500
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
   });
 
@@ -168,7 +170,7 @@ describe("BranchMax4", function () {
       // Withdraw all to complete
       await sp.connect(recipient).withdraw(sid);
       // Now try to pause completed stream
-      await expect(sp.connect(sender).pauseStream(sid)).to.be.reverted;
+      await expect(sp.connect(sender).pauseStream(sid)).to.be.revert(ethers);
     });
 
     it("resumeStream on completed stream reverts", async function () {
@@ -179,7 +181,7 @@ describe("BranchMax4", function () {
       const sid = r.logs.find(l => l.fragment && l.fragment.name === "StreamCreated").args[0];
       await time.increase(7200);
       await sp.connect(recipient).withdraw(sid);
-      await expect(sp.connect(sender).resumeStream(sid)).to.be.reverted;
+      await expect(sp.connect(sender).resumeStream(sid)).to.be.revert(ethers);
     });
 
     it("whenNotPaused prevents createStream when paused", async function () {
@@ -187,7 +189,7 @@ describe("BranchMax4", function () {
       await sp.connect(admin).pause();
       await expect(sp.connect(sender).createStream(
         recipient.address, token.target, 10000, 3600, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
   });
 
@@ -206,7 +208,7 @@ describe("BranchMax4", function () {
       await token.connect(partyA).approve(pc.target, ethers.MaxUint256);
       await expect(pc.connect(partyA).openChannel(
         ethers.ZeroAddress, token.target, ethers.parseUnits("1000", 6), 3600, 50
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
   });
 
@@ -275,7 +277,7 @@ describe("BranchMax4", function () {
       const collateral = (notional * 500n) / 10000n;
       const maturity = BigInt(await time.latest()) + 86400n * 30n;
       await expect(vault.connect(hedger).createForward(newPairId, notional, maturity, usdc.target, collateral))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 
@@ -329,7 +331,7 @@ describe("BranchMax4", function () {
       // Just test that it reverts with FlashLoanNotRepaid for branch coverage
       const loanAmt = ethers.parseEther("100");
       await expect(pool.connect(flashBorrower).flashLoan(poolId, token1.target, loanAmt, "0x"))
-        .to.be.reverted; // covers the token1 branch in the ternary
+        .to.be.revert(ethers); // covers the token1 branch in the ternary
     });
 
     it("updatePoolFlashFee exceeds max reverts", async function () {
@@ -340,7 +342,7 @@ describe("BranchMax4", function () {
       // Try to update flash fee beyond max (50 bp)
       // Check if updatePoolFlashFee exists
       try {
-        await expect(pool.connect(admin).updatePoolFlashFee(poolId, 51)).to.be.reverted;
+        await expect(pool.connect(admin).updatePoolFlashFee(poolId, 51)).to.be.revert(ethers);
       } catch (e) {
         // Function may not exist, skip
       }
@@ -368,7 +370,7 @@ describe("BranchMax4", function () {
       await ccr.connect(admin).setTokenSupport(token.target, true);
       await ccr.connect(admin).pause();
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      await expect(ccr.connect(sender).initiateTransfer(token.target, 1000, 1, rh)).to.be.reverted;
+      await expect(ccr.connect(sender).initiateTransfer(token.target, 1000, 1, rh)).to.be.revert(ethers);
     });
   });
 
@@ -440,7 +442,7 @@ describe("BranchMax4", function () {
       await mst.connect(admin).pause();
       await expect(mst.connect(s1).createProposal(
         recipient.address, usdc.target, 1000, 0, "test", false, ethers.ZeroHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("non-signer cannot create proposal", async function () {
@@ -587,7 +589,7 @@ describe("BranchMax4", function () {
       await np.connect(admin).pause();
       await expect(np.connect(sender).initiatePayment(
         recipient.address, 1000, usdc.target, PURPOSE, "0x414544"
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
   });
 });

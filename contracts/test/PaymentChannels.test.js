@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("PaymentChannels", function () {
   async function deployFixture() {
@@ -546,7 +548,7 @@ describe("PaymentChannels", function () {
     it("should revert for non-router", async function () {
       const { pc, other } = await loadFixture(deployFixture);
       await expect(pc.connect(other).registerRoutingPath([ethers.ZeroHash], [], 1000))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 

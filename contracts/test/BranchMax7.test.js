@@ -1,8 +1,10 @@
 // BranchMax7.test.js — Targets modifier else-paths (whenNotPaused, onlyRole, etc.)
 // These are the bulk of remaining uncovered branches.
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("BranchMax7 — Modifier else-path branches", function () {
 
@@ -29,7 +31,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       await co.connect(admin).pause();
       const key = ethers.toUtf8Bytes("key2");
       const pid = ethers.keccak256(ethers.toUtf8Bytes("p2"));
-      await expect(co.connect(tee2).registerTEENode(key, pid, { value: ethers.parseEther("10") })).to.be.reverted;
+      await expect(co.connect(tee2).registerTEENode(key, pid, { value: ethers.parseEther("10") })).to.be.revert(ethers);
     });
 
     it("paused: submitScreeningResult reverts", async function () {
@@ -37,14 +39,14 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       await co.connect(admin).pause();
       await expect(co.connect(tee1).submitScreeningResult(
         ethers.ZeroHash, ethers.ZeroHash, 50, true
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("double-register TEE node reverts", async function () {
       const { co, tee1 } = await loadFixture(deployCO);
       const key = ethers.toUtf8Bytes("key2");
       const pid = ethers.keccak256(ethers.toUtf8Bytes("p2"));
-      await expect(co.connect(tee1).registerTEENode(key, pid, { value: ethers.parseEther("10") })).to.be.reverted;
+      await expect(co.connect(tee1).registerTEENode(key, pid, { value: ethers.parseEther("10") })).to.be.revert(ethers);
     });
 
     it("submitScreeningResult with valid TEE node succeeds", async function () {
@@ -96,7 +98,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const { tr, admin, other } = await loadFixture(deployTR);
       await tr.connect(admin).pause();
       const key = ethers.toUtf8Bytes("pubkey-other");
-      await expect(tr.connect(other).registerVASP(ethers.ZeroHash, key)).to.be.reverted;
+      await expect(tr.connect(other).registerVASP(ethers.ZeroHash, key)).to.be.revert(ethers);
     });
 
     it("submitTravelRuleData from non-TEE reverts", async function () {
@@ -106,7 +108,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
         ethers.ZeroHash, ethers.ZeroHash, vasp1.address, ethers.ZeroHash,
         ethers.ZeroHash, vasp2.address, ethers.ZeroHash,
         ethers.parseUnits("5000", 6), "0x555344", ethers.ZeroHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("submitTravelRuleData succeeds from TEE node", async function () {
@@ -129,7 +131,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
         ethers.ZeroHash, ethers.ZeroHash, vasp1.address, ethers.ZeroHash,
         ethers.ZeroHash, vasp2.address, ethers.ZeroHash,
         ethers.parseUnits("5000", 6), "0x555344", ethers.ZeroHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("deactivateVASP for registered VASP", async function () {
@@ -166,30 +168,30 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const { fx, admin, usdc, hedger, pairId } = await loadFixture(deployFX);
       await fx.connect(admin).pause();
       const now = await time.latest();
-      await expect(fx.connect(hedger).createForward(pairId, ethers.parseUnits("1000", 6), now + 30 * 86400, usdc.target, ethers.parseUnits("500", 6))).to.be.reverted;
+      await expect(fx.connect(hedger).createForward(pairId, ethers.parseUnits("1000", 6), now + 30 * 86400, usdc.target, ethers.parseUnits("500", 6))).to.be.revert(ethers);
     });
 
     it("paused: submitFXRate reverts", async function () {
       const { fx, admin, oracle, pairId } = await loadFixture(deployFX);
       await fx.connect(admin).pause();
-      await expect(fx.connect(oracle).submitFXRate(pairId, ethers.parseUnits("1.2", 8))).to.be.reverted;
+      await expect(fx.connect(oracle).submitFXRate(pairId, ethers.parseUnits("1.2", 8))).to.be.revert(ethers);
     });
 
     it("submitFXRate from non-oracle reverts", async function () {
       const { fx, other, pairId } = await loadFixture(deployFX);
-      await expect(fx.connect(other).submitFXRate(pairId, ethers.parseUnits("1.2", 8))).to.be.reverted;
+      await expect(fx.connect(other).submitFXRate(pairId, ethers.parseUnits("1.2", 8))).to.be.revert(ethers);
     });
 
     it("addCurrencyPair duplicate reverts", async function () {
       const { fx, admin } = await loadFixture(deployFX);
-      await expect(fx.connect(admin).addCurrencyPair("0x555344", "0x455552", 500, 300, 200)).to.be.reverted;
+      await expect(fx.connect(admin).addCurrencyPair("0x555344", "0x455552", 500, 300, 200)).to.be.revert(ethers);
     });
 
     it("createForward with insufficient margin reverts", async function () {
       const { fx, usdc, hedger, pairId } = await loadFixture(deployFX);
       const now = await time.latest();
       // Very small collateral relative to notional
-      await expect(fx.connect(hedger).createForward(pairId, ethers.parseUnits("100000", 6), now + 30 * 86400, usdc.target, ethers.parseUnits("1", 6))).to.be.reverted;
+      await expect(fx.connect(hedger).createForward(pairId, ethers.parseUnits("100000", 6), now + 30 * 86400, usdc.target, ethers.parseUnits("1", 6))).to.be.revert(ethers);
     });
 
     it("createForward succeeds with valid params", async function () {
@@ -272,12 +274,12 @@ describe("BranchMax7 — Modifier else-path branches", function () {
 
     it("createPool with excessive fee reverts", async function () {
       const { pool, token0, token1, admin } = await loadFixture(deployLP);
-      await expect(pool.connect(admin).createPool(token0.target, token1.target, 10000, 10, 500)).to.be.reverted;
+      await expect(pool.connect(admin).createPool(token0.target, token1.target, 10000, 10, 500)).to.be.revert(ethers);
     });
 
     it("createPool with zero imbalance threshold reverts", async function () {
       const { pool, token0, token1, admin } = await loadFixture(deployLP);
-      await expect(pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 0)).to.be.reverted;
+      await expect(pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 0)).to.be.revert(ethers);
     });
 
     it("paused: addLiquidity reverts", async function () {
@@ -286,7 +288,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const r = await tx.wait();
       const poolId = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated").args[0];
       await pool.connect(admin).pause();
-      await expect(pool.connect(lp1).addLiquidity(poolId, ethers.parseEther("100"), ethers.parseEther("100"), -100, 100)).to.be.reverted;
+      await expect(pool.connect(lp1).addLiquidity(poolId, ethers.parseEther("100"), ethers.parseEther("100"), -100, 100)).to.be.revert(ethers);
     });
 
     it("paused: removeLiquidity reverts", async function () {
@@ -298,7 +300,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const lr = await ltx.wait();
       const posId = lr.logs.find(l => l.fragment && l.fragment.name === "LiquidityAdded").args[0];
       await pool.connect(admin).pause();
-      await expect(pool.connect(lp1).removeLiquidity(poolId, posId)).to.be.reverted;
+      await expect(pool.connect(lp1).removeLiquidity(poolId, posId)).to.be.revert(ethers);
     });
 
     it("addLiquidity by non-LP role reverts", async function () {
@@ -306,7 +308,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const tx = await pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 500);
       const r = await tx.wait();
       const poolId = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated").args[0];
-      await expect(pool.connect(other).addLiquidity(poolId, ethers.parseEther("100"), ethers.parseEther("100"), -100, 100)).to.be.reverted;
+      await expect(pool.connect(other).addLiquidity(poolId, ethers.parseEther("100"), ethers.parseEther("100"), -100, 100)).to.be.revert(ethers);
     });
 
     it("removeLiquidity by non-owner reverts", async function () {
@@ -317,23 +319,23 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const ltx = await pool.connect(lp1).addLiquidity(poolId, ethers.parseEther("1000"), ethers.parseEther("1000"), -1000, 1000);
       const lr = await ltx.wait();
       const posId = lr.logs.find(l => l.fragment && l.fragment.name === "LiquidityAdded").args[0];
-      await expect(pool.connect(other).removeLiquidity(poolId, posId)).to.be.reverted;
+      await expect(pool.connect(other).removeLiquidity(poolId, posId)).to.be.revert(ethers);
     });
 
     it("flashLoan on non-existent pool reverts", async function () {
       const { pool, token0, other } = await loadFixture(deployLP);
       const fakePoolId = ethers.keccak256(ethers.toUtf8Bytes("fake-pool"));
-      await expect(pool.connect(other).flashLoan(fakePoolId, token0.target, ethers.parseEther("100"), "0x")).to.be.reverted;
+      await expect(pool.connect(other).flashLoan(fakePoolId, token0.target, ethers.parseEther("100"), "0x")).to.be.revert(ethers);
     });
 
     it("setTreasury from non-admin reverts", async function () {
       const { pool, other } = await loadFixture(deployLP);
-      await expect(pool.connect(other).setTreasury(other.address)).to.be.reverted;
+      await expect(pool.connect(other).setTreasury(other.address)).to.be.revert(ethers);
     });
 
     it("setProtocolFee from non-admin reverts", async function () {
       const { pool, other } = await loadFixture(deployLP);
-      await expect(pool.connect(other).setProtocolFee(100)).to.be.reverted;
+      await expect(pool.connect(other).setProtocolFee(100)).to.be.revert(ethers);
     });
 
     it("getPoolHealth for pool", async function () {
@@ -367,7 +369,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
     it("paused: createStream reverts", async function () {
       const { sp, admin, usdc, sender, recipient } = await loadFixture(deploySP);
       await sp.connect(admin).pause();
-      await expect(sp.connect(sender).createStream(recipient.address, usdc.target, 1000, 3600, 0)).to.be.reverted;
+      await expect(sp.connect(sender).createStream(recipient.address, usdc.target, 1000, 3600, 0)).to.be.revert(ethers);
     });
 
     it("paused: withdraw reverts", async function () {
@@ -377,7 +379,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const streamId = r.logs.find(l => l.fragment && l.fragment.name === "StreamCreated").args[0];
       await time.increase(3600);
       await sp.connect(admin).pause();
-      await expect(sp.connect(recipient).withdraw(streamId)).to.be.reverted;
+      await expect(sp.connect(recipient).withdraw(streamId)).to.be.revert(ethers);
     });
 
     it("paused: cancelStream reverts", async function () {
@@ -386,7 +388,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const r = await tx.wait();
       const streamId = r.logs.find(l => l.fragment && l.fragment.name === "StreamCreated").args[0];
       await sp.connect(admin).pause();
-      await expect(sp.connect(sender).cancelStream(streamId)).to.be.reverted;
+      await expect(sp.connect(sender).cancelStream(streamId)).to.be.revert(ethers);
     });
 
     it("withdraw after stream fully completed", async function () {
@@ -398,7 +400,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       await time.increase(7200); // well past stream end
       await sp.connect(recipient).withdraw(streamId);
       // Try withdrawing again — should fail (no balance or completed)
-      await expect(sp.connect(recipient).withdraw(streamId)).to.be.reverted;
+      await expect(sp.connect(recipient).withdraw(streamId)).to.be.revert(ethers);
     });
 
     it("createBatchStreams succeeds", async function () {
@@ -414,7 +416,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const amount = ethers.parseUnits("1000", 6);
       await expect(sp.connect(sender).createBatchStreams(
         [recipient.address], usdc.target, [amount, amount], 3600, 0
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("cancel stream partially vested", async function () {
@@ -450,20 +452,20 @@ describe("BranchMax7 — Modifier else-path branches", function () {
     it("paused: registerRelay reverts", async function () {
       const { ccr, admin, relay1 } = await loadFixture(deployCCR);
       await ccr.connect(admin).pause();
-      await expect(ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") })).to.be.reverted;
+      await expect(ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") })).to.be.revert(ethers);
     });
 
     it("paused: initiateTransfer reverts", async function () {
       const { ccr, admin, usdc, user } = await loadFixture(deployCCR);
       await ccr.connect(admin).pause();
       const recipientHash = ethers.keccak256(ethers.toUtf8Bytes("recipient"));
-      await expect(ccr.connect(user).initiateTransfer(usdc.target, ethers.parseUnits("100", 6), 137, recipientHash)).to.be.reverted;
+      await expect(ccr.connect(user).initiateTransfer(usdc.target, ethers.parseUnits("100", 6), 137, recipientHash)).to.be.revert(ethers);
     });
 
     it("initiateTransfer to unsupported chain reverts", async function () {
       const { ccr, usdc, user } = await loadFixture(deployCCR);
       const recipientHash = ethers.keccak256(ethers.toUtf8Bytes("recipient"));
-      await expect(ccr.connect(user).initiateTransfer(usdc.target, ethers.parseUnits("100", 6), 999, recipientHash)).to.be.reverted;
+      await expect(ccr.connect(user).initiateTransfer(usdc.target, ethers.parseUnits("100", 6), 999, recipientHash)).to.be.revert(ethers);
     });
 
     it("initiateTransfer succeeds with valid params", async function () {
@@ -480,27 +482,27 @@ describe("BranchMax7 — Modifier else-path branches", function () {
     it("registerRelay double registration reverts", async function () {
       const { ccr, relay1 } = await loadFixture(deployCCR);
       await ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") });
-      await expect(ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") })).to.be.reverted;
+      await expect(ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") })).to.be.revert(ethers);
     });
 
     it("deregisterRelay for non-relay reverts", async function () {
       const { ccr, admin, other } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).deregisterRelay(other.address)).to.be.reverted;
+      await expect(ccr.connect(admin).deregisterRelay(other.address)).to.be.revert(ethers);
     });
 
     it("addChain with excessive fee rate reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(56, "BSC", ethers.parseUnits("1", 6), 300, 256, 86400, ethers.parseUnits("10", 6), ethers.parseUnits("1000000", 6))).to.be.reverted;
+      await expect(ccr.connect(admin).addChain(56, "BSC", ethers.parseUnits("1", 6), 300, 256, 86400, ethers.parseUnits("10", 6), ethers.parseUnits("1000000", 6))).to.be.revert(ethers);
     });
 
     it("addChain with recovery timeout too short reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(56, "BSC", ethers.parseUnits("1", 6), 10, 256, 60, ethers.parseUnits("10", 6), ethers.parseUnits("1000000", 6))).to.be.reverted;
+      await expect(ccr.connect(admin).addChain(56, "BSC", ethers.parseUnits("1", 6), 10, 256, 60, ethers.parseUnits("10", 6), ethers.parseUnits("1000000", 6))).to.be.revert(ethers);
     });
 
     it("setTokenSupport zero address reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).setTokenSupport(ethers.ZeroAddress, true)).to.be.reverted;
+      await expect(ccr.connect(admin).setTokenSupport(ethers.ZeroAddress, true)).to.be.revert(ethers);
     });
   });
 
@@ -533,7 +535,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const r = await tx.wait();
       const channelId = r.logs.find(l => l.fragment && l.fragment.name === "ChannelOpened").args[0];
       await pc.connect(admin).pause();
-      await expect(pc.connect(partyB).fundChannel(channelId, deposit)).to.be.reverted;
+      await expect(pc.connect(partyB).fundChannel(channelId, deposit)).to.be.revert(ethers);
     });
 
     it("paused: createHTLC reverts", async function () {
@@ -546,7 +548,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       await pc.connect(admin).pause();
       const hashLock = ethers.keccak256(ethers.toUtf8Bytes("test"));
       const now = await time.latest();
-      await expect(pc.connect(partyA).createHTLC(channelId, 1000, hashLock, now + 7200)).to.be.reverted;
+      await expect(pc.connect(partyA).createHTLC(channelId, 1000, hashLock, now + 7200)).to.be.revert(ethers);
     });
 
     it("paused: claimHTLC reverts", async function () {
@@ -563,7 +565,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const htlcR = await htlcTx.wait();
       const htlcId = htlcR.logs.find(l => l.fragment && l.fragment.name === "HTLCCreated").args[0];
       await pc.connect(admin).pause();
-      await expect(pc.connect(partyB).claimHTLC(htlcId, preimage)).to.be.reverted;
+      await expect(pc.connect(partyB).claimHTLC(htlcId, preimage)).to.be.revert(ethers);
     });
 
     it("paused: refundHTLC reverts", async function () {
@@ -581,29 +583,29 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const htlcId = htlcR.logs.find(l => l.fragment && l.fragment.name === "HTLCCreated").args[0];
       await time.increase(7201);
       await pc.connect(admin).pause();
-      await expect(pc.refundHTLC(htlcId)).to.be.reverted;
+      await expect(pc.refundHTLC(htlcId)).to.be.revert(ethers);
     });
 
     it("paused: registerWatchtower reverts", async function () {
       const { pc, admin, other } = await loadFixture(deployPC);
       await pc.connect(admin).pause();
-      await expect(pc.connect(other).registerWatchtower(100, { value: ethers.parseEther("1") })).to.be.reverted;
+      await expect(pc.connect(other).registerWatchtower(100, { value: ethers.parseEther("1") })).to.be.revert(ethers);
     });
 
     it("paused: batchOpenChannels reverts", async function () {
       const { pc, admin, usdc, partyA, partyB } = await loadFixture(deployPC);
       await pc.connect(admin).pause();
-      await expect(pc.connect(partyA).batchOpenChannels([partyB.address], usdc.target, [1000], 3600, 100)).to.be.reverted;
+      await expect(pc.connect(partyA).batchOpenChannels([partyB.address], usdc.target, [1000], 3600, 100)).to.be.revert(ethers);
     });
 
     it("setKYCStatus zero address reverts", async function () {
       const { pc, admin } = await loadFixture(deployPC);
-      await expect(pc.connect(admin).setKYCStatus(ethers.ZeroAddress, true)).to.be.reverted;
+      await expect(pc.connect(admin).setKYCStatus(ethers.ZeroAddress, true)).to.be.revert(ethers);
     });
 
     it("setSupportedToken zero address reverts", async function () {
       const { pc, admin } = await loadFixture(deployPC);
-      await expect(pc.connect(admin).setSupportedToken(ethers.ZeroAddress, true)).to.be.reverted;
+      await expect(pc.connect(admin).setSupportedToken(ethers.ZeroAddress, true)).to.be.revert(ethers);
     });
   });
 
@@ -633,7 +635,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
     it("paused: initiatePayment reverts", async function () {
       const { np, admin, usdc, sender, recipient } = await loadFixture(deployNP);
       await np.connect(admin).pause();
-      await expect(np.connect(sender).initiatePayment(recipient.address, 1000, usdc.target, PURPOSE, "0x414544")).to.be.reverted;
+      await expect(np.connect(sender).initiatePayment(recipient.address, 1000, usdc.target, PURPOSE, "0x414544")).to.be.revert(ethers);
     });
 
     it("paused: settlePayment reverts", async function () {
@@ -642,7 +644,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const r = await tx.wait();
       const paymentId = r.logs.find(l => l.fragment && l.fragment.name === "PaymentInitiated").args[0];
       await np.connect(admin).pause();
-      await expect(np.connect(sender).settlePayment(paymentId)).to.be.reverted;
+      await expect(np.connect(sender).settlePayment(paymentId)).to.be.revert(ethers);
     });
   });
 
@@ -673,7 +675,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const { inv, admin, usdc, creditor, debtor } = await loadFixture(deployIF);
       await inv.connect(admin).pause();
       const now = await time.latest();
-      await expect(inv.connect(creditor).createInvoice(debtor.address, 1000, usdc.target, now + 86400, ethers.ZeroHash, 0, 0)).to.be.reverted;
+      await expect(inv.connect(creditor).createInvoice(debtor.address, 1000, usdc.target, now + 86400, ethers.ZeroHash, 0, 0)).to.be.revert(ethers);
     });
 
     it("paused: financeInvoice reverts", async function () {
@@ -683,7 +685,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const r = await tx.wait();
       const invoiceId = r.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated").args[0];
       await inv.connect(admin).pause();
-      await expect(inv.connect(factor).financeInvoice(invoiceId, ethers.parseUnits("5000", 6), 500)).to.be.reverted;
+      await expect(inv.connect(factor).financeInvoice(invoiceId, ethers.parseUnits("5000", 6), 500)).to.be.revert(ethers);
     });
 
     it("paused: repayInvoice reverts", async function () {
@@ -693,7 +695,7 @@ describe("BranchMax7 — Modifier else-path branches", function () {
       const r = await tx.wait();
       const invoiceId = r.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated").args[0];
       await inv.connect(admin).pause();
-      await expect(inv.connect(debtor).repayInvoice(invoiceId, 1000)).to.be.reverted;
+      await expect(inv.connect(debtor).repayInvoice(invoiceId, 1000)).to.be.revert(ethers);
     });
   });
 });

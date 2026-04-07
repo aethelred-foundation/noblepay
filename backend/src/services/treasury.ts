@@ -1,6 +1,6 @@
 import { PrismaClient, Prisma } from "@prisma/client";
-import crypto from "crypto";
-import { logger } from "../lib/logger";
+import { generateHexId, generateOpaqueId } from "../lib/identifiers";
+import { logger, maskIdentifier, maskTransactionHash } from "../lib/logger";
 import { AuditService } from "./audit";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -161,7 +161,10 @@ export class TreasuryService {
       OTHER: "12000",
     };
 
-    logger.info("Treasury overview generated", { businessId, totalAUM: totalAUM.toString() });
+    logger.info("Treasury overview generated", {
+      businessRef: maskIdentifier(businessId),
+      totalAUM: totalAUM.toString(),
+    });
 
     return {
       totalAUM: totalAUM.toFixed(2),
@@ -184,13 +187,7 @@ export class TreasuryService {
   ): Promise<Record<string, unknown>> {
     const threshold = this.getApprovalThreshold(input.amount || "0");
 
-    const proposalId =
-      "prop-" +
-      crypto
-        .createHash("sha256")
-        .update(`${proposer}:${input.title}:${Date.now()}`)
-        .digest("hex")
-        .slice(0, 16);
+    const proposalId = generateOpaqueId("prop");
 
     const timelockHours = input.timelockHours ?? threshold.timelockHours;
     const executeAfter = timelockHours > 0
@@ -419,7 +416,8 @@ export class TreasuryService {
     });
 
     logger.info("Proposal approval recorded", {
-      proposalId, signer,
+      proposalId,
+      signerRef: maskIdentifier(signer),
       approvals: proposal.currentApprovals,
       required: proposal.requiredApprovals,
       approved,
@@ -539,12 +537,7 @@ export class TreasuryService {
       );
     }
 
-    const txHash =
-      "0x" +
-      crypto
-        .createHash("sha256")
-        .update(`execute:${proposalId}:${Date.now()}`)
-        .digest("hex");
+    const txHash = generateHexId();
 
     // Persist to database FIRST — fail closed before mutating in-memory state
     try {
@@ -577,7 +570,11 @@ export class TreasuryService {
       metadata: { proposalId, txHash },
     });
 
-    logger.info("Proposal executed", { proposalId, executor, txHash });
+    logger.info("Proposal executed", {
+      proposalId,
+      executorRef: maskIdentifier(executor),
+      txHashRef: maskTransactionHash(txHash),
+    });
 
     return { success: true, txHash };
   }

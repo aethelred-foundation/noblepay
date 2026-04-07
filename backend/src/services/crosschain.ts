@@ -1,6 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import crypto from "crypto";
-import { logger } from "../lib/logger";
+import { logger, maskIdentifier } from "../lib/logger";
 import { AuditService } from "./audit";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -334,7 +334,10 @@ export class CrossChainService {
       metadata: { transferId },
     });
 
-    logger.info("Transfer recovered", { transferId, actor });
+    logger.info("Transfer recovered", {
+      transferId,
+      actorRef: maskIdentifier(actor),
+    });
     return { success: true, message: "Transfer recovery initiated" };
   }
 

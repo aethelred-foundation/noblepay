@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("FXHedgingVault", function () {
   const RATE_PRECISION = 100000000n; // 1e8
@@ -127,7 +129,7 @@ describe("FXHedgingVault", function () {
     it("should revert for non-oracle", async function () {
       const { vault, other, pairId } = await loadFixture(deployFixture);
       await expect(vault.connect(other).submitFXRate(pairId, AED_USD_RATE))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 

@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("TravelRule", function () {
   async function deployFixture() {
@@ -129,7 +131,7 @@ describe("TravelRule", function () {
         params.paymentId, params.originatorNameHash, params.originatorAddress,
         params.originatorInstitution, params.beneficiaryNameHash, params.beneficiaryAddress,
         params.beneficiaryInstitution, params.amount, params.currency, params.encryptedDataHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("should revert for zero originator address", async function () {
