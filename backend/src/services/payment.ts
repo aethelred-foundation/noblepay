@@ -225,7 +225,7 @@ export class PaymentService {
     });
 
     logger.info("Payment cancelled", {
-      paymentId: payment.paymentId,
+      paymentRef: maskIdentifier(payment.paymentId),
       actorRef: maskIdentifier(actor),
     });
 
@@ -275,7 +275,7 @@ export class PaymentService {
     });
 
     logger.info("Payment refunded", {
-      paymentId: payment.paymentId,
+      paymentRef: maskIdentifier(payment.paymentId),
       actorRef: maskIdentifier(actor),
     });
 

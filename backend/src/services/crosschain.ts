@@ -335,7 +335,7 @@ export class CrossChainService {
     });
 
     logger.info("Transfer recovered", {
-      transferId,
+      transferRef: maskIdentifier(transferId),
       actorRef: maskIdentifier(actor),
     });
     return { success: true, message: "Transfer recovery initiated" };

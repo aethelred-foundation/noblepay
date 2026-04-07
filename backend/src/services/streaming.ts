@@ -277,7 +277,7 @@ export class StreamingService {
       metadata: { streamId },
     });
 
-    logger.info("Stream paused", { streamId, actorRef: maskIdentifier(actor) });
+    logger.info("Stream paused", { streamRef: maskIdentifier(streamId), actorRef: maskIdentifier(actor) });
     return stream;
   }
 
@@ -307,7 +307,7 @@ export class StreamingService {
       metadata: { streamId },
     });
 
-    logger.info("Stream resumed", { streamId, actorRef: maskIdentifier(actor) });
+    logger.info("Stream resumed", { streamRef: maskIdentifier(streamId), actorRef: maskIdentifier(actor) });
     return stream;
   }
 
@@ -347,7 +347,7 @@ export class StreamingService {
     });
 
     logger.info("Stream cancelled", {
-      streamId,
+      streamRef: maskIdentifier(streamId),
       actorRef: maskIdentifier(actor),
       settledAmount,
       refundedAmount,

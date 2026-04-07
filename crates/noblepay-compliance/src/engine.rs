@@ -378,7 +378,7 @@ impl ComplianceEngine {
             return Self::collect_batch_results(outcomes);
         }
 
-        let mut handles = Vec::with_capacity(requests.len().min(MAX_BATCH_SCREENING_REQUESTS));
+        let mut handles = Vec::new();
 
         for req in &requests {
             let engine = self.clone();

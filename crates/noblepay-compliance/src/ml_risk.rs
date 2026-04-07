@@ -244,8 +244,7 @@ impl RiskForest {
     /// Predict risk score (0.0–1.0) with feature importances.
     pub fn predict(&self, features: &FeatureVector) -> MLPrediction {
         let arr = features.to_array();
-        let mut scores: Vec<f64> =
-            Vec::with_capacity(self.trees.len().min(MAX_RISK_FOREST_TREE_CAPACITY));
+        let mut scores: Vec<f64> = Vec::new();
 
         for tree in &self.trees {
             scores.push(tree.predict(&arr));
