@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 /**
  * InvariantRegressions — Named regression tests for every past audit finding
@@ -331,7 +333,7 @@ describe("InvariantRegressions", function () {
             recipient.address, usdc.target, ethers.parseUnits("100", 6),
             0, 0, "attacker recurring", 0, ethers.ZeroHash
           )
-        ).to.be.reverted;
+        ).to.be.revert(ethers);
       });
 
       it("should allow ADMIN_ROLE to create recurring payments successfully", async function () {

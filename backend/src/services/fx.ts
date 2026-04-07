@@ -1,5 +1,5 @@
 import { PrismaClient } from "@prisma/client";
-import crypto from "crypto";
+import { generateOpaqueId } from "../lib/identifiers";
 import { logger } from "../lib/logger";
 import { AuditService } from "./audit";
 
@@ -152,13 +152,7 @@ export class FXService {
     }
 
     const currentRate = currentRates[0].mid;
-    const positionId =
-      "fx-" +
-      crypto
-        .createHash("sha256")
-        .update(`${trader}:${input.pair}:${Date.now()}`)
-        .digest("hex")
-        .slice(0, 16);
+    const positionId = generateOpaqueId("fx");
 
     const expiryDate = new Date(input.expiryDate);
     if (expiryDate <= new Date()) {

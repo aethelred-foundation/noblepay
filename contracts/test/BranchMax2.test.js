@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 /**
  * BranchMax2 — targets uncovered branches in:
@@ -52,19 +54,19 @@ describe("BranchMax2", function () {
     it("reverts constructor with zero admin", async function () {
       const [, t] = await ethers.getSigners();
       const PC = await ethers.getContractFactory("PaymentChannels");
-      await expect(PC.deploy(ethers.ZeroAddress, t.address, 100)).to.be.reverted;
+      await expect(PC.deploy(ethers.ZeroAddress, t.address, 100)).to.be.revert(ethers);
     });
 
     it("reverts constructor with zero treasury", async function () {
       const [a] = await ethers.getSigners();
       const PC = await ethers.getContractFactory("PaymentChannels");
-      await expect(PC.deploy(a.address, ethers.ZeroAddress, 100)).to.be.reverted;
+      await expect(PC.deploy(a.address, ethers.ZeroAddress, 100)).to.be.revert(ethers);
     });
 
     it("reverts constructor with excessive fee", async function () {
       const [a, t] = await ethers.getSigners();
       const PC = await ethers.getContractFactory("PaymentChannels");
-      await expect(PC.deploy(a.address, t.address, 501)).to.be.reverted;
+      await expect(PC.deploy(a.address, t.address, 501)).to.be.revert(ethers);
     });
 
     it("partyA top-up on ACTIVE channel", async function () {
@@ -192,7 +194,7 @@ describe("BranchMax2", function () {
     it("registerWatchtower with bounty too high reverts", async function () {
       const { pc, watchtower } = await loadFixture(deployPC);
       await expect(pc.connect(watchtower).registerWatchtower(501, { value: ethers.parseEther("1") }))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
 
     it("registerWatchtower and deregisterWatchtower", async function () {
@@ -207,20 +209,20 @@ describe("BranchMax2", function () {
         [partyB.address], token.target,
         [ethers.parseUnits("1000", 6), ethers.parseUnits("1000", 6)],
         86400, 100
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("batchOpenChannels with zero deposit reverts", async function () {
       const { pc, partyA, partyB, token } = await loadFixture(deployPC);
       await expect(pc.connect(partyA).batchOpenChannels(
         [partyB.address], token.target, [0], 86400, 100
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("registerRoutingPath with empty channels reverts", async function () {
       const { pc, router } = await loadFixture(deployPC);
       await expect(pc.connect(router).registerRoutingPath([], [], ethers.parseUnits("1000", 6)))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
 
     it("finalize close after challenge period", async function () {
@@ -279,13 +281,13 @@ describe("BranchMax2", function () {
     it("reverts constructor with zero admin", async function () {
       const [, t] = await ethers.getSigners();
       const FX = await ethers.getContractFactory("FXHedgingVault");
-      await expect(FX.deploy(ethers.ZeroAddress, t.address, 100)).to.be.reverted;
+      await expect(FX.deploy(ethers.ZeroAddress, t.address, 100)).to.be.revert(ethers);
     });
 
     it("reverts constructor with zero treasury", async function () {
       const [a] = await ethers.getSigners();
       const FX = await ethers.getContractFactory("FXHedgingVault");
-      await expect(FX.deploy(a.address, ethers.ZeroAddress, 100)).to.be.reverted;
+      await expect(FX.deploy(a.address, ethers.ZeroAddress, 100)).to.be.revert(ethers);
     });
 
     it("submitFXRate non-existent pair reverts", async function () {
@@ -318,14 +320,14 @@ describe("BranchMax2", function () {
       const { vault, usdc, hedger, pairId } = await loadFixture(deployFX);
       const maturity = BigInt(await time.latest()) + 86400n * 30n;
       await expect(vault.connect(hedger).createForward(pairId, 0, maturity, usdc.target, 1000))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
 
     it("createForward with unsupported collateral reverts", async function () {
       const { vault, hedger, pairId } = await loadFixture(deployFX);
       const maturity = BigInt(await time.latest()) + 86400n * 30n;
       await expect(vault.connect(hedger).createForward(pairId, 1000000n, maturity, ethers.ZeroAddress, 1000))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
 
     it("settleForward with loss (pnl <= 0)", async function () {
@@ -475,14 +477,14 @@ describe("BranchMax2", function () {
 
     it("reverts constructor with zero admin", async function () {
       const TR = await ethers.getContractFactory("TravelRule");
-      await expect(TR.deploy(ethers.ZeroAddress)).to.be.reverted;
+      await expect(TR.deploy(ethers.ZeroAddress)).to.be.revert(ethers);
     });
 
     it("registerVASP duplicate reverts", async function () {
       const { tr, vasp1 } = await loadFixture(deployTR);
       await expect(tr.connect(vasp1).registerVASP(
         ethers.keccak256(ethers.toUtf8Bytes("dup")), ethers.toUtf8Bytes("key")
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("deactivateVASP", async function () {
@@ -492,7 +494,7 @@ describe("BranchMax2", function () {
 
     it("deactivateVASP non-existent reverts", async function () {
       const { tr, admin, other } = await loadFixture(deployTR);
-      await expect(tr.connect(admin).deactivateVASP(other.address)).to.be.reverted;
+      await expect(tr.connect(admin).deactivateVASP(other.address)).to.be.revert(ethers);
     });
 
     it("submit travel rule data", async function () {
@@ -524,7 +526,7 @@ describe("BranchMax2", function () {
         ethers.parseUnits("5000", 6),
         "0x555344",
         ethers.keccak256(ethers.toUtf8Bytes("enc"))
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("submit with zero amount reverts", async function () {
@@ -540,7 +542,7 @@ describe("BranchMax2", function () {
         0,
         "0x555344",
         ethers.keccak256(ethers.toUtf8Bytes("enc"))
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("verify then share then acknowledge", async function () {
@@ -608,7 +610,7 @@ describe("BranchMax2", function () {
       const shareR = await shareTx.wait();
       const shareEv = shareR.logs.find(l => l.fragment && l.fragment.name === "TravelRuleShared");
       await time.increase(49 * 3600); // past 48h deadline
-      await expect(tr.connect(vasp2).acknowledgeTravelRuleData(shareEv.args[1])).to.be.reverted;
+      await expect(tr.connect(vasp2).acknowledgeTravelRuleData(shareEv.args[1])).to.be.revert(ethers);
     });
 
     it("requiresFullTravelRuleData checks threshold", async function () {
@@ -636,7 +638,7 @@ describe("BranchMax2", function () {
 
     it("reverts constructor with zero admin", async function () {
       const BR = await ethers.getContractFactory("BusinessRegistry");
-      await expect(BR.deploy(ethers.ZeroAddress)).to.be.reverted;
+      await expect(BR.deploy(ethers.ZeroAddress)).to.be.revert(ethers);
     });
 
     it("registerBusiness with valid UAE license", async function () {
@@ -647,33 +649,33 @@ describe("BranchMax2", function () {
     it("registerBusiness duplicate reverts", async function () {
       const { br, biz1, officer } = await loadFixture(deployBR);
       await br.connect(biz1).registerBusiness("ABC123", "Test", 0, officer.address);
-      await expect(br.connect(biz1).registerBusiness("DEF456", "Test2", 0, officer.address)).to.be.reverted;
+      await expect(br.connect(biz1).registerBusiness("DEF456", "Test2", 0, officer.address)).to.be.revert(ethers);
     });
 
     it("registerBusiness duplicate license reverts", async function () {
       const { br, biz1, biz2, officer } = await loadFixture(deployBR);
       await br.connect(biz1).registerBusiness("ABC123", "Test", 0, officer.address);
-      await expect(br.connect(biz2).registerBusiness("ABC123", "Test2", 0, officer.address)).to.be.reverted;
+      await expect(br.connect(biz2).registerBusiness("ABC123", "Test2", 0, officer.address)).to.be.revert(ethers);
     });
 
     it("registerBusiness with zero officer reverts", async function () {
       const { br, biz1 } = await loadFixture(deployBR);
-      await expect(br.connect(biz1).registerBusiness("ABC123", "Test", 0, ethers.ZeroAddress)).to.be.reverted;
+      await expect(br.connect(biz1).registerBusiness("ABC123", "Test", 0, ethers.ZeroAddress)).to.be.revert(ethers);
     });
 
     it("registerBusiness with short license reverts", async function () {
       const { br, biz1, officer } = await loadFixture(deployBR);
-      await expect(br.connect(biz1).registerBusiness("ABC", "Test", 0, officer.address)).to.be.reverted;
+      await expect(br.connect(biz1).registerBusiness("ABC", "Test", 0, officer.address)).to.be.revert(ethers);
     });
 
     it("registerBusiness with empty name reverts", async function () {
       const { br, biz1, officer } = await loadFixture(deployBR);
-      await expect(br.connect(biz1).registerBusiness("ABC123", "", 0, officer.address)).to.be.reverted;
+      await expect(br.connect(biz1).registerBusiness("ABC123", "", 0, officer.address)).to.be.revert(ethers);
     });
 
     it("registerBusiness UAE with invalid chars reverts", async function () {
       const { br, biz1, officer } = await loadFixture(deployBR);
-      await expect(br.connect(biz1).registerBusiness("ABC@#!", "Test", 0, officer.address)).to.be.reverted;
+      await expect(br.connect(biz1).registerBusiness("ABC@#!", "Test", 0, officer.address)).to.be.revert(ethers);
     });
 
     it("registerBusiness INTERNATIONAL (no char validation)", async function () {
@@ -715,7 +717,7 @@ describe("BranchMax2", function () {
       await br.connect(biz1).registerBusiness("ABC123", "Test", 0, officer.address);
       await br.connect(admin).verifyBusiness(biz1.address);
       await br.connect(admin).upgradeTier(biz1.address, 2); // ENTERPRISE
-      await expect(br.connect(admin).upgradeTier(biz1.address, 2)).to.be.reverted;
+      await expect(br.connect(admin).upgradeTier(biz1.address, 2)).to.be.revert(ethers);
     });
 
     it("upgradeTier downgrade reverts", async function () {
@@ -723,7 +725,7 @@ describe("BranchMax2", function () {
       await br.connect(biz1).registerBusiness("ABC123", "Test", 0, officer.address);
       await br.connect(admin).verifyBusiness(biz1.address);
       await br.connect(admin).upgradeTier(biz1.address, 1); // PREMIUM
-      await expect(br.connect(admin).upgradeTier(biz1.address, 0)).to.be.reverted; // STANDARD
+      await expect(br.connect(admin).upgradeTier(biz1.address, 0)).to.be.revert(ethers); // STANDARD
     });
 
     it("updateComplianceOfficer", async function () {
@@ -779,7 +781,7 @@ describe("BranchMax2", function () {
 
     it("reverts constructor with zero admin", async function () {
       const AI = await ethers.getContractFactory("AIComplianceModule");
-      await expect(AI.deploy(ethers.ZeroAddress)).to.be.reverted;
+      await expect(AI.deploy(ethers.ZeroAddress)).to.be.revert(ethers);
     });
 
     it("recordDecision auto-escalates low confidence", async function () {
@@ -800,14 +802,14 @@ describe("BranchMax2", function () {
     it("recordDecision confidence > 100 reverts", async function () {
       const { ai, admin, modelId } = await loadFixture(deployAI);
       const sub = ethers.keccak256(ethers.toUtf8Bytes("sub"));
-      await expect(ai.connect(admin).recordDecision(sub, modelId, 0, 101, sub, sub)).to.be.reverted;
+      await expect(ai.connect(admin).recordDecision(sub, modelId, 0, 101, sub, sub)).to.be.revert(ethers);
     });
 
     it("recordDecision with non-existent model reverts", async function () {
       const { ai, admin } = await loadFixture(deployAI);
       const sub = ethers.keccak256(ethers.toUtf8Bytes("sub"));
       const fakeModel = ethers.keccak256(ethers.toUtf8Bytes("fake"));
-      await expect(ai.connect(admin).recordDecision(sub, fakeModel, 0, 80, sub, sub)).to.be.reverted;
+      await expect(ai.connect(admin).recordDecision(sub, fakeModel, 0, 80, sub, sub)).to.be.revert(ethers);
     });
 
     it("fileAppeal and resolve as overturned", async function () {
@@ -848,7 +850,7 @@ describe("BranchMax2", function () {
       const dr = await dtx.wait();
       const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DecisionRecorded");
       await time.increase(31 * 86400);
-      await expect(ai.connect(admin).fileAppeal(dev.args[0], sub)).to.be.reverted;
+      await expect(ai.connect(admin).fileAppeal(dev.args[0], sub)).to.be.revert(ethers);
     });
 
     it("overrideDecision", async function () {
@@ -866,7 +868,7 @@ describe("BranchMax2", function () {
       const dtx = await ai.connect(admin).recordDecision(sub, modelId, 0, 80, sub, sub); // APPROVED
       const dr = await dtx.wait();
       const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DecisionRecorded");
-      await expect(ai.connect(admin).overrideDecision(dev.args[0], 0, sub)).to.be.reverted; // same
+      await expect(ai.connect(admin).overrideDecision(dev.args[0], 0, sub)).to.be.revert(ethers); // same
     });
 
     it("overrideDecision already overridden reverts", async function () {
@@ -876,13 +878,13 @@ describe("BranchMax2", function () {
       const dr = await dtx.wait();
       const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DecisionRecorded");
       await ai.connect(admin).overrideDecision(dev.args[0], 0, sub);
-      await expect(ai.connect(admin).overrideDecision(dev.args[0], 1, sub)).to.be.reverted;
+      await expect(ai.connect(admin).overrideDecision(dev.args[0], 1, sub)).to.be.revert(ethers);
     });
 
     it("registerModel duplicate reverts", async function () {
       const { ai, admin } = await loadFixture(deployAI);
       await expect(ai.connect(admin).registerModel("TestModel", "1.0", ethers.keccak256(ethers.toUtf8Bytes("model"))))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
 
     it("updateModelStatus", async function () {
@@ -897,7 +899,7 @@ describe("BranchMax2", function () {
 
     it("setEscalationThreshold > 100 reverts", async function () {
       const { ai, admin } = await loadFixture(deployAI);
-      await expect(ai.connect(admin).setEscalationThreshold(101)).to.be.reverted;
+      await expect(ai.connect(admin).setEscalationThreshold(101)).to.be.revert(ethers);
     });
 
     it("view functions return data", async function () {
@@ -946,13 +948,13 @@ describe("BranchMax2", function () {
     it("reverts constructor with zero admin", async function () {
       const [, t] = await ethers.getSigners();
       const LP = await ethers.getContractFactory("LiquidityPool");
-      await expect(LP.deploy(ethers.ZeroAddress, t.address)).to.be.reverted;
+      await expect(LP.deploy(ethers.ZeroAddress, t.address)).to.be.revert(ethers);
     });
 
     it("reverts constructor with zero treasury", async function () {
       const [a] = await ethers.getSigners();
       const LP = await ethers.getContractFactory("LiquidityPool");
-      await expect(LP.deploy(a.address, ethers.ZeroAddress)).to.be.reverted;
+      await expect(LP.deploy(a.address, ethers.ZeroAddress)).to.be.revert(ethers);
     });
 
     it("createPool and addLiquidity", async function () {
@@ -968,23 +970,23 @@ describe("BranchMax2", function () {
     it("createPool duplicate reverts", async function () {
       const { lp, t0, t1, admin } = await loadFixture(deployLP);
       await lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 8000);
-      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 8000)).to.be.reverted;
+      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 8000)).to.be.revert(ethers);
     });
 
     it("createPool excessive fee reverts", async function () {
       const { lp, t0, t1, admin } = await loadFixture(deployLP);
-      await expect(lp.connect(admin).createPool(t0.target, t1.target, 101, 10, 8000)).to.be.reverted;
+      await expect(lp.connect(admin).createPool(t0.target, t1.target, 101, 10, 8000)).to.be.revert(ethers);
     });
 
     it("createPool excessive flash fee reverts", async function () {
       const { lp, t0, t1, admin } = await loadFixture(deployLP);
-      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 51, 8000)).to.be.reverted;
+      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 51, 8000)).to.be.revert(ethers);
     });
 
     it("createPool invalid imbalance threshold reverts", async function () {
       const { lp, t0, t1, admin } = await loadFixture(deployLP);
-      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 0)).to.be.reverted;
-      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 9501)).to.be.reverted;
+      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 0)).to.be.revert(ethers);
+      await expect(lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 9501)).to.be.revert(ethers);
     });
 
     it("addLiquidity with zero amounts reverts", async function () {
@@ -992,7 +994,7 @@ describe("BranchMax2", function () {
       const tx = await lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 8000);
       const r = await tx.wait();
       const ev = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated");
-      await expect(lp.connect(provider).addLiquidity(ev.args[0], 0, 0, -100, 100)).to.be.reverted;
+      await expect(lp.connect(provider).addLiquidity(ev.args[0], 0, 0, -100, 100)).to.be.revert(ethers);
     });
 
     it("addLiquidity with invalid tick range reverts", async function () {
@@ -1002,7 +1004,7 @@ describe("BranchMax2", function () {
       const ev = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated");
       const amt = ethers.parseEther("10000");
       // tickLower >= tickUpper
-      await expect(lp.connect(provider).addLiquidity(ev.args[0], amt, amt, 100, 100)).to.be.reverted;
+      await expect(lp.connect(provider).addLiquidity(ev.args[0], amt, amt, 100, 100)).to.be.revert(ethers);
     });
 
     it("addLiquidity with misaligned tick reverts", async function () {
@@ -1011,7 +1013,7 @@ describe("BranchMax2", function () {
       const r = await tx.wait();
       const ev = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated");
       const amt = ethers.parseEther("10000");
-      await expect(lp.connect(provider).addLiquidity(ev.args[0], amt, amt, -7, 13)).to.be.reverted;
+      await expect(lp.connect(provider).addLiquidity(ev.args[0], amt, amt, -7, 13)).to.be.revert(ethers);
     });
 
     it("removeLiquidity and harvestFees", async function () {
@@ -1038,7 +1040,7 @@ describe("BranchMax2", function () {
       const addTx = await lp.connect(provider).addLiquidity(ev.args[0], amt, amt, -100, 100);
       const addR = await addTx.wait();
       const addEv = addR.logs.find(l => l.fragment && l.fragment.name === "LiquidityAdded");
-      await expect(lp.connect(other).removeLiquidity(ev.args[0], addEv.args[0])).to.be.reverted;
+      await expect(lp.connect(other).removeLiquidity(ev.args[0], addEv.args[0])).to.be.revert(ethers);
     });
 
     it("resetCircuitBreaker", async function () {
@@ -1063,7 +1065,7 @@ describe("BranchMax2", function () {
       const tx = await lp.connect(admin).createPool(t0.target, t1.target, 30, 10, 8000);
       const r = await tx.wait();
       const ev = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated");
-      await expect(lp.connect(admin).updateCircuitBreaker(ev.args[0], 0, 3600)).to.be.reverted;
+      await expect(lp.connect(admin).updateCircuitBreaker(ev.args[0], 0, 3600)).to.be.revert(ethers);
     });
 
     it("setTreasury and setProtocolFee", async function () {
@@ -1074,7 +1076,7 @@ describe("BranchMax2", function () {
 
     it("setProtocolFee too high reverts", async function () {
       const { lp, admin } = await loadFixture(deployLP);
-      await expect(lp.connect(admin).setProtocolFee(5001)).to.be.reverted;
+      await expect(lp.connect(admin).setProtocolFee(5001)).to.be.revert(ethers);
     });
 
     it("getPoolUtilization with zero reserves returns 5000", async function () {

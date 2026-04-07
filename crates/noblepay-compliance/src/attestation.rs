@@ -387,13 +387,22 @@ fn sha3_hex(data: &[u8]) -> String {
 mod tests {
     use super::*;
 
+    fn test_nonce(label: &str) -> String {
+        format!("{label}-{}", uuid::Uuid::new_v4())
+    }
+
+    fn test_attestation_doc(label: &str) -> String {
+        let seed = format!("attestation-doc:{label}:{}", uuid::Uuid::new_v4());
+        sha3_hex(seed.as_bytes())
+    }
+
     #[test]
     fn mock_attestation_roundtrip() {
         let gen = AttestationGenerator::new();
         let user_data = b"test-compliance-result";
-        let nonce = "test-nonce-123";
+        let nonce = test_nonce("roundtrip");
 
-        let report = gen.generate_attestation(user_data, nonce).unwrap();
+        let report = gen.generate_attestation(user_data, &nonce).unwrap();
         assert_eq!(report.platform, TeePlatform::Mock);
         assert!(!report.attestation_doc.is_empty());
         assert!(!report.measurement.is_empty());
@@ -406,8 +415,9 @@ mod tests {
     #[test]
     fn attestation_verification_fails_with_wrong_data() {
         let gen = AttestationGenerator::new();
+        let nonce = test_nonce("wrong-data");
         let report = gen
-            .generate_attestation(b"original-data", "nonce")
+            .generate_attestation(b"original-data", &nonce)
             .unwrap();
 
         let valid = gen.verify_attestation(&report, b"tampered-data").unwrap();
@@ -417,7 +427,8 @@ mod tests {
     #[test]
     fn attestation_to_bytes_decodes_hex() {
         let gen = AttestationGenerator::new();
-        let report = gen.generate_attestation(b"data", "nonce").unwrap();
+        let nonce = test_nonce("to-bytes");
+        let report = gen.generate_attestation(b"data", &nonce).unwrap();
         let bytes = AttestationGenerator::attestation_to_bytes(&report);
         assert_eq!(bytes.len(), 32); // SHA3-256 output
     }
@@ -432,8 +443,10 @@ mod tests {
     #[test]
     fn different_nonces_produce_different_attestations() {
         let gen = AttestationGenerator::new();
-        let r1 = gen.generate_attestation(b"data", "nonce-1").unwrap();
-        let r2 = gen.generate_attestation(b"data", "nonce-2").unwrap();
+        let nonce_a = test_nonce("nonce-a");
+        let nonce_b = test_nonce("nonce-b");
+        let r1 = gen.generate_attestation(b"data", &nonce_a).unwrap();
+        let r2 = gen.generate_attestation(b"data", &nonce_b).unwrap();
         assert_ne!(
             r1.attestation_doc, r2.attestation_doc,
             "different nonces must produce different attestations"
@@ -489,7 +502,8 @@ mod tests {
     #[test]
     fn attestation_report_has_correct_platform() {
         let gen = AttestationGenerator::new();
-        let report = gen.generate_attestation(b"data", "nonce").unwrap();
+        let nonce = test_nonce("platform");
+        let report = gen.generate_attestation(b"data", &nonce).unwrap();
         // Without any TEE feature, falls back to Mock platform identity
         assert_eq!(report.platform, TeePlatform::Mock);
     }
@@ -506,14 +520,16 @@ mod tests {
     #[test]
     fn attestation_report_nonce_stored() {
         let gen = AttestationGenerator::new();
-        let report = gen.generate_attestation(b"data", "my-unique-nonce").unwrap();
-        assert_eq!(report.nonce, "my-unique-nonce");
+        let nonce = test_nonce("stored");
+        let report = gen.generate_attestation(b"data", &nonce).unwrap();
+        assert_eq!(report.nonce, nonce);
     }
 
     #[test]
     fn attestation_certificate_chain_empty_in_mock() {
         let gen = AttestationGenerator::new();
-        let report = gen.generate_attestation(b"data", "nonce").unwrap();
+        let nonce = test_nonce("cert-chain");
+        let report = gen.generate_attestation(b"data", &nonce).unwrap();
         assert!(report.certificate_chain.is_empty());
     }
 
@@ -544,8 +560,9 @@ mod tests {
     fn same_inputs_same_timestamp_produce_same_doc() {
         let gen = AttestationGenerator::new();
         let ts = Utc::now();
-        let doc1 = gen.generate_mock_attestation(b"data", "nonce", &ts);
-        let doc2 = gen.generate_mock_attestation(b"data", "nonce", &ts);
+        let nonce = test_nonce("same-inputs");
+        let doc1 = gen.generate_mock_attestation(b"data", &nonce, &ts);
+        let doc2 = gen.generate_mock_attestation(b"data", &nonce, &ts);
         assert_eq!(doc1, doc2);
     }
 
@@ -588,7 +605,8 @@ mod tests {
     #[test]
     fn generate_nitro_attestation_errors_without_feature() {
         let gen = AttestationGenerator::new();
-        let result = gen.generate_nitro_attestation(b"data", "nonce", &Utc::now());
+        let nonce = test_nonce("nitro-generate");
+        let result = gen.generate_nitro_attestation(b"data", &nonce, &Utc::now());
         // Without the nitro feature, this should error
         #[cfg(not(feature = "nitro"))]
         assert!(result.is_err(), "Nitro attestation should fail without nitro feature");
@@ -599,7 +617,8 @@ mod tests {
     #[test]
     fn generate_sgx_attestation_errors_without_feature() {
         let gen = AttestationGenerator::new();
-        let result = gen.generate_sgx_attestation(b"data", "nonce", &Utc::now());
+        let nonce = test_nonce("sgx-generate");
+        let result = gen.generate_sgx_attestation(b"data", &nonce, &Utc::now());
         #[cfg(not(feature = "sgx"))]
         assert!(result.is_err(), "SGX attestation should fail without sgx feature");
         #[cfg(feature = "sgx")]
@@ -622,8 +641,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(data),
             timestamp: Utc::now(),
-            nonce: "test-nonce".to_string(),
-            attestation_doc: "aabbccdd".to_string(),
+            nonce: test_nonce("nitro-report"),
+            attestation_doc: test_attestation_doc("nitro-report"),
             certificate_chain: Vec::new(),
         };
         let result = gen.verify_attestation(&report, data);
@@ -645,8 +664,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(data),
             timestamp: Utc::now(),
-            nonce: "test-nonce".to_string(),
-            attestation_doc: "aabbccdd".to_string(),
+            nonce: test_nonce("sgx-report"),
+            attestation_doc: test_attestation_doc("sgx-report"),
             certificate_chain: Vec::new(),
         };
         let result = gen.verify_attestation(&report, data);
@@ -667,8 +686,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(b"original-data"),
             timestamp: Utc::now(),
-            nonce: "nonce".to_string(),
-            attestation_doc: "aa".to_string(),
+            nonce: test_nonce("nitro-wrong-data"),
+            attestation_doc: test_attestation_doc("nitro-wrong-data"),
             certificate_chain: Vec::new(),
         };
         // Wrong data should fail the user_data_hash check before reaching platform match
@@ -683,11 +702,12 @@ mod tests {
     #[test]
     fn generate_attestation_produces_valid_report() {
         let gen = AttestationGenerator::new();
-        let report = gen.generate_attestation(b"compliance-data", "nonce-xyz").unwrap();
+        let nonce = test_nonce("valid-report");
+        let report = gen.generate_attestation(b"compliance-data", &nonce).unwrap();
         assert_eq!(report.platform, TeePlatform::Mock);
         assert!(!report.attestation_doc.is_empty());
         assert!(!report.measurement.is_empty());
-        assert_eq!(report.nonce, "nonce-xyz");
+        assert_eq!(report.nonce, nonce);
         // The debug log on line 132 is executed during this call
     }
 
@@ -712,7 +732,8 @@ mod tests {
             enclave_measurement: AttestationGenerator::compute_enclave_measurement(),
             platform: TeePlatform::Nitro,
         };
-        let result = gen.generate_attestation(b"test-data", "nonce");
+        let nonce = test_nonce("forced-nitro");
+        let result = gen.generate_attestation(b"test-data", &nonce);
         // Without nitro feature: generate_nitro_attestation returns Err
         // With nitro feature: it would succeed (falls back to mock)
         #[cfg(not(feature = "nitro"))]
@@ -727,7 +748,8 @@ mod tests {
             enclave_measurement: AttestationGenerator::compute_enclave_measurement(),
             platform: TeePlatform::Sgx,
         };
-        let result = gen.generate_attestation(b"test-data", "nonce");
+        let nonce = test_nonce("forced-sgx");
+        let result = gen.generate_attestation(b"test-data", &nonce);
         #[cfg(not(feature = "sgx"))]
         assert!(result.is_err());
         #[cfg(feature = "sgx")]
@@ -749,8 +771,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(data),
             timestamp: Utc::now(),
-            nonce: "nonce".to_string(),
-            attestation_doc: "aabb".to_string(),
+            nonce: test_nonce("nitro-fail-closed"),
+            attestation_doc: test_attestation_doc("nitro-fail-closed"),
             certificate_chain: Vec::new(),
         };
         let result = gen.verify_attestation(&report, data);
@@ -774,8 +796,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(data),
             timestamp: Utc::now(),
-            nonce: "nonce".to_string(),
-            attestation_doc: "aabb".to_string(),
+            nonce: test_nonce("sgx-fail-closed"),
+            attestation_doc: test_attestation_doc("sgx-fail-closed"),
             certificate_chain: Vec::new(),
         };
         let result = gen.verify_attestation(&report, data);
@@ -799,8 +821,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(data),
             timestamp: Utc::now(),
-            nonce: "nonce".to_string(),
-            attestation_doc: "aabb".to_string(),
+            nonce: test_nonce("nitro-mock"),
+            attestation_doc: test_attestation_doc("nitro-mock"),
             certificate_chain: Vec::new(),
         };
         let result = gen.verify_attestation(&report, data).unwrap();
@@ -818,8 +840,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(data),
             timestamp: Utc::now(),
-            nonce: "nonce".to_string(),
-            attestation_doc: "aabb".to_string(),
+            nonce: test_nonce("sgx-mock"),
+            attestation_doc: test_attestation_doc("sgx-mock"),
             certificate_chain: Vec::new(),
         };
         let result = gen.verify_attestation(&report, data).unwrap();
@@ -836,7 +858,8 @@ mod tests {
             enclave_measurement: AttestationGenerator::compute_enclave_measurement(),
             platform: TeePlatform::None,
         };
-        let result = gen.generate_attestation(b"data", "nonce");
+        let nonce = test_nonce("none-generate");
+        let result = gen.generate_attestation(b"data", &nonce);
         assert!(result.is_err(), "None platform must refuse to generate attestation");
         let err_msg = result.unwrap_err().to_string();
         assert!(
@@ -859,8 +882,8 @@ mod tests {
             measurement: gen.enclave_measurement.clone(),
             user_data_hash: sha3_hex(data),
             timestamp: Utc::now(),
-            nonce: "nonce".to_string(),
-            attestation_doc: "aabb".to_string(),
+            nonce: test_nonce("none-verify"),
+            attestation_doc: test_attestation_doc("none-verify"),
             certificate_chain: Vec::new(),
         };
         let result = gen.verify_attestation(&report, data);

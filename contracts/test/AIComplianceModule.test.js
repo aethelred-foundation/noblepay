@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("AIComplianceModule", function () {
   async function deployFixture() {
@@ -99,7 +101,7 @@ describe("AIComplianceModule", function () {
       const { ai, other } = await loadFixture(deployFixture);
       const hash = ethers.keccak256(ethers.toUtf8Bytes("x"));
       await expect(ai.connect(other).registerModel("X", "1.0", hash))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 
@@ -151,7 +153,7 @@ describe("AIComplianceModule", function () {
     it("should revert for non-operator", async function () {
       const { ai, other, modelId } = await loadFixture(deployFixture);
       await expect(ai.connect(other).recordDecision(subjectHash, modelId, 0, 85, evidenceHash, reasonHash))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
 
     it("should increment outcome count", async function () {
@@ -275,7 +277,7 @@ describe("AIComplianceModule", function () {
       const { ai, other, decisionId } = await decisionRecordedFixture();
       const overrideReason = ethers.keccak256(ethers.toUtf8Bytes("reason"));
       await expect(ai.connect(other).overrideDecision(decisionId, 1, overrideReason))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
 
     it("should update outcome counts on override", async function () {

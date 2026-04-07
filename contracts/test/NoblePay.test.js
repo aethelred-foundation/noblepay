@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("NoblePay", function () {
   async function deployFixture() {
@@ -178,7 +180,7 @@ describe("NoblePay", function () {
       const { noblepay, other, paymentId } = await paymentFixture();
       await expect(noblepay.connect(other).submitComplianceResult(
         paymentId, true, 30, true, ethers.ZeroHash, "0x1234"
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("should revert for invalid risk score > 100", async function () {
@@ -332,8 +334,8 @@ describe("NoblePay", function () {
 
     it("should revert admin functions for non-admin", async function () {
       const { noblepay, other } = await loadFixture(deployFixture);
-      await expect(noblepay.connect(other).pause()).to.be.reverted;
-      await expect(noblepay.connect(other).setFees(0, 0)).to.be.reverted;
+      await expect(noblepay.connect(other).pause()).to.be.revert(ethers);
+      await expect(noblepay.connect(other).setFees(0, 0)).to.be.revert(ethers);
     });
   });
 

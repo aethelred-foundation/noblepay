@@ -1,5 +1,6 @@
 import { PrismaClient } from "@prisma/client";
 import crypto from "crypto";
+import { generateOpaqueId } from "../lib/identifiers";
 import { logger } from "../lib/logger";
 import { AuditService } from "./audit";
 
@@ -145,13 +146,7 @@ export class LiquidityService {
       throw new LiquidityError("POOL_INACTIVE", "Pool is not active", 409);
     }
 
-    const positionId =
-      "lp-" +
-      crypto
-        .createHash("sha256")
-        .update(`${provider}:${input.poolId}:${Date.now()}`)
-        .digest("hex")
-        .slice(0, 16);
+    const positionId = generateOpaqueId("lp");
 
     const liquidityAmount = (parseFloat(input.amountA) + parseFloat(input.amountB)).toFixed(2);
     const sharePercentage = (parseFloat(liquidityAmount) / (parseFloat(pool.totalLiquidity) + parseFloat(liquidityAmount))) * 100;

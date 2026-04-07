@@ -34,6 +34,9 @@ const FLAG_THRESHOLD: u8 = 40;
 /// AML risk score threshold above which a payment is blocked.
 const BLOCK_THRESHOLD: u8 = 75;
 
+/// Upper bound for concurrently screened payments in one batch.
+const MAX_BATCH_SCREENING_REQUESTS: usize = 256;
+
 // ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
@@ -356,7 +359,26 @@ impl ComplianceEngine {
         &self,
         requests: Vec<ScreeningRequest>,
     ) -> BatchScreeningResponse {
-        let mut handles = Vec::with_capacity(requests.len());
+        let request_count = requests.len();
+
+        if request_count > MAX_BATCH_SCREENING_REQUESTS {
+            let outcomes = requests
+                .into_iter()
+                .map(|req| {
+                    (
+                        req.payment.id,
+                        Err(format!(
+                            "batch size {} exceeds limit {}",
+                            request_count,
+                            MAX_BATCH_SCREENING_REQUESTS,
+                        )),
+                    )
+                })
+                .collect();
+            return Self::collect_batch_results(outcomes);
+        }
+
+        let mut handles = Vec::with_capacity(requests.len().min(MAX_BATCH_SCREENING_REQUESTS));
 
         for req in &requests {
             let engine = self.clone();

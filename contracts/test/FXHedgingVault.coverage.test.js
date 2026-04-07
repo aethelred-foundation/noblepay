@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("FXHedgingVault - Coverage", function () {
   const RATE_PRECISION = 100000000n;
@@ -282,7 +284,7 @@ describe("FXHedgingVault - Coverage", function () {
     it("should revert batch with mismatched arrays", async function () {
       const { vault, oracle, pairId } = await loadFixture(deployFixture);
       await expect(vault.connect(oracle).batchSubmitFXRates([pairId], [AED_USD_RATE, 100n]))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 
@@ -292,7 +294,7 @@ describe("FXHedgingVault - Coverage", function () {
       const maturity = BigInt(await time.latest()) + 86400n * 30n;
       await expect(vault.connect(hedger).createOption(
         pairId, 0, 1000n * RATE_PRECISION, 370000000n, 100, maturity, usdc.target, ethers.parseUnits("5000", 6)
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("should revert createOption with zero strike rate", async function () {
@@ -318,7 +320,7 @@ describe("FXHedgingVault - Coverage", function () {
       await vault.connect(admin).pause();
       const maturity = BigInt(await time.latest()) + 86400n * 30n;
       await expect(vault.connect(hedger).createForward(pairId, 1000n * RATE_PRECISION, maturity, usdc.target, ethers.parseUnits("5000", 6)))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 

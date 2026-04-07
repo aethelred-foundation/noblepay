@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 // ================================================================
 // MockERC20 - decimals() coverage
@@ -452,7 +454,7 @@ describe("LiquidityPool - Final Coverage", function () {
   it("should revert addLiquidity for non-LP role", async function () {
     const { pool, other, poolId } = await loadFixture(deployFixture);
     await expect(pool.connect(other).addLiquidity(poolId, 100, 100, -1000, 1000))
-      .to.be.reverted;
+      .to.be.revert(ethers);
   });
 
   it("should revert removeLiquidity for non-owner", async function () {

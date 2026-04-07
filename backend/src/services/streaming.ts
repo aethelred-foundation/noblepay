@@ -1,6 +1,6 @@
 import { PrismaClient, Prisma } from "@prisma/client";
-import crypto from "crypto";
-import { logger } from "../lib/logger";
+import { generateOpaqueId } from "../lib/identifiers";
+import { logger, maskIdentifier } from "../lib/logger";
 import { AuditService } from "./audit";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -68,6 +68,8 @@ export interface StreamAnalytics {
   upcomingMilestones: Array<{ streamId: string; event: string; date: Date }>;
 }
 
+const MAX_BATCH_STREAMS = 100;
+
 // ─── Service ────────────────────────────────────────────────────────────────
 
 export class StreamingService {
@@ -85,13 +87,7 @@ export class StreamingService {
     input: CreateStreamInput,
     businessId: string,
   ): Promise<StreamRecord> {
-    const streamId =
-      "stream-" +
-      crypto
-        .createHash("sha256")
-        .update(`${input.sender}:${input.recipient}:${Date.now()}`)
-        .digest("hex")
-        .slice(0, 16);
+    const streamId = generateOpaqueId("stream");
 
     const startTime = input.startTime ? new Date(input.startTime) : new Date();
     const endTime = new Date(input.endTime);
@@ -160,6 +156,14 @@ export class StreamingService {
   async createBatchStreams(
     input: BatchStreamInput,
   ): Promise<{ succeeded: StreamRecord[]; failed: Array<{ index: number; error: string }> }> {
+    if (input.streams.length > MAX_BATCH_STREAMS) {
+      throw new StreamError(
+        "BATCH_TOO_LARGE",
+        `Batch stream creation is limited to ${MAX_BATCH_STREAMS} streams per request`,
+        400,
+      );
+    }
+
     const succeeded: StreamRecord[] = [];
     const failed: Array<{ index: number; error: string }> = [];
 
@@ -273,7 +277,7 @@ export class StreamingService {
       metadata: { streamId },
     });
 
-    logger.info("Stream paused", { streamId, actor });
+    logger.info("Stream paused", { streamId, actorRef: maskIdentifier(actor) });
     return stream;
   }
 
@@ -303,7 +307,7 @@ export class StreamingService {
       metadata: { streamId },
     });
 
-    logger.info("Stream resumed", { streamId, actor });
+    logger.info("Stream resumed", { streamId, actorRef: maskIdentifier(actor) });
     return stream;
   }
 
@@ -342,7 +346,12 @@ export class StreamingService {
       metadata: { streamId, settledAmount, refundedAmount },
     });
 
-    logger.info("Stream cancelled", { streamId, actor, settledAmount, refundedAmount });
+    logger.info("Stream cancelled", {
+      streamId,
+      actorRef: maskIdentifier(actor),
+      settledAmount,
+      refundedAmount,
+    });
     return { stream, settledAmount, refundedAmount };
   }
 

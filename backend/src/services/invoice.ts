@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import crypto from "crypto";
-import { logger } from "../lib/logger";
+import { generateOpaqueId } from "../lib/identifiers";
+import { logger, maskIdentifier } from "../lib/logger";
 import { AuditService } from "./audit";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -112,13 +113,7 @@ export class InvoiceService {
     issuer: string,
     businessId: string,
   ): Promise<InvoiceRecord> {
-    const invoiceId =
-      "inv-" +
-      crypto
-        .createHash("sha256")
-        .update(`${issuer}:${input.debtor}:${input.amount}:${Date.now()}`)
-        .digest("hex")
-        .slice(0, 16);
+    const invoiceId = generateOpaqueId("inv");
 
     const creditScore = this.getCreditScore(input.debtor);
     const discountRate = this.calculateDiscountRate(creditScore.score, input.maturityDate);
@@ -157,8 +152,8 @@ export class InvoiceService {
 
     logger.info("Invoice created", {
       invoiceId,
-      issuer,
-      debtor: input.debtor,
+      issuerRef: maskIdentifier(issuer),
+      debtorRef: maskIdentifier(input.debtor),
       amount: input.amount,
       maturityDate: input.maturityDate,
       discountRate,
@@ -279,7 +274,10 @@ export class InvoiceService {
       metadata: { invoiceId },
     });
 
-    logger.info("Invoice settled", { invoiceId, actor });
+    logger.info("Invoice settled", {
+      invoiceId,
+      actorRef: maskIdentifier(actor),
+    });
     return invoice;
   }
 

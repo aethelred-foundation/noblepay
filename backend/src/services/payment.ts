@@ -1,7 +1,7 @@
 import { PrismaClient, Payment, PaymentStatus, Prisma } from "@prisma/client";
 import { v4 as uuidv4 } from "uuid";
-import crypto from "crypto";
-import { logger } from "../lib/logger";
+import { generateHexId } from "../lib/identifiers";
+import { logger, maskIdentifier } from "../lib/logger";
 import { paymentTotal, paymentAmount } from "../lib/metrics";
 import { CreatePaymentInput, ListPaymentsInput } from "../middleware/validation";
 import { AuditService } from "./audit";
@@ -45,6 +45,8 @@ const FEE_SCHEDULE: Record<string, number> = {
   INSTITUTIONAL: 5, // 0.05%
 };
 
+const MAX_BATCH_PAYMENTS = 100;
+
 export class PaymentService {
   constructor(
     private prisma: PrismaClient,
@@ -59,12 +61,7 @@ export class PaymentService {
     businessId: string,
   ): Promise<Payment> {
     const nonce = uuidv4();
-    const paymentId =
-      "0x" +
-      crypto
-        .createHash("sha256")
-        .update(`${input.sender}:${input.recipient}:${input.amount}:${nonce}`)
-        .digest("hex");
+    const paymentId = generateHexId();
 
     const payment = await this.prisma.payment.create({
       data: {
@@ -227,7 +224,10 @@ export class PaymentService {
       metadata: { paymentId: payment.paymentId },
     });
 
-    logger.info("Payment cancelled", { paymentId: payment.paymentId, actor });
+    logger.info("Payment cancelled", {
+      paymentId: payment.paymentId,
+      actorRef: maskIdentifier(actor),
+    });
 
     return updated;
   }
@@ -274,7 +274,10 @@ export class PaymentService {
       metadata: { paymentId: payment.paymentId, amount: payment.amount.toString() },
     });
 
-    logger.info("Payment refunded", { paymentId: payment.paymentId, actor });
+    logger.info("Payment refunded", {
+      paymentId: payment.paymentId,
+      actorRef: maskIdentifier(actor),
+    });
 
     return updated;
   }
@@ -368,6 +371,14 @@ export class PaymentService {
     payments: CreatePaymentInput[],
     businessId: string,
   ): Promise<{ succeeded: Payment[]; failed: Array<{ index: number; error: string }> }> {
+    if (payments.length > MAX_BATCH_PAYMENTS) {
+      throw new PaymentError(
+        "BATCH_TOO_LARGE",
+        `Batch payment processing is limited to ${MAX_BATCH_PAYMENTS} payments per request`,
+        400,
+      );
+    }
+
     const succeeded: Payment[] = [];
     const failed: Array<{ index: number; error: string }> = [];
 
@@ -387,7 +398,7 @@ export class PaymentService {
       total: payments.length,
       succeeded: succeeded.length,
       failed: failed.length,
-      businessId,
+      businessRef: maskIdentifier(businessId),
     });
 
     return { succeeded, failed };

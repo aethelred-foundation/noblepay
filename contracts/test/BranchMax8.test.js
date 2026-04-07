@@ -1,7 +1,9 @@
 // BranchMax8.test.js — Final push: targets remaining onlyRole, nonReentrant, and conditional branches
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("BranchMax8 — Final coverage push", function () {
 
@@ -24,18 +26,18 @@ describe("BranchMax8 — Final coverage push", function () {
 
     it("deregisterTEENode from non-admin reverts", async function () {
       const { co, other, tee1 } = await loadFixture(deployCO);
-      await expect(co.connect(other).deregisterTEENode(tee1.address)).to.be.reverted;
+      await expect(co.connect(other).deregisterTEENode(tee1.address)).to.be.revert(ethers);
     });
 
     it("pause from non-admin reverts", async function () {
       const { co, other } = await loadFixture(deployCO);
-      await expect(co.connect(other).pause()).to.be.reverted;
+      await expect(co.connect(other).pause()).to.be.revert(ethers);
     });
 
     it("unpause from non-admin reverts", async function () {
       const { co, admin, other } = await loadFixture(deployCO);
       await co.connect(admin).pause();
-      await expect(co.connect(other).unpause()).to.be.reverted;
+      await expect(co.connect(other).unpause()).to.be.revert(ethers);
     });
 
     it("submitScreeningResult with riskScore > 100 reverts", async function () {
@@ -44,7 +46,7 @@ describe("BranchMax8 — Final coverage push", function () {
         ethers.keccak256(ethers.toUtf8Bytes("sub")),
         ethers.keccak256(ethers.toUtf8Bytes("res")),
         101, true
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("submitScreeningResult with riskScore 0 (low risk)", async function () {
@@ -106,7 +108,7 @@ describe("BranchMax8 — Final coverage push", function () {
         ethers.ZeroHash, ethers.ZeroAddress, ethers.ZeroHash,
         ethers.ZeroHash, vasp2.address, ethers.ZeroHash,
         1000, "0x555344", ethers.ZeroHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("submitTravelRuleData with zero beneficiary address reverts", async function () {
@@ -116,7 +118,7 @@ describe("BranchMax8 — Final coverage push", function () {
         ethers.ZeroHash, vasp1.address, ethers.ZeroHash,
         ethers.ZeroHash, ethers.ZeroAddress, ethers.ZeroHash,
         1000, "0x555344", ethers.ZeroHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("submitTravelRuleData with zero amount reverts", async function () {
@@ -126,7 +128,7 @@ describe("BranchMax8 — Final coverage push", function () {
         ethers.ZeroHash, vasp1.address, ethers.ZeroHash,
         ethers.ZeroHash, vasp2.address, ethers.ZeroHash,
         0, "0x555344", ethers.ZeroHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("duplicate submission reverts", async function () {
@@ -144,14 +146,14 @@ describe("BranchMax8 — Final coverage push", function () {
         ethers.ZeroHash, vasp1.address, ethers.ZeroHash,
         ethers.ZeroHash, vasp2.address, ethers.ZeroHash,
         1000, "0x555344", ethers.ZeroHash
-      )).to.be.reverted;
+      )).to.be.revert(ethers);
     });
 
     it("verifyTravelRuleCompliance from non-TEE reverts", async function () {
       const { tr, other } = await loadFixture(deployTR);
       const fakeId = ethers.keccak256(ethers.toUtf8Bytes("fake"));
       // verifyTravelRuleCompliance(travelRuleId) — only 1 param
-      await expect(tr.connect(other).verifyTravelRuleCompliance(fakeId)).to.be.reverted;
+      await expect(tr.connect(other).verifyTravelRuleCompliance(fakeId)).to.be.revert(ethers);
     });
 
     it("verifyTravelRuleCompliance succeeds", async function () {
@@ -174,20 +176,20 @@ describe("BranchMax8 — Final coverage push", function () {
     it("rejectTravelRuleData from non-TEE reverts", async function () {
       const { tr, other } = await loadFixture(deployTR);
       const fakeId = ethers.keccak256(ethers.toUtf8Bytes("fake2"));
-      await expect(tr.connect(other).rejectTravelRuleData(fakeId, "reason")).to.be.reverted;
+      await expect(tr.connect(other).rejectTravelRuleData(fakeId, "reason")).to.be.revert(ethers);
     });
 
     it("shareWithReceivingInstitution from non-VASP reverts", async function () {
       const { tr, other, vasp2 } = await loadFixture(deployTR);
       const fakeId = ethers.keccak256(ethers.toUtf8Bytes("fake3"));
       // shareWithReceivingInstitution(travelRuleId, beneficiaryVASP(address), sharedDataHash)
-      await expect(tr.connect(other).shareWithReceivingInstitution(fakeId, vasp2.address, ethers.ZeroHash)).to.be.reverted;
+      await expect(tr.connect(other).shareWithReceivingInstitution(fakeId, vasp2.address, ethers.ZeroHash)).to.be.revert(ethers);
     });
 
     it("acknowledgeTravelRuleData from non-VASP reverts", async function () {
       const { tr, other } = await loadFixture(deployTR);
       const fakeId = ethers.keccak256(ethers.toUtf8Bytes("fake4"));
-      await expect(tr.connect(other).acknowledgeTravelRuleData(fakeId)).to.be.reverted;
+      await expect(tr.connect(other).acknowledgeTravelRuleData(fakeId)).to.be.revert(ethers);
     });
 
     it("requiresFullTravelRuleData view function", async function () {
@@ -240,7 +242,7 @@ describe("BranchMax8 — Final coverage push", function () {
       const r = await tx.wait();
       const streamId = r.logs.find(l => l.fragment && l.fragment.name === "StreamCreated").args[0];
       // immediately — cliff not passed
-      await expect(sp.connect(recipient).withdraw(streamId)).to.be.reverted;
+      await expect(sp.connect(recipient).withdraw(streamId)).to.be.revert(ethers);
     });
 
     it("withdraw after cliff but before end", async function () {
@@ -272,24 +274,24 @@ describe("BranchMax8 — Final coverage push", function () {
       const r = await tx.wait();
       const streamId = r.logs.find(l => l.fragment && l.fragment.name === "StreamCreated").args[0];
       await sp.connect(sender).cancelStream(streamId);
-      await expect(sp.connect(sender).cancelStream(streamId)).to.be.reverted;
+      await expect(sp.connect(sender).cancelStream(streamId)).to.be.revert(ethers);
     });
 
     it("withdraw from non-existent stream reverts", async function () {
       const { sp, recipient } = await loadFixture(deploySP);
       const fakeId = ethers.keccak256(ethers.toUtf8Bytes("fake-stream"));
-      await expect(sp.connect(recipient).withdraw(fakeId)).to.be.reverted;
+      await expect(sp.connect(recipient).withdraw(fakeId)).to.be.revert(ethers);
     });
 
     it("cancelStream non-existent stream reverts", async function () {
       const { sp, sender } = await loadFixture(deploySP);
       const fakeId = ethers.keccak256(ethers.toUtf8Bytes("fake-stream2"));
-      await expect(sp.connect(sender).cancelStream(fakeId)).to.be.reverted;
+      await expect(sp.connect(sender).cancelStream(fakeId)).to.be.revert(ethers);
     });
 
     it("createStream with duration below minimum reverts", async function () {
       const { sp, usdc, sender, recipient } = await loadFixture(deploySP);
-      await expect(sp.connect(sender).createStream(recipient.address, usdc.target, 1000, 100, 0)).to.be.reverted;
+      await expect(sp.connect(sender).createStream(recipient.address, usdc.target, 1000, 100, 0)).to.be.revert(ethers);
     });
 
     it("pause and unpause from admin", async function () {
@@ -300,7 +302,7 @@ describe("BranchMax8 — Final coverage push", function () {
 
     it("pause from non-admin reverts", async function () {
       const { sp, other } = await loadFixture(deploySP);
-      await expect(sp.connect(other).pause()).to.be.reverted;
+      await expect(sp.connect(other).pause()).to.be.revert(ethers);
     });
   });
 
@@ -332,12 +334,12 @@ describe("BranchMax8 — Final coverage push", function () {
 
     it("addCurrencyPair from non-admin reverts", async function () {
       const { fx, other } = await loadFixture(deployFX);
-      await expect(fx.connect(other).addCurrencyPair("0x474250", "0x555344", 500, 300, 200)).to.be.reverted;
+      await expect(fx.connect(other).addCurrencyPair("0x474250", "0x555344", 500, 300, 200)).to.be.revert(ethers);
     });
 
     it("setSupportedCollateral from non-admin reverts", async function () {
       const { fx, other } = await loadFixture(deployFX);
-      await expect(fx.connect(other).setSupportedCollateral(ethers.ZeroAddress, true)).to.be.reverted;
+      await expect(fx.connect(other).setSupportedCollateral(ethers.ZeroAddress, true)).to.be.revert(ethers);
     });
 
     it("createForward from non-owner settles to different account", async function () {
@@ -352,7 +354,7 @@ describe("BranchMax8 — Final coverage push", function () {
         // hedger2 tries to settle — should fail (not owner)
         await time.increase(31 * 86400);
         await fx.connect(oracle).submitFXRate(pairId, ethers.parseUnits("1.2", 8));
-        await expect(fx.connect(hedger2).settleForward(posId)).to.be.reverted;
+        await expect(fx.connect(hedger2).settleForward(posId)).to.be.revert(ethers);
       }
     });
 
@@ -364,14 +366,14 @@ describe("BranchMax8 — Final coverage push", function () {
 
     it("pause from non-admin reverts", async function () {
       const { fx, other } = await loadFixture(deployFX);
-      await expect(fx.connect(other).pause()).to.be.reverted;
+      await expect(fx.connect(other).pause()).to.be.revert(ethers);
     });
 
     it("maturity too far in future reverts", async function () {
       const { fx, usdc, hedger, pairId } = await loadFixture(deployFX);
       const now = await time.latest();
       // Try maturity 2 years out (likely exceeds MAX_MATURITY)
-      await expect(fx.connect(hedger).createForward(pairId, ethers.parseUnits("1000", 6), now + 731 * 86400, usdc.target, ethers.parseUnits("500", 6))).to.be.reverted;
+      await expect(fx.connect(hedger).createForward(pairId, ethers.parseUnits("1000", 6), now + 731 * 86400, usdc.target, ethers.parseUnits("500", 6))).to.be.revert(ethers);
     });
   });
 
@@ -405,7 +407,7 @@ describe("BranchMax8 — Final coverage push", function () {
 
     it("createPool from non-admin reverts", async function () {
       const { pool, token0, token1, other } = await loadFixture(deployLP);
-      await expect(pool.connect(other).createPool(token0.target, token1.target, 30, 10, 500)).to.be.reverted;
+      await expect(pool.connect(other).createPool(token0.target, token1.target, 30, 10, 500)).to.be.revert(ethers);
     });
 
     it("addLiquidity below minimum reverts", async function () {
@@ -413,7 +415,7 @@ describe("BranchMax8 — Final coverage push", function () {
       const tx = await pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 500);
       const r = await tx.wait();
       const poolId = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated").args[0];
-      await expect(pool.connect(lp1).addLiquidity(poolId, 1, 1, -100, 100)).to.be.reverted;
+      await expect(pool.connect(lp1).addLiquidity(poolId, 1, 1, -100, 100)).to.be.revert(ethers);
     });
 
     it("harvestFees on position with no fees", async function () {
@@ -437,7 +439,7 @@ describe("BranchMax8 — Final coverage push", function () {
       const r = await tx.wait();
       const poolId = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated").args[0];
       await pool.connect(lp1).addLiquidity(poolId, ethers.parseEther("1000"), ethers.parseEther("1000"), -1000, 1000);
-      await expect(pool.connect(other).flashLoan(poolId, token0.target, 0, "0x")).to.be.reverted;
+      await expect(pool.connect(other).flashLoan(poolId, token0.target, 0, "0x")).to.be.revert(ethers);
     });
 
     it("flashLoan with excessive amount reverts", async function () {
@@ -446,7 +448,7 @@ describe("BranchMax8 — Final coverage push", function () {
       const r = await tx.wait();
       const poolId = r.logs.find(l => l.fragment && l.fragment.name === "PoolCreated").args[0];
       await pool.connect(lp1).addLiquidity(poolId, ethers.parseEther("1000"), ethers.parseEther("1000"), -1000, 1000);
-      await expect(pool.connect(other).flashLoan(poolId, token0.target, ethers.parseEther("9999"), "0x")).to.be.reverted;
+      await expect(pool.connect(other).flashLoan(poolId, token0.target, ethers.parseEther("9999"), "0x")).to.be.revert(ethers);
     });
 
     it("getPoolUtilization view", async function () {
@@ -471,7 +473,7 @@ describe("BranchMax8 — Final coverage push", function () {
 
     it("pause from non-admin reverts", async function () {
       const { pool, other } = await loadFixture(deployLP);
-      await expect(pool.connect(other).pause()).to.be.reverted;
+      await expect(pool.connect(other).pause()).to.be.revert(ethers);
     });
   });
 
@@ -496,27 +498,27 @@ describe("BranchMax8 — Final coverage push", function () {
 
     it("registerRelay with insufficient stake reverts", async function () {
       const { ccr, relay1 } = await loadFixture(deployCCR);
-      await expect(ccr.connect(relay1).registerRelay({ value: ethers.parseEther("1") })).to.be.reverted;
+      await expect(ccr.connect(relay1).registerRelay({ value: ethers.parseEther("1") })).to.be.revert(ethers);
     });
 
     it("pause from non-admin reverts", async function () {
       const { ccr, other } = await loadFixture(deployCCR);
-      await expect(ccr.connect(other).pause()).to.be.reverted;
+      await expect(ccr.connect(other).pause()).to.be.revert(ethers);
     });
 
     it("addChain from non-admin reverts", async function () {
       const { ccr, other } = await loadFixture(deployCCR);
-      await expect(ccr.connect(other).addChain(56, "BSC", 100, 10, 256, 86400, 100, 1000000)).to.be.reverted;
+      await expect(ccr.connect(other).addChain(56, "BSC", 100, 10, 256, 86400, 100, 1000000)).to.be.revert(ethers);
     });
 
     it("removeChain from non-admin reverts", async function () {
       const { ccr, other } = await loadFixture(deployCCR);
-      await expect(ccr.connect(other).removeChain(137)).to.be.reverted;
+      await expect(ccr.connect(other).removeChain(137)).to.be.revert(ethers);
     });
 
     it("setTokenSupport from non-admin reverts", async function () {
       const { ccr, other, usdc } = await loadFixture(deployCCR);
-      await expect(ccr.connect(other).setTokenSupport(usdc.target, true)).to.be.reverted;
+      await expect(ccr.connect(other).setTokenSupport(usdc.target, true)).to.be.revert(ethers);
     });
   });
 });

@@ -1,6 +1,8 @@
-const { expect } = require("chai");
-const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+import { expect } from "chai";
+import { network } from "hardhat";
+
+const { ethers, networkHelpers } = await network.connect();
+const { loadFixture, time } = networkHelpers;
 
 describe("BusinessRegistry", function () {
   async function deployFixture() {
@@ -138,7 +140,7 @@ describe("BusinessRegistry", function () {
     it("should revert for non-verifier", async function () {
       const { registry, other, biz1 } = await registeredFixture();
       await expect(registry.connect(other).verifyBusiness(biz1.address))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 
@@ -191,7 +193,7 @@ describe("BusinessRegistry", function () {
     it("should revert for non-admin", async function () {
       const { registry, other, biz1 } = await verifiedFixture();
       await expect(registry.connect(other).revokeBusiness(biz1.address, "reason"))
-        .to.be.reverted;
+        .to.be.revert(ethers);
     });
   });
 
@@ -310,7 +312,7 @@ describe("BusinessRegistry", function () {
 
     it("should revert pause for non-admin", async function () {
       const { registry, other } = await loadFixture(deployFixture);
-      await expect(registry.connect(other).pause()).to.be.reverted;
+      await expect(registry.connect(other).pause()).to.be.revert(ethers);
     });
   });
 });
