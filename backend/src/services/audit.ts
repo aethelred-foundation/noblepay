@@ -1,6 +1,6 @@
 import { PrismaClient, EventType, Severity, Prisma } from "@prisma/client";
 import crypto from "crypto";
-import { logger, maskIdentifier } from "../lib/logger";
+import { logger, maskIdentifier, maskTransactionHash } from "../lib/logger";
 
 const DEFAULT_AUDIT_CHAIN_SECRET = "noblepay-audit-chain-development-secret";
 
@@ -67,7 +67,7 @@ export class AuditService {
     });
 
     logger.debug("Audit entry created", {
-      eventId,
+      eventRef: maskTransactionHash(eventId),
       eventType: input.eventType,
       actorRef: maskIdentifier(input.actor),
     });
@@ -366,6 +366,6 @@ export class AuditService {
     });
 
     const chainSecret = process.env.AUDIT_CHAIN_SECRET || DEFAULT_AUDIT_CHAIN_SECRET;
-    return "0x" + crypto.createHmac("sha256", chainSecret).update(payload).digest("hex");
+    return "0x" + crypto.createHmac("sha512", chainSecret).update(payload).digest("hex");
   }
 }

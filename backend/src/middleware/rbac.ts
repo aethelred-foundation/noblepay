@@ -201,7 +201,7 @@ export function requirePermission(...required: Permission[]) {
 
     if (missing.length > 0) {
       logger.warn("RBAC: Permission denied", {
-        userRef: maskIdentifier(req.userId),
+        actorPresent: Boolean(req.userId),
         role,
         required,
         missing,
@@ -248,7 +248,7 @@ export function requireRole(...roles: Role[]) {
 
     if (!hasAccess) {
       logger.warn("RBAC: Role denied", {
-        userRef: maskIdentifier(req.userId),
+        actorPresent: Boolean(req.userId),
         userRole,
         requiredRoles: roles,
         path: req.path,

@@ -151,7 +151,7 @@ export class InvoiceService {
     });
 
     logger.info("Invoice created", {
-      invoiceId,
+      invoiceRef: maskIdentifier(invoiceId),
       issuerRef: maskIdentifier(issuer),
       debtorRef: maskIdentifier(input.debtor),
       amount: input.amount,
@@ -275,7 +275,7 @@ export class InvoiceService {
     });
 
     logger.info("Invoice settled", {
-      invoiceId,
+      invoiceRef: maskIdentifier(invoiceId),
       actorRef: maskIdentifier(actor),
     });
     return invoice;

@@ -416,7 +416,7 @@ export class TreasuryService {
     });
 
     logger.info("Proposal approval recorded", {
-      proposalId,
+      proposalRef: maskIdentifier(proposalId),
       signerRef: maskIdentifier(signer),
       approvals: proposal.currentApprovals,
       required: proposal.requiredApprovals,
@@ -571,7 +571,7 @@ export class TreasuryService {
     });
 
     logger.info("Proposal executed", {
-      proposalId,
+      proposalRef: maskIdentifier(proposalId),
       executorRef: maskIdentifier(executor),
       txHashRef: maskTransactionHash(txHash),
     });

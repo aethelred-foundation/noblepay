@@ -37,7 +37,7 @@ describe("AuditService", () => {
           description: "Test payment",
           severity: "INFO",
           previousHash: "0xprevioushash",
-          eventId: expect.stringMatching(/^0x[a-f0-9]{64}$/),
+          eventId: expect.stringMatching(/^0x[a-f0-9]{128}$/),
         }),
       });
       expect(result).toBeDefined();

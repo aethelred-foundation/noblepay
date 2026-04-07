@@ -16,6 +16,8 @@ jest.mock("../../src/lib/logger", () => ({
   logger: mockLogger,
   generateCorrelationId: jest.fn().mockReturnValue("test-correlation-id"),
   createRequestLogger: jest.fn().mockReturnValue(mockLogger),
+  maskIdentifier: jest.fn((value?: string | null) => value ?? undefined),
+  maskTransactionHash: jest.fn((value?: string | null) => value ?? undefined),
 }));
 
 // ─── Mock Metrics ────────────────────────────────────────────────────────────
