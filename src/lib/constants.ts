@@ -123,12 +123,12 @@ export interface SupportedCurrency {
 }
 
 export const SUPPORTED_CURRENCIES: Record<string, SupportedCurrency> = {
-  AET: {
-    symbol: 'AET',
+  AETHEL: {
+    symbol: 'AETHEL',
     name: 'Aethel Token',
     decimals: 18,
     locale: 'en-US',
-    currencyCode: 'AET',
+    currencyCode: 'AETHEL',
     logoPath: '/tokens/aet.svg',
   },
   USDC: {

@@ -19,7 +19,7 @@ const INITIAL_RATES: FXRate[] = [
   { pair: 'USD/SGD', rate: 1.3412, change24h: 0.11, bid: 1.3410, ask: 1.3414, updatedAt: Date.now() },
   { pair: 'USD/JPY', rate: 149.82, change24h: 0.35, bid: 149.80, ask: 149.84, updatedAt: Date.now() },
   { pair: 'USD/INR', rate: 83.12, change24h: -0.04, bid: 83.10, ask: 83.14, updatedAt: Date.now() },
-  { pair: 'AET/USD', rate: 1.50, change24h: 2.10, bid: 1.49, ask: 1.51, updatedAt: Date.now() },
+  { pair: 'AETHEL/USD', rate: 1.50, change24h: 2.10, bid: 1.49, ask: 1.51, updatedAt: Date.now() },
 ];
 
 const MOCK_HEDGES: FXHedge[] = [

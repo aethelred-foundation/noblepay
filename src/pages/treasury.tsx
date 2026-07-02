@@ -43,7 +43,7 @@ const CHART_COLORS = [
 const CURRENCY_COLORS: Record<string, string> = {
   USDC: '#2775CA',
   USDT: '#26A17B',
-  AET: '#DC2626',
+  AETHEL: '#DC2626',
   AED: '#009B3A',
   USD: '#22C55E',
 };
@@ -185,7 +185,7 @@ function generateProposals(count: number): Proposal[] {
   const proposals: Proposal[] = [];
   const types: ProposalType[] = ['Transfer', 'Budget Allocation', 'Yield Strategy', 'Policy Change'];
   const statuses: ProposalStatus[] = ['Pending', 'Approved', 'Executed', 'Rejected'];
-  const currencies = ['USDC', 'USDT', 'AET', 'AED'];
+  const currencies = ['USDC', 'USDT', 'AETHEL', 'AED'];
   const titles = [
     'Q1 Marketing Budget Allocation', 'Cross-border Settlement to Dubai',
     'Yield Strategy: Aave V3 USDC', 'Infrastructure Upgrade Fund',
@@ -248,7 +248,7 @@ function generateYieldStrategies(): YieldStrategy[] {
       allocation: Math.floor(seededRandom(seed) * 5000000) + 500000,
       apy: seededRandom(seed + 10) * 12 + 1.5,
       tvl: Math.floor(seededRandom(seed + 20) * 500000000) + 10000000,
-      currency: ['USDC', 'USDT', 'AET', 'AED'][Math.floor(seededRandom(seed + 30) * 4)],
+      currency: ['USDC', 'USDT', 'AETHEL', 'AED'][Math.floor(seededRandom(seed + 30) * 4)],
       risk: risks[Math.floor(seededRandom(seed + 40) * risks.length)],
       status: seededRandom(seed + 50) > 0.2 ? 'Active' as const : 'Paused' as const,
     };
@@ -269,7 +269,7 @@ function generateTimeLocked(): TimeLocked[] {
       id: `TL-${String(100 + i).padStart(4, '0')}`,
       description: descriptions[i],
       amount: Math.floor(seededRandom(seed + 10) * 3000000) + 100000,
-      currency: ['USDC', 'USDT', 'AET'][Math.floor(seededRandom(seed + 20) * 3)],
+      currency: ['USDC', 'USDT', 'AETHEL'][Math.floor(seededRandom(seed + 20) * 3)],
       unlockAt,
       status: unlockAt - Date.now() < 86400000 ? 'Unlocking'
         : unlockAt < Date.now() ? 'Ready' : 'Locked',
@@ -688,14 +688,14 @@ export default function TreasuryPage() {
                           data={[
                             { name: 'USDC', value: 12500000 },
                             { name: 'USDT', value: 8200000 },
-                            { name: 'AET', value: 4800000 },
+                            { name: 'AETHEL', value: 4800000 },
                             { name: 'AED', value: 3100000 },
                           ]}
                           cx="50%" cy="50%" innerRadius={50} outerRadius={80}
                           paddingAngle={3} dataKey="value"
                         >
-                          {['USDC', 'USDT', 'AET', 'AED'].map((cur, i) => (
-                            <Cell key={cur} fill={[CURRENCY_COLORS.USDC, CURRENCY_COLORS.USDT, CURRENCY_COLORS.AET, CURRENCY_COLORS.AED][i]} />
+                          {['USDC', 'USDT', 'AETHEL', 'AED'].map((cur, i) => (
+                            <Cell key={cur} fill={[CURRENCY_COLORS.USDC, CURRENCY_COLORS.USDT, CURRENCY_COLORS.AETHEL, CURRENCY_COLORS.AED][i]} />
                           ))}
                         </Pie>
                         <RechartsTooltip content={<CustomTooltip />} />
@@ -1149,7 +1149,7 @@ export default function TreasuryPage() {
               <select className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent">
                 <option value="USDC">USDC</option>
                 <option value="USDT">USDT</option>
-                <option value="AET">AET</option>
+                <option value="AETHEL">AETHEL</option>
                 <option value="AED">AED</option>
               </select>
             </div>

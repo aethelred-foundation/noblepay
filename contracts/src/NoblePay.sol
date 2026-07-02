@@ -7,11 +7,17 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+/// @notice Consensus-anchored corridor clearance (see SealSettlementGate.sol).
+interface ISealSettlementGate {
+    function isCleared(address payer, address payee) external view returns (bool);
+    function requireCleared(address payer, address payee) external view;
+}
+
 /**
  * @title NoblePay
  * @author Aethelred Team
  * @notice Core cross-border payment contract for the NoblePay platform.
- *         Supports AET native token and ERC20 stablecoins (USDC/USDT) with
+ *         Supports AETHEL native token and ERC20 stablecoins (USDC/USDT) with
  *         TEE-backed compliance screening, FATF Travel Rule integration,
  *         and UAE regulatory compliance.
  *
@@ -85,7 +91,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         address sender;
         address recipient;
         uint256 amount;
-        address token;                // address(0) for native AET
+        address token;                // address(0) for native AETHEL
         bytes32 purposeHash;          // keccak256 of encrypted purpose code
         ComplianceStatus status;
         bytes teeAttestation;         // TEE attestation for compliance proof
@@ -179,6 +185,20 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     mapping(address => BusinessTier) public businessTiers;
 
     // ──────────────────────────────────────────────────────────────
+    // Seal-anchored settlement gate (top assurance tier)
+    // ──────────────────────────────────────────────────────────────
+
+    /// @notice The consensus-anchored corridor-clearance gate (anchors
+    ///         clearances to Aethelred Digital Seals via ISeal).
+    ISealSettlementGate public sealGate;
+
+    /// @notice When true, settlement additionally requires a LIVE consensus
+    ///         clearance for the payment's payer→payee corridor in {sealGate}
+    ///         — the top assurance tier becomes enforced rather than opt-in.
+    ///         Even a compromised TEE node key cannot move funds past it.
+    bool public sealClearanceRequired;
+
+    // ──────────────────────────────────────────────────────────────
     // Events
     // ──────────────────────────────────────────────────────────────
 
@@ -201,6 +221,8 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     event FeeUpdated(uint256 baseFee, uint256 percentageFee);
     event TreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
     event BusinessSynced(address indexed business, BusinessTier tier, bool registered);
+    event SealGateUpdated(address indexed oldGate, address indexed newGate);
+    event SealClearanceRequirementUpdated(bool required);
 
     // ──────────────────────────────────────────────────────────────
     // Errors
@@ -220,6 +242,8 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     error BatchEmpty();
     error BatchAlreadyProcessed();
     error InsufficientPayment();
+    error SealClearanceMissing(address sender, address recipient);
+    error SealGateNotSet();
 
     // ──────────────────────────────────────────────────────────────
     // Modifiers
@@ -281,7 +305,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
      * @notice Initiates a single cross-border payment.
      * @param _recipient     Beneficiary address.
      * @param _amount        Payment amount (token units or wei for native).
-     * @param _token         ERC20 token address; address(0) for native AET.
+     * @param _token         ERC20 token address; address(0) for native AETHEL.
      * @param _purposeHash   keccak256 hash of the encrypted payment purpose.
      * @param _currencyCode  ISO 4217 currency code (3 bytes).
      * @return paymentId     Unique identifier for the payment.
@@ -480,6 +504,18 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
             revert InvalidPaymentStatus(p.status, ComplianceStatus.PASSED);
         }
 
+        // Top assurance tier (when enforced): the payment's corridor must
+        // carry a LIVE consensus clearance — a Digital Seal minted by the
+        // Aethelred validator quorum for exactly this payer→payee pair, still
+        // ACTIVE, checked through the ISeal precompile. A role-held TEE key
+        // alone (PASSED status above) cannot move funds past this gate, and a
+        // seal revoked on-chain closes the corridor instantly.
+        if (sealClearanceRequired) {
+            if (!sealGate.isCleared(p.sender, p.recipient)) {
+                revert SealClearanceMissing(p.sender, p.recipient);
+            }
+        }
+
         p.status = ComplianceStatus.SETTLED;
         p.settledAt = block.timestamp;
 
@@ -487,7 +523,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         uint256 netAmount = p.amount - fee;
 
         if (p.token == address(0)) {
-            // Native AET transfer
+            // Native AETHEL transfer
             (bool ok, ) = p.recipient.call{value: netAmount}("");
             require(ok, "NoblePay: native transfer failed");
             if (fee > 0) {
@@ -581,6 +617,33 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         emit TreasuryUpdated(old, _newTreasury);
     }
 
+    /**
+     * @notice Set the consensus-anchored settlement gate (top assurance tier).
+     * @dev address(0) clears the gate, which also forces enforcement off —
+     *      the contract must never be in the (required, no gate) state.
+     */
+    function setSealGate(address _sealGate) external onlyRole(ADMIN_ROLE) {
+        address old = address(sealGate);
+        sealGate = ISealSettlementGate(_sealGate);
+
+        if (_sealGate == address(0) && sealClearanceRequired) {
+            sealClearanceRequired = false;
+            emit SealClearanceRequirementUpdated(false);
+        }
+
+        emit SealGateUpdated(old, _sealGate);
+    }
+
+    /**
+     * @notice Toggle whether settlement requires a live corridor clearance.
+     * @dev Enabling requires a gate to be set (fail-closed wiring).
+     */
+    function setSealClearanceRequired(bool _required) external onlyRole(ADMIN_ROLE) {
+        if (_required && address(sealGate) == address(0)) revert SealGateNotSet();
+        sealClearanceRequired = _required;
+        emit SealClearanceRequirementUpdated(_required);
+    }
+
     /// @notice Syncs a business registration from the BusinessRegistry contract.
     function syncBusiness(
         address _business,
@@ -670,6 +733,6 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         return baseFee + (_amount * percentageFee / 10_000);
     }
 
-    /// @notice Allows the contract to receive native AET.
+    /// @notice Allows the contract to receive native AETHEL.
     receive() external payable {}
 }

@@ -53,16 +53,16 @@ describe('useCrossChain', () => {
     expect(chain).toHaveProperty('logoPath');
   });
 
-  it('includes Aethelred Mainnet chain', () => {
+  it('includes the Aethelred chain (live EVM id 7332)', () => {
     const { result } = renderHook(() => useCrossChain());
 
     act(() => {
       jest.advanceTimersByTime(600);
     });
 
-    const aethelred = result.current.chains.find((c) => c.chainId === 7001);
+    const aethelred = result.current.chains.find((c) => c.chainId === 7332);
     expect(aethelred).toBeDefined();
-    expect(aethelred?.name).toBe('Aethelred Mainnet');
+    expect(aethelred?.name).toBe('Aethelred');
     expect(aethelred?.status).toBe('Online');
   });
 
@@ -126,7 +126,7 @@ describe('useCrossChain', () => {
       jest.advanceTimersByTime(600);
     });
 
-    const routes = result.current.getRouteOptions(1, 7001, 100_000);
+    const routes = result.current.getRouteOptions(1, 7332, 100_000);
     expect(routes.length).toBe(2);
     expect(routes[0]).toHaveProperty('id');
     expect(routes[0]).toHaveProperty('name');
@@ -155,7 +155,7 @@ describe('useCrossChain', () => {
 
     expect(multihop).toBeDefined();
     expect(multihop?.recommended).toBe(false);
-    expect(multihop?.path).toEqual([1, 7001, 137]);
+    expect(multihop?.path).toEqual([1, 7332, 137]);
   });
 
   it('getRouteOptions returns empty array for invalid chain pair', () => {
@@ -165,7 +165,7 @@ describe('useCrossChain', () => {
       jest.advanceTimersByTime(600);
     });
 
-    const routes = result.current.getRouteOptions(9999, 7001, 100_000);
+    const routes = result.current.getRouteOptions(9999, 7332, 100_000);
     expect(routes).toEqual([]);
   });
 
@@ -173,7 +173,7 @@ describe('useCrossChain', () => {
     const { result } = renderHook(() => useCrossChain());
 
     // Chains not loaded yet
-    const routes = result.current.getRouteOptions(1, 7001, 100_000);
+    const routes = result.current.getRouteOptions(1, 7332, 100_000);
     expect(routes).toEqual([]);
   });
 
@@ -189,7 +189,7 @@ describe('useCrossChain', () => {
     act(() => {
       result.current.initiateTransfer({
         sourceChainId: 1,
-        destChainId: 7001,
+        destChainId: 7332,
         recipient: '0xrecipient',
         tokenSymbol: 'USDC',
         amount: 10_000,
@@ -201,12 +201,12 @@ describe('useCrossChain', () => {
     const newTransfer = result.current.transfers[0]; // prepended
     expect(newTransfer.status).toBe('Initiated');
     expect(newTransfer.sourceChainId).toBe(1);
-    expect(newTransfer.destChainId).toBe(7001);
+    expect(newTransfer.destChainId).toBe(7332);
     expect(newTransfer.amount).toBe(10_000);
     expect(newTransfer.tokenSymbol).toBe('USDC');
     expect(newTransfer.steps.length).toBe(3);
     expect(newTransfer.sourceChainName).toBe('Ethereum');
-    expect(newTransfer.destChainName).toBe('Aethelred Mainnet');
+    expect(newTransfer.destChainName).toBe('Aethelred');
   });
 
   it('initiateTransfer does nothing for invalid source chain', () => {
@@ -221,7 +221,7 @@ describe('useCrossChain', () => {
     act(() => {
       result.current.initiateTransfer({
         sourceChainId: 9999,
-        destChainId: 7001,
+        destChainId: 7332,
         recipient: '0xrecipient',
         tokenSymbol: 'USDC',
         amount: 10_000,

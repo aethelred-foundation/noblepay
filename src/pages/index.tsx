@@ -127,7 +127,7 @@ const UAE_BUSINESS_NAMES = [
 ];
 
 const JURISDICTIONS = ['DIFC', 'ADGM', 'RAK DAO', 'DAFZA', 'DMCC', 'SCA', 'CBUAE'];
-const CURRENCIES = ['USD', 'AED', 'USDC', 'USDT', 'AET'];
+const CURRENCIES = ['USD', 'AED', 'USDC', 'USDT', 'AETHEL'];
 const PAYMENT_STATUSES = ['Pending', 'Screening', 'Passed', 'Flagged', 'Settled', 'Blocked', 'Refunded'] as const;
 const TIERS = ['Enterprise', 'Professional', 'Standard'];
 const TEE_REGIONS = ['UAE-DXB-1', 'UAE-AUH-1', 'UAE-DXB-2', 'SG-SGP-1', 'UK-LDN-1', 'US-NYC-1',
@@ -323,7 +323,7 @@ function formatUSD(n: number): string {
 
 function formatCurrency(n: number, currency: string): string {
   if (currency === 'AED') return `${formatUSD(n).replace('$', '')} AED`;
-  if (currency === 'AET') return `${formatNumber(n)} AET`;
+  if (currency === 'AETHEL') return `${formatNumber(n)} AETHEL`;
   return formatUSD(n);
 }
 

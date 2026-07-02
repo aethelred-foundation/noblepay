@@ -141,14 +141,14 @@ describe('useInitiatePayment', () => {
     }).not.toThrow();
   });
 
-  it('initiate function handles AET currency', () => {
+  it('initiate function handles AETHEL currency', () => {
     const { result } = renderHook(() => useInitiatePayment());
 
     expect(() => {
       result.current.initiate({
         recipient: '0xrecipient',
         amount: '100',
-        currency: 'AET',
+        currency: 'AETHEL',
         purposeHash: 'aet payment',
       });
     }).not.toThrow();

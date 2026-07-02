@@ -31,7 +31,7 @@ const MOCK_STREAMS: PaymentStream[] = [
     id: '0xstream002',
     sender: '0x2345678901abcdef2345678901abcdef23456789',
     recipient: '0x1234567890abcdef1234567890abcdef12345678',
-    tokenSymbol: 'AET',
+    tokenSymbol: 'AETHEL',
     totalAmount: 50_000,
     streamedAmount: 25_000,
     ratePerSecond: 0.0193,

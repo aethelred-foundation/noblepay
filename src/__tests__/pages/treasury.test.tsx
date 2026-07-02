@@ -307,7 +307,7 @@ describe('TreasuryPage', () => {
   it('displays treasury balance distribution', () => {
     render(<TreasuryPage />);
     // Treasury shows balance types
-    expect(screen.getAllByText(/USDC|USDT|AED|AETH/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/USDC|USDT|AED|AETHEL/).length).toBeGreaterThan(0);
   });
 
   it('displays proposal status badges', () => {

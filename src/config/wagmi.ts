@@ -53,18 +53,32 @@ const connectors = [
 // Transports
 // ---------------------------------------------------------------------------
 
+// Testnet and devnet share the confirmed EVM chain id (7332), so one 7332
+// transport covers both; mainnet is the distinct id.
 const transports = {
   [aethelredMainnet.id]: http(),
-  [aethelredTestnet.id]: http(),
-  [aethelredDevnet.id]: http(),
+  [aethelredTestnet.id]: http(), // 7332 — also serves aethelredDevnet
 };
+
+// wagmi rejects duplicate chain ids in its chains tuple. Dedupe by id, keeping
+// `activeChain` first so the surviving 7332 object carries the RPC for the
+// environment we're actually running (hosted testnet vs local devnet).
+const uniqueChains = [
+  aethelredMainnet,
+  activeChain,
+  aethelredTestnet,
+  aethelredDevnet,
+].filter((c, i, arr) => arr.findIndex((x) => x.id === c.id) === i);
 
 // ---------------------------------------------------------------------------
 // Wagmi Config
 // ---------------------------------------------------------------------------
 
 export const wagmiConfig = createConfig({
-  chains: [aethelredMainnet, aethelredTestnet, aethelredDevnet],
+  chains: uniqueChains as unknown as readonly [
+    typeof aethelredMainnet,
+    ...(typeof aethelredMainnet)[],
+  ],
   connectors,
   transports,
   // Use noopStorage on server to avoid hydration mismatches

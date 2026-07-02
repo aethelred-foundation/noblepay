@@ -11,9 +11,17 @@ import { defineChain } from 'viem';
 // Chain IDs
 // ---------------------------------------------------------------------------
 
+// Canonical EVM chain IDs. 7332 is the CONFIRMED live Aethelred EVM EIP-155 id
+// baked into the x/vm chain config (`eth_chainId` returns 0x1ca4) — the value
+// wallets and dApps must use. Testnet and devnet are the SAME chain (7332)
+// reached via different endpoints (hosted RPC vs a local
+// `aethelredd start --json-rpc.enable` node) and deliberately share the id;
+// mainnet keeps a distinct reserved id until a production network exists.
+// (Source of truth: aethelred `ecosystem/manifest.json` → protocol.evm_chain_id.
+// The prior 7333 devnet value was a never-deployed placeholder.)
 export const AETHELRED_MAINNET_ID = 7331;
 export const AETHELRED_TESTNET_ID = 7332;
-export const AETHELRED_DEVNET_ID = 7333;
+export const AETHELRED_DEVNET_ID = 7332;
 
 // ---------------------------------------------------------------------------
 // Chain Definitions
@@ -86,12 +94,13 @@ export const aethelredDevnet = defineChain({
   },
   rpcUrls: {
     default: {
-      http: ['http://localhost:8545'],
-      webSocket: ['ws://localhost:8546'],
+      // 127.0.0.1 (not "localhost") avoids IPv6/hosts-file resolution surprises.
+      http: [process.env.NEXT_PUBLIC_AETHELRED_DEVNET_RPC_URL || 'http://127.0.0.1:8545'],
+      webSocket: ['ws://127.0.0.1:8546'],
     },
     public: {
-      http: ['http://localhost:8545'],
-      webSocket: ['ws://localhost:8546'],
+      http: [process.env.NEXT_PUBLIC_AETHELRED_DEVNET_RPC_URL || 'http://127.0.0.1:8545'],
+      webSocket: ['ws://127.0.0.1:8546'],
     },
   },
   testnet: true,
@@ -144,5 +153,5 @@ export const CONTRACT_ADDRESSES = {
 export const TOKEN_ADDRESS_KEYS: Record<string, keyof typeof CONTRACT_ADDRESSES> = {
   USDC: 'usdcToken',
   USDT: 'usdtToken',
-  AET: 'aethelToken',
+  AETHEL: 'aethelToken',
 };

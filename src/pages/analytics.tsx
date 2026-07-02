@@ -228,7 +228,7 @@ function generateFeeRevenue(baseSeed: number) {
 const CURRENCY_DISTRIBUTION = [
   { name: 'USDC', value: 45, color: '#3B82F6' },
   { name: 'USDT', value: 30, color: '#10B981' },
-  { name: 'AET', value: 20, color: '#DC2626' },
+  { name: 'AETHEL', value: 20, color: '#DC2626' },
   { name: 'AED', value: 5, color: '#F59E0B' },
 ];
 

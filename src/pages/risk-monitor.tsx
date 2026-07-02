@@ -210,7 +210,7 @@ function generateAlerts(count: number): TransactionAlert[] {
   const alerts: TransactionAlert[] = [];
   const severities: AlertSeverity[] = ['Low', 'Medium', 'High', 'Critical'];
   const statuses: AlertStatus[] = ['Active', 'Active', 'Acknowledged', 'Resolved', 'Dismissed'];
-  const currencies = ['USDC', 'USDT', 'AET', 'AED'];
+  const currencies = ['USDC', 'USDT', 'AETHEL', 'AED'];
 
   for (let i = 0; i < count; i++) {
     const seed = 80000 + i * 137;

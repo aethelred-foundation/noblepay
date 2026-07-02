@@ -42,7 +42,7 @@ export interface Payment {
   amountRaw: string;
   /** Token address used for payment */
   token: string;
-  /** Token symbol (e.g. 'USDC', 'AET') */
+  /** Token symbol (e.g. 'USDC', 'AETHEL') */
   tokenSymbol: string;
   /** Current payment status */
   status: PaymentStatusLabel;

@@ -617,9 +617,9 @@ describe('PaymentsPage', () => {
     }
   });
 
-  it('currency filter AET works', () => {
+  it('currency filter AETHEL works', () => {
     render(<PaymentsPage />);
-    const btn = screen.getAllByRole('button').find((b) => b.textContent === 'AET');
+    const btn = screen.getAllByRole('button').find((b) => b.textContent === 'AETHEL');
     if (btn) fireEvent.click(btn);
   });
 

@@ -60,14 +60,14 @@ describe('useFX', () => {
     expect(aedRate?.rate).toBeCloseTo(3.6725, 2);
   });
 
-  it('includes AET/USD rate', () => {
+  it('includes AETHEL/USD rate', () => {
     const { result } = renderHook(() => useFX());
 
     act(() => {
       jest.advanceTimersByTime(600);
     });
 
-    const aetRate = result.current.rates.find((r) => r.pair === 'AET/USD');
+    const aetRate = result.current.rates.find((r) => r.pair === 'AETHEL/USD');
     expect(aetRate).toBeDefined();
     expect(aetRate?.rate).toBeCloseTo(1.5, 1);
   });

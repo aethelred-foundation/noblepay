@@ -125,7 +125,7 @@ export function useInitiatePayment() {
       );
 
       const amount =
-        params.currency === 'AET'
+        params.currency === 'AETHEL'
           ? parseEther(params.amount)
           : parseUnits(params.amount, 6); // USDC/USDT use 6 decimals
 

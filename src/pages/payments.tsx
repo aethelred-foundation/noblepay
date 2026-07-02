@@ -30,7 +30,7 @@ import {
 // =============================================================================
 
 type PaymentStatus = 'Pending' | 'Screening' | 'Passed' | 'Flagged' | 'Blocked' | 'Settled' | 'Refunded';
-type Currency = 'AET' | 'USDC' | 'USDT' | 'AED' | 'USD';
+type Currency = 'AETHEL' | 'USDC' | 'USDT' | 'AED' | 'USD';
 type RiskLevel = 'Low' | 'Medium' | 'High' | 'Critical';
 type DateRange = 'today' | '7d' | '30d' | '90d' | 'custom';
 type SortField = 'date' | 'amount' | 'status' | 'risk' | 'settlement';
@@ -127,7 +127,7 @@ const PURPOSE_CODES = [
   'Capital Contribution', 'Consulting Fees', 'Licensing Fees', 'Equipment Purchase',
 ];
 
-const ALL_CURRENCIES: Currency[] = ['AET', 'USDC', 'USDT', 'AED', 'USD'];
+const ALL_CURRENCIES: Currency[] = ['AETHEL', 'USDC', 'USDT', 'AED', 'USD'];
 const ALL_STATUSES: PaymentStatus[] = ['Pending', 'Screening', 'Passed', 'Flagged', 'Blocked', 'Settled', 'Refunded'];
 const ALL_RISK_LEVELS: RiskLevel[] = ['Low', 'Medium', 'High', 'Critical'];
 const ITEMS_PER_PAGE = 20;
@@ -214,7 +214,7 @@ function generateMockPayment(seed: number, idx: number): MockPayment {
   const riskScore = Math.floor(seededRandom(seed + 6) * 100);
   const currency = ALL_CURRENCIES[currIdx];
   const fee = Math.round(amount * (0.001 + seededRandom(seed + 20) * 0.004) * 100) / 100;
-  const hasExchange = currency === 'AED' || currency === 'AET';
+  const hasExchange = currency === 'AED' || currency === 'AETHEL';
 
   return {
     id: `0x${seededHex(seed + 7, 64)}`,
@@ -265,7 +265,7 @@ function formatUSD(n: number): string {
 function formatAmount(n: number, currency: Currency): string {
   const formatted = n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   if (currency === 'AED') return `${formatted} AED`;
-  if (currency === 'AET') return `${formatted} AET`;
+  if (currency === 'AETHEL') return `${formatted} AETHEL`;
   return `$${formatted}`;
 }
 

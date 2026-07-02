@@ -145,15 +145,15 @@ describe('formatCurrency', () => {
     expect(result).toBe('$1,000.00');
   });
 
-  it('formats AET', () => {
-    const result = formatCurrency(1.5, 'AET');
-    expect(result).toContain('AET');
+  it('formats AETHEL', () => {
+    const result = formatCurrency(1.5, 'AETHEL');
+    expect(result).toContain('AETHEL');
     expect(result).toContain('1.5');
   });
 
-  it('formats AETHEL same as AET', () => {
+  it('formats AETHEL same as AETHEL', () => {
     const result = formatCurrency(1.5, 'AETHEL');
-    expect(result).toContain('AET');
+    expect(result).toContain('AETHEL');
   });
 
   it('formats USDC', () => {

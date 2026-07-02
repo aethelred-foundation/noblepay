@@ -40,11 +40,11 @@ const CHART_COLORS = [
 ];
 
 const POOL_PAIR_COLORS: Record<string, { primary: string; secondary: string }> = {
-  'USDC/AET': { primary: '#2775CA', secondary: '#DC2626' },
-  'USDT/AET': { primary: '#26A17B', secondary: '#DC2626' },
+  'USDC/AETHEL': { primary: '#2775CA', secondary: '#DC2626' },
+  'USDT/AETHEL': { primary: '#26A17B', secondary: '#DC2626' },
   'USDC/USDT': { primary: '#2775CA', secondary: '#26A17B' },
   'AED/USDC': { primary: '#009B3A', secondary: '#2775CA' },
-  'AET/AED': { primary: '#DC2626', secondary: '#009B3A' },
+  'AETHEL/AED': { primary: '#DC2626', secondary: '#009B3A' },
   'USDC/AED': { primary: '#2775CA', secondary: '#009B3A' },
 };
 
@@ -134,7 +134,7 @@ interface MarketMakerConfig {
 // MOCK DATA GENERATORS
 // =============================================================================
 
-const POOL_PAIRS = ['USDC/AET', 'USDT/AET', 'USDC/USDT', 'AED/USDC', 'AET/AED', 'USDC/AED'];
+const POOL_PAIRS = ['USDC/AETHEL', 'USDT/AETHEL', 'USDC/USDT', 'AED/USDC', 'AETHEL/AED', 'USDC/AED'];
 const REQUESTER_NAMES = [
   'Meridian Capital', 'Falcon Fintech', 'Desert Rose Trading', 'Gulf Stream Finance',
   'Phoenix Partners', 'Oasis Digital Assets', 'Atlas Ventures', 'Zenith Corp',
@@ -249,7 +249,7 @@ function generateRewards(): LPReward[] {
       pair,
       pendingRewards: Math.floor(seededRandom(seed) * 25000) + 500,
       claimedRewards: Math.floor(seededRandom(seed + 10) * 100000) + 5000,
-      rewardToken: 'AET',
+      rewardToken: 'AETHEL',
       apr: seededRandom(seed + 20) * 15 + 3,
     };
   });
@@ -533,7 +533,7 @@ export default function LiquidityPage() {
               <StatCard
                 icon={Zap}
                 label="Pending Rewards"
-                value={`${formatNumber(totalPendingRewards)} AET`}
+                value={`${formatNumber(totalPendingRewards)} AETHEL`}
                 sparkData={generateSparklineData(30200, 12)}
                 sparkColor="#F59E0B"
               />
@@ -832,7 +832,7 @@ export default function LiquidityPage() {
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <GlassCard className="p-6">
                   <div className="text-xs text-slate-400 mb-1">Total Pending Rewards</div>
-                  <div className="text-2xl font-bold text-white">{formatNumber(totalPendingRewards)} AET</div>
+                  <div className="text-2xl font-bold text-white">{formatNumber(totalPendingRewards)} AETHEL</div>
                   <button className="mt-3 w-full py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition-colors">
                     Claim All
                   </button>
@@ -840,7 +840,7 @@ export default function LiquidityPage() {
                 <GlassCard className="p-6">
                   <div className="text-xs text-slate-400 mb-1">Total Claimed</div>
                   <div className="text-2xl font-bold text-emerald-400">
-                    {formatNumber(rewards.reduce((s, r) => s + r.claimedRewards, 0))} AET
+                    {formatNumber(rewards.reduce((s, r) => s + r.claimedRewards, 0))} AETHEL
                   </div>
                 </GlassCard>
                 <GlassCard className="p-6">
@@ -874,8 +874,8 @@ export default function LiquidityPage() {
                               <span className="text-sm font-medium text-white">{reward.pair}</span>
                             </div>
                           </td>
-                          <td className="py-3 px-3 text-right text-sm text-white tabular-nums">{formatNumber(reward.pendingRewards)} AET</td>
-                          <td className="py-3 px-3 text-right text-sm text-slate-300 tabular-nums">{formatNumber(reward.claimedRewards)} AET</td>
+                          <td className="py-3 px-3 text-right text-sm text-white tabular-nums">{formatNumber(reward.pendingRewards)} AETHEL</td>
+                          <td className="py-3 px-3 text-right text-sm text-slate-300 tabular-nums">{formatNumber(reward.claimedRewards)} AETHEL</td>
                           <td className="py-3 px-3 text-right text-sm text-emerald-400 tabular-nums">{reward.apr.toFixed(2)}%</td>
                           <td className="py-3 px-3 text-center">
                             <button className="px-3 py-1 rounded-lg bg-red-600/20 text-red-400 text-xs font-medium hover:bg-red-600/30 transition-colors">

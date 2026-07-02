@@ -19,16 +19,17 @@ import type {
 
 const MOCK_CHAINS: ChainInfo[] = [
   {
-    chainId: 7001,
-    name: 'Aethelred Mainnet',
-    symbol: 'AETH',
+    // 7332 = the confirmed live Aethelred EVM chain id (see src/config/chains.ts).
+    chainId: 7332,
+    name: 'Aethelred',
+    symbol: 'AETHEL',
     rpcUrl: 'https://rpc.aethelred.network',
     explorerUrl: 'https://explorer.aethelred.network',
     status: 'Online',
     avgBlockTime: 2.0,
     gasPrice: 0.5,
     routerAddress: '0xrouter001',
-    supportedTokens: ['USDC', 'USDT', 'AET', 'AED'],
+    supportedTokens: ['USDC', 'USDT', 'AETHEL', 'AED'],
     logoPath: '/chains/aethelred.svg',
   },
   {
@@ -89,7 +90,7 @@ const MOCK_TRANSFERS: CrossChainTransfer[] = [
   {
     id: 'xfer-001',
     sourceChainId: 1,
-    destChainId: 7001,
+    destChainId: 7332,
     sourceChainName: 'Ethereum',
     destChainName: 'Aethelred Mainnet',
     sender: '0x1234567890abcdef1234567890abcdef12345678',
@@ -99,8 +100,8 @@ const MOCK_TRANSFERS: CrossChainTransfer[] = [
     status: 'Completed',
     steps: [
       { index: 0, description: 'Lock tokens on Ethereum', chainId: 1, status: 'Completed', txHash: '0xeth001', startedAt: Date.now() - 3600_000, completedAt: Date.now() - 3300_000 },
-      { index: 1, description: 'Relay proof to Aethelred', chainId: 7001, status: 'Completed', txHash: '0xaeth001', startedAt: Date.now() - 3300_000, completedAt: Date.now() - 3000_000 },
-      { index: 2, description: 'Mint tokens on Aethelred', chainId: 7001, status: 'Completed', txHash: '0xaeth002', startedAt: Date.now() - 3000_000, completedAt: Date.now() - 2700_000 },
+      { index: 1, description: 'Relay proof to Aethelred', chainId: 7332, status: 'Completed', txHash: '0xaeth001', startedAt: Date.now() - 3300_000, completedAt: Date.now() - 3000_000 },
+      { index: 2, description: 'Mint tokens on Aethelred', chainId: 7332, status: 'Completed', txHash: '0xaeth002', startedAt: Date.now() - 3000_000, completedAt: Date.now() - 2700_000 },
     ],
     estimatedTime: 900,
     bridgeFee: 12.5,
@@ -110,7 +111,7 @@ const MOCK_TRANSFERS: CrossChainTransfer[] = [
   },
   {
     id: 'xfer-002',
-    sourceChainId: 7001,
+    sourceChainId: 7332,
     destChainId: 137,
     sourceChainName: 'Aethelred Mainnet',
     destChainName: 'Polygon',
@@ -120,7 +121,7 @@ const MOCK_TRANSFERS: CrossChainTransfer[] = [
     amount: 50_000,
     status: 'Relaying',
     steps: [
-      { index: 0, description: 'Lock tokens on Aethelred', chainId: 7001, status: 'Completed', txHash: '0xaeth003', startedAt: Date.now() - 600_000, completedAt: Date.now() - 300_000 },
+      { index: 0, description: 'Lock tokens on Aethelred', chainId: 7332, status: 'Completed', txHash: '0xaeth003', startedAt: Date.now() - 600_000, completedAt: Date.now() - 300_000 },
       { index: 1, description: 'Relay proof to Polygon', chainId: 137, status: 'InProgress', startedAt: Date.now() - 300_000 },
       { index: 2, description: 'Mint tokens on Polygon', chainId: 137, status: 'Pending' },
     ],
@@ -137,7 +138,7 @@ const MOCK_RELAY_NODES: RelayNode[] = [
     id: 'relay-001',
     name: 'Aethelred Relay Alpha',
     operator: '0xop001',
-    supportedChains: [7001, 1, 137, 42161],
+    supportedChains: [7332, 1, 137, 42161],
     status: 'Active',
     totalRelayed: 12_450,
     successRate: 99.8,
@@ -150,7 +151,7 @@ const MOCK_RELAY_NODES: RelayNode[] = [
     id: 'relay-002',
     name: 'Gulf Bridge Node',
     operator: '0xop002',
-    supportedChains: [7001, 1, 56],
+    supportedChains: [7332, 1, 56],
     status: 'Active',
     totalRelayed: 8_320,
     successRate: 99.5,
@@ -163,7 +164,7 @@ const MOCK_RELAY_NODES: RelayNode[] = [
     id: 'relay-003',
     name: 'Asia Pacific Relay',
     operator: '0xop003',
-    supportedChains: [7001, 137, 56],
+    supportedChains: [7332, 137, 56],
     status: 'Syncing',
     totalRelayed: 5_100,
     successRate: 99.2,
@@ -214,7 +215,7 @@ export function useCrossChain() {
         {
           id: 'route-multihop',
           name: 'Multi-Hop via Aethelred',
-          path: [sourceChainId, 7001, destChainId],
+          path: [sourceChainId, 7332, destChainId],
           estimatedTime: 1200,
           totalFeeUsd: 8.0,
           fees: { bridgeFee: 4.0, gasFee: 2.5, relayFee: 1.5 },

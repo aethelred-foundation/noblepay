@@ -208,8 +208,8 @@ describe('LiquidityPage', () => {
 
   it('clicking a pool card opens pool detail drawer', () => {
     render(<LiquidityPage />);
-    // Pool cards render pair names like "USDC/AET"
-    const pairText = screen.getAllByText('USDC/AET');
+    // Pool cards render pair names like "USDC/AETHEL"
+    const pairText = screen.getAllByText('USDC/AETHEL');
     if (pairText.length > 0) {
       // Find the closest GlassCard div with onClick
       const card = pairText[0].closest('div[class*="cursor"]');
@@ -226,8 +226,8 @@ describe('LiquidityPage', () => {
     const positionsBtn = Array.from(tabs.querySelectorAll('button')).find((b) => b.textContent?.includes('Positions'));
     if (positionsBtn) {
       fireEvent.click(positionsBtn);
-      // Position cards use pair badges like "USDC/AET"
-      const pairBadges = screen.getAllByText('USDC/AET');
+      // Position cards use pair badges like "USDC/AETHEL"
+      const pairBadges = screen.getAllByText('USDC/AETHEL');
       if (pairBadges.length > 0) {
         const card = pairBadges[0].closest('div[class*="cursor"]');
         if (card) fireEvent.click(card);
@@ -283,7 +283,7 @@ describe('LiquidityPage', () => {
   it('pool detail drawer shows pool information when pool is selected', () => {
     render(<LiquidityPage />);
     // Find pool cards by pair name and click the card div
-    const pairTexts = screen.getAllByText('USDC/AET');
+    const pairTexts = screen.getAllByText('USDC/AETHEL');
     if (pairTexts.length > 0) {
       // Find the parent card with cursor-pointer class
       let card = pairTexts[0].closest('div[class*="cursor"]');
@@ -342,7 +342,7 @@ describe('LiquidityPage', () => {
 
   it('drawer close via X button works', () => {
     render(<LiquidityPage />);
-    const pairTexts = screen.getAllByText('USDC/AET');
+    const pairTexts = screen.getAllByText('USDC/AETHEL');
     if (pairTexts.length > 0) {
       const card = pairTexts[0].closest('div[class*="cursor"]');
       if (card) {

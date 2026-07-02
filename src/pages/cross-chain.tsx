@@ -39,7 +39,7 @@ const CHAINS = [
 
 type ChainId = typeof CHAINS[number]['id'];
 
-const TOKENS = ['USDC', 'USDT', 'AETH', 'WETH', 'DAI'] as const;
+const TOKENS = ['USDC', 'USDT', 'AETHEL', 'WETH', 'DAI'] as const;
 type Token = typeof TOKENS[number];
 
 const TRANSFER_STEPS = ['Initiated', 'Relaying', 'Confirming', 'Completed'] as const;

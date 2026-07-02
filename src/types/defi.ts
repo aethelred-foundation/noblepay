@@ -14,7 +14,7 @@ export type PoolStatus = 'Active' | 'Paused' | 'Deprecated';
 export interface LiquidityPool {
   /** Pool contract address */
   address: string;
-  /** Pool name (e.g. 'USDC/AET') */
+  /** Pool name (e.g. 'USDC/AETHEL') */
   name: string;
   /** Token A symbol */
   tokenA: string;

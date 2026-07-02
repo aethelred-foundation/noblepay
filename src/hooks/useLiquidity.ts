@@ -15,9 +15,9 @@ import type { LiquidityPool, LPPosition } from '@/types/defi';
 const MOCK_POOLS: LiquidityPool[] = [
   {
     address: '0xpool001',
-    name: 'USDC / AET',
+    name: 'USDC / AETHEL',
     tokenA: 'USDC',
-    tokenB: 'AET',
+    tokenB: 'AETHEL',
     tvl: 8_500_000,
     volume24h: 1_200_000,
     apy: 12.3,
@@ -45,8 +45,8 @@ const MOCK_POOLS: LiquidityPool[] = [
   },
   {
     address: '0xpool003',
-    name: 'AET / AED',
-    tokenA: 'AET',
+    name: 'AETHEL / AED',
+    tokenA: 'AETHEL',
     tokenB: 'AED',
     tvl: 2_100_000,
     volume24h: 450_000,
@@ -79,7 +79,7 @@ const MOCK_POSITIONS: LPPosition[] = [
   {
     id: 'pos-001',
     poolAddress: '0xpool001',
-    poolName: 'USDC / AET',
+    poolName: 'USDC / AETHEL',
     lpTokens: 45_000,
     poolShare: 2.1,
     valueUsd: 178_500,

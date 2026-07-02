@@ -149,7 +149,7 @@ function generateSparklineData(seed: number, count: number): number[] {
 
 function generateStreams(count: number): PaymentStream[] {
   const streams: PaymentStream[] = [];
-  const currencies = ['USDC', 'USDT', 'AET', 'AED'];
+  const currencies = ['USDC', 'USDT', 'AETHEL', 'AED'];
   const statuses: StreamStatus[] = ['Active', 'Active', 'Active', 'Paused', 'Completed', 'Cancelled', 'Scheduled'];
   const protocols = ['Aave V3', 'Compound', 'Yearn', null, null];
 
@@ -231,7 +231,7 @@ function generateHistory(count: number): StreamHistoryItem[] {
       stream: `STR-${String(1000 + Math.floor(seededRandom(seed) * 16)).padStart(5, '0')}`,
       action: actions[Math.floor(seededRandom(seed + 10) * actions.length)],
       amount: Math.floor(seededRandom(seed + 20) * 100000) + 1000,
-      currency: ['USDC', 'USDT', 'AET', 'AED'][Math.floor(seededRandom(seed + 30) * 4)],
+      currency: ['USDC', 'USDT', 'AETHEL', 'AED'][Math.floor(seededRandom(seed + 30) * 4)],
       timestamp: Date.now() - Math.floor(seededRandom(seed + 40) * 2592000000),
       txHash: `0x${seededHex(seed + 50, 64)}`,
     });
@@ -893,7 +893,7 @@ export default function StreamingPage() {
               <select className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent">
                 <option value="USDC">USDC</option>
                 <option value="USDT">USDT</option>
-                <option value="AET">AET</option>
+                <option value="AETHEL">AETHEL</option>
                 <option value="AED">AED</option>
               </select>
             </div>
@@ -1013,7 +1013,7 @@ export default function StreamingPage() {
                 <select className="w-full px-2 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-white text-xs focus:outline-none focus:ring-1 focus:ring-red-500">
                   <option>USDC</option>
                   <option>USDT</option>
-                  <option>AET</option>
+                  <option>AETHEL</option>
                 </select>
               </div>
               <div className="col-span-1">

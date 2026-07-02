@@ -265,7 +265,7 @@ function generateModels(): AIModel[] {
 function generateDecisions(count: number): ComplianceDecision[] {
   const decisions: ComplianceDecision[] = [];
   const outcomes: DecisionOutcome[] = ['Approved', 'Approved', 'Approved', 'Flagged', 'Blocked', 'Review'];
-  const currencies = ['USDC', 'USDT', 'AET', 'AED'];
+  const currencies = ['USDC', 'USDT', 'AETHEL', 'AED'];
   const models = ['AML-SENTINEL', 'SANCTIONS-NET', 'BEHAVIOR-ANALYST'];
 
   for (let i = 0; i < count; i++) {
@@ -361,7 +361,7 @@ function generateAppeals(): Appeal[] {
       resolution: status === 'Resolved' ? 'Appeal upheld — decision overturned' : status === 'Rejected' ? 'Original decision confirmed' : null,
       originalOutcome: (['Flagged', 'Blocked'] as const)[Math.floor(seededRandom(seed + 80) * 2)],
       amount: Math.floor(seededRandom(seed + 90) * 300000) + 10000,
-      currency: ['USDC', 'USDT', 'AET'][Math.floor(seededRandom(seed + 100) * 3)],
+      currency: ['USDC', 'USDT', 'AETHEL'][Math.floor(seededRandom(seed + 100) * 3)],
     });
   }
   return appeals;

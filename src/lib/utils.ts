@@ -89,10 +89,10 @@ export function copyToClipboard(text: string): Promise<void> {
 
 /**
  * Format a value with currency symbol and locale-appropriate separators.
- * Supports AED, USD, AET, USDC, and USDT formatting.
+ * Supports AED, USD, AETHEL, USDC, and USDT formatting.
  *
  * @param amount - The numeric amount to format
- * @param currency - Currency code (AED, USD, AET, USDC, USDT)
+ * @param currency - Currency code (AED, USD, AETHEL, USDC, USDT)
  * @param decimals - Decimal places (default varies by currency)
  */
 export function formatCurrency(
@@ -111,12 +111,12 @@ export function formatCurrency(
         minimumFractionDigits: decimals ?? 2,
         maximumFractionDigits: decimals ?? 2,
       })}`;
-    case 'AET':
+    case 'AETHEL':
     case 'AETHEL':
       return `${amount.toLocaleString('en-US', {
         minimumFractionDigits: decimals ?? 4,
         maximumFractionDigits: decimals ?? 4,
-      })} AET`;
+      })} AETHEL`;
     case 'USDC':
       return `${amount.toLocaleString('en-US', {
         minimumFractionDigits: decimals ?? 2,

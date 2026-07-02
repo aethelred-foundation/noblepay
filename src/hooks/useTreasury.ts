@@ -22,7 +22,7 @@ const MOCK_OVERVIEW: TreasuryOverview = {
   totalBalance: 12_450_000,
   tokenBalances: [
     { symbol: 'USDC', amount: 8_200_000, valueUsd: 8_200_000 },
-    { symbol: 'AET', amount: 2_500_000, valueUsd: 3_750_000 },
+    { symbol: 'AETHEL', amount: 2_500_000, valueUsd: 3_750_000 },
     { symbol: 'USDT', amount: 500_000, valueUsd: 500_000 },
   ],
   activeProposals: 3,
@@ -125,8 +125,8 @@ const MOCK_STRATEGIES: YieldStrategy[] = [
   },
   {
     id: 'strat-002',
-    name: 'AET Staking',
-    description: 'Stake AET tokens for network security rewards.',
+    name: 'AETHEL Staking',
+    description: 'Stake AETHEL tokens for network security rewards.',
     protocol: 'Aethelred Staking',
     allocated: 1_500_000,
     apy: 8.5,
@@ -138,7 +138,7 @@ const MOCK_STRATEGIES: YieldStrategy[] = [
   {
     id: 'strat-003',
     name: 'Liquidity Provision',
-    description: 'Provide USDC/AET liquidity on NoblePay DEX pools.',
+    description: 'Provide USDC/AETHEL liquidity on NoblePay DEX pools.',
     protocol: 'NoblePay LP',
     allocated: 500_000,
     apy: 12.3,
