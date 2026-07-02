@@ -666,15 +666,15 @@ describe("BranchMax3", function () {
     it("initiatePayment with native token", async function () {
       const { np, sender, recipient } = await loadFixture(deployNP);
       await expect(np.connect(sender).initiatePayment(
-        recipient.address, 1000, ethers.ZeroAddress, PURPOSE, "0x414544",
-        { value: 1000 }
+        recipient.address, 100000000n, ethers.ZeroAddress, PURPOSE, "0x414544",
+        { value: 100000000n }
       )).to.emit(np, "PaymentInitiated");
     });
 
     it("reverts native payment with insufficient value", async function () {
       const { np, sender, recipient } = await loadFixture(deployNP);
       await expect(np.connect(sender).initiatePayment(
-        recipient.address, 1000, ethers.ZeroAddress, PURPOSE, "0x414544",
+        recipient.address, 100000000n, ethers.ZeroAddress, PURPOSE, "0x414544",
         { value: 500 }
       )).to.be.revertedWithCustomError(np, "InsufficientPayment");
     });

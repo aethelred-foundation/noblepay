@@ -85,7 +85,7 @@ describe("NoblePay", function () {
 
     it("should initiate a native payment", async function () {
       const { noblepay, business1, recipient } = await loadFixture(deployFixture);
-      const amount = 1000n; // small amount within daily limit
+      const amount = 100000000n; // covers baseFee + percentage
       const purposeHash = ethers.keccak256(ethers.toUtf8Bytes("payment"));
       const currencyCode = "0x414554"; // "AET"
 
@@ -133,10 +133,10 @@ describe("NoblePay", function () {
 
     it("should revert for insufficient native payment", async function () {
       const { noblepay, business1, recipient } = await loadFixture(deployFixture);
-      const amount = 1000n;
+      const amount = ethers.parseUnits("2", 6); // clears the fee guard (baseFee 1e6)
       await expect(noblepay.connect(business1).initiatePayment(
         recipient.address, amount, ethers.ZeroAddress, ethers.ZeroHash, "0x414554",
-        { value: 500n }
+        { value: ethers.parseUnits("1", 6) } // msg.value < amount
       )).to.be.revertedWithCustomError(noblepay, "InsufficientPayment");
     });
   });

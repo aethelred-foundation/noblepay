@@ -515,7 +515,7 @@ describe("BranchMax4", function () {
 
     it("refund native BLOCKED payment", async function () {
       const { np, sender, recipient, teeNode } = await loadFixture(deployNP);
-      const amt = 1000000n;
+      const amt = 100000000n;
       const tx = await np.connect(sender).initiatePayment(
         recipient.address, amt, ethers.ZeroAddress, PURPOSE, "0x414544",
         { value: amt }
@@ -528,7 +528,7 @@ describe("BranchMax4", function () {
 
     it("cancel native PENDING payment", async function () {
       const { np, sender, recipient } = await loadFixture(deployNP);
-      const amt = 1000000n;
+      const amt = 100000000n;
       const tx = await np.connect(sender).initiatePayment(
         recipient.address, amt, ethers.ZeroAddress, PURPOSE, "0x414544",
         { value: amt }
@@ -540,7 +540,7 @@ describe("BranchMax4", function () {
 
     it("batch with native token", async function () {
       const { np, sender, recipient, other } = await loadFixture(deployNP);
-      const amt = 1000000n;
+      const amt = 100000000n;
       await np.connect(sender).initiatePaymentBatch(
         [recipient.address],
         [amt],

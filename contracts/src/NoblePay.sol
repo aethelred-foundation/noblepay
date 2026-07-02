@@ -244,6 +244,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     error InsufficientPayment();
     error SealClearanceMissing(address sender, address recipient);
     error SealGateNotSet();
+    error AmountBelowFee(uint256 amount, uint256 fee);
 
     // ──────────────────────────────────────────────────────────────
     // Modifiers
@@ -258,12 +259,6 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Restricts to verified TEE nodes.
     modifier onlyTEENode() {
         _checkRole(TEE_NODE_ROLE);
-        _;
-    }
-
-    /// @notice Restricts to compliance officers.
-    modifier onlyComplianceOfficer() {
-        _checkRole(COMPLIANCE_OFFICER_ROLE);
         _;
     }
 
@@ -323,6 +318,14 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
 
         // Validate token support
         if (_token != address(0) && !supportedTokens[_token]) revert UnsupportedToken();
+
+        // Reject un-settleable payments up front: if the amount does not exceed
+        // its fee, `settlePayment` would underflow (netAmount = amount - fee)
+        // and revert forever — and a PASSED payment can be neither refunded nor
+        // cancelled, so the escrow would be permanently locked. Fail fast at
+        // entry instead of escrowing funds that can never move.
+        uint256 entryFee = _calculateFee(_amount);
+        if (_amount <= entryFee) revert AmountBelowFee(_amount, entryFee);
 
         // Enforce volume limits
         _enforceVolumeLimits(msg.sender, _amount);
@@ -389,6 +392,12 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         for (uint256 i; i < count;) {
             if (_recipients[i] == address(0)) revert ZeroAddress();
             if (_amounts[i] == 0) revert ZeroAmount();
+            if (_tokens[i] != address(0) && !supportedTokens[_tokens[i]]) revert UnsupportedToken();
+            // Same fund-lock guard as initiatePayment: reject amounts that
+            // cannot cover their settlement fee (checked after token support so
+            // an unsupported token still reverts as UnsupportedToken).
+            uint256 itemFee = _calculateFee(_amounts[i]);
+            if (_amounts[i] <= itemFee) revert AmountBelowFee(_amounts[i], itemFee);
 
             bytes32 pid = keccak256(
                 abi.encodePacked(msg.sender, _recipients[i], _amounts[i], block.timestamp, paymentNonce++)
@@ -398,7 +407,6 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
             if (_tokens[i] == address(0)) {
                 nativeRequired += _amounts[i];
             } else {
-                if (!supportedTokens[_tokens[i]]) revert UnsupportedToken();
                 IERC20(_tokens[i]).safeTransferFrom(msg.sender, address(this), _amounts[i]);
             }
 
@@ -519,7 +527,15 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         p.status = ComplianceStatus.SETTLED;
         p.settledAt = block.timestamp;
 
+        // Defence in depth against a fee increase between initiation and
+        // settlement: the initiate-time guard rejects amount <= fee, but
+        // baseFee/percentageFee are governable, so cap the fee at the escrowed
+        // amount here. Without this, a post-initiation fee hike above `amount`
+        // would underflow (amount - fee) and permanently lock the escrow.
         uint256 fee = _calculateFee(p.amount);
+        if (fee > p.amount) {
+            fee = p.amount;
+        }
         uint256 netAmount = p.amount - fee;
 
         if (p.token == address(0)) {

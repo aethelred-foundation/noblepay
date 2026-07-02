@@ -103,7 +103,7 @@ describe("NoblePay - Coverage", function () {
   describe("Refund Native Payment", function () {
     it("should refund a blocked native payment", async function () {
       const { noblepay, admin, teeNode, business1, recipient } = await loadFixture(deployFixture);
-      const amount = 10000n;
+      const amount = 100000000n;
       const tx = await noblepay.connect(business1).initiatePayment(
         recipient.address, amount, ethers.ZeroAddress, ethers.ZeroHash, "0x414554",
         { value: amount }
@@ -126,7 +126,7 @@ describe("NoblePay - Coverage", function () {
   describe("Cancel Native Payment", function () {
     it("should cancel a native pending payment", async function () {
       const { noblepay, business1, recipient } = await loadFixture(deployFixture);
-      const amount = 10000n;
+      const amount = 100000000n;
       const tx = await noblepay.connect(business1).initiatePayment(
         recipient.address, amount, ethers.ZeroAddress, ethers.ZeroHash, "0x414554",
         { value: amount }
@@ -223,7 +223,7 @@ describe("NoblePay - Coverage", function () {
   describe("Batch with Native Payments", function () {
     it("should initiate batch with native token payments", async function () {
       const { noblepay, admin, business1, recipient, other } = await loadFixture(deployFixture);
-      const amount = 1000n;
+      const amount = 100000000n;
       await expect(noblepay.connect(business1).initiatePaymentBatch(
         [recipient.address, other.address],
         [amount, amount],
@@ -236,7 +236,7 @@ describe("NoblePay - Coverage", function () {
 
     it("should revert batch with insufficient native value", async function () {
       const { noblepay, business1, recipient, other } = await loadFixture(deployFixture);
-      const amount = 1000n;
+      const amount = 100000000n;
       await expect(noblepay.connect(business1).initiatePaymentBatch(
         [recipient.address, other.address],
         [amount, amount],

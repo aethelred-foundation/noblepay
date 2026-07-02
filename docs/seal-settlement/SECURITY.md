@@ -41,23 +41,37 @@ no authority.
 
 ## 2. Threats and mitigations
 
-| #   | Threat                                                                                                    | Mitigation                                                                                                                  | Test                                                                                      |
-| --- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| T1  | **Compromised TEE node key** posts fraudulent PASSED and settles                                          | seal tier: settlement also requires a quorum-minted corridor seal the key cannot forge                                      | `a TEE-PASSED payment cannot settle without a corridor seal`                              |
-| T2  | **Replay** — one seal clearing many corridors                                                             | `sealUsed[sealId]` monotonic guard                                                                                          | `rejects seal replay across corridors`                                                    |
-| T3  | **Corridor re-scoping / direction abuse** — seal for A→B used for A→C or B→A                              | purpose binds payer AND payee, ordered                                                                                      | `rejects a seal bound to a different corridor`, `rejects a reversed-direction seal`       |
-| T4  | **Policy bypass** — seal violating jurisdiction/backend admitted                                          | `requireConfidentiality` delegates to the precompile's consensus-parity `Satisfies()`                                       | `rejects a seal that fails the CEAP compliance policy`                                    |
-| T5  | **Stale clearance** — seal revoked (sanctions update) but corridor still open                             | `isCleared` re-checks `verifySeal` live on every call                                                                       | `consensus seal revocation closes the corridor mid-flight`                                |
-| T6  | **Revocation resurrection** — governance revokes a clearance; attacker re-clears with a second bound seal | `AlreadyCleared` one-clearance-per-corridor guard (baked in from day one — the bug class found in the TerraQura self-audit) | `SECURITY: a governance revocation cannot be undone…`                                     |
-| T7  | **Live-clearance overwrite** — rewrite sealId/clearedAt of an open corridor                               | same `AlreadyCleared` guard                                                                                                 | `one corridor, one clearance…`                                                            |
-| T8  | **Inactive/forged seal**                                                                                  | `verifySeal` must be true; `getSealIdByJob` reverts for unsealed jobs                                                       | `rejects an inactive (revoked/expired) seal`                                              |
-| T9  | **Unauthorized revocation / policy change / pause**                                                       | `onlyOwner` on all three                                                                                                    | `non-owner cannot revoke`, `only owner can set the compliance policy`, pause test         |
-| T10 | **Required-without-gate state** (settlement bricked by misconfig)                                         | fail-closed wiring: cannot enable without a gate; clearing the gate auto-disables                                           | `cannot enable enforcement without a gate`, `clearing the gate auto-disables enforcement` |
-| T11 | **Stranded escrow** — corridor closes with funds locked                                                   | refunds to sender are deliberately NOT seal-gated                                                                           | `refunds remain possible while the corridor is closed`                                    |
-| T12 | **Tier confusion** — cleared corridor used to bypass per-payment screening                                | settlement still requires TEE-tier PASSED                                                                                   | `still enforces the TEE tier on top of the seal`                                          |
-| T13 | **Ownership takeover / fat-finger**                                                                       | `Ownable2Step`; non-pending acceptor rejected                                                                               | two-step test                                                                             |
-| T14 | **Reentrancy** during clear                                                                               | `nonReentrant`; precompile calls are `view`; state written after checks                                                     | (guard present; no external value transfer in the gate)                                   |
-| T15 | **Zero corridor endpoints**                                                                               | `ZeroCorridor` on either zero address                                                                                       | zero-endpoint test                                                                        |
+| #   | Threat                                                                                                                                                                                                       | Mitigation                                                                                                                                                          | Test                                                                                      |
+| --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| T1  | **Compromised TEE node key** posts fraudulent PASSED and settles                                                                                                                                             | seal tier: settlement also requires a quorum-minted corridor seal the key cannot forge                                                                              | `a TEE-PASSED payment cannot settle without a corridor seal`                              |
+| T2  | **Replay** — one seal clearing many corridors                                                                                                                                                                | `sealUsed[sealId]` monotonic guard                                                                                                                                  | `rejects seal replay across corridors`                                                    |
+| T3  | **Corridor re-scoping / direction abuse** — seal for A→B used for A→C or B→A                                                                                                                                 | purpose binds payer AND payee, ordered                                                                                                                              | `rejects a seal bound to a different corridor`, `rejects a reversed-direction seal`       |
+| T4  | **Policy bypass** — seal violating jurisdiction/backend admitted                                                                                                                                             | `requireConfidentiality` delegates to the precompile's consensus-parity `Satisfies()`                                                                               | `rejects a seal that fails the CEAP compliance policy`                                    |
+| T5  | **Stale clearance** — seal revoked (sanctions update) but corridor still open                                                                                                                                | `isCleared` re-checks `verifySeal` live on every call                                                                                                               | `consensus seal revocation closes the corridor mid-flight`                                |
+| T6  | **Revocation resurrection** — governance revokes a clearance; attacker re-clears with a second bound seal                                                                                                    | `AlreadyCleared` one-clearance-per-corridor guard (baked in from day one — the bug class found in the TerraQura self-audit)                                         | `SECURITY: a governance revocation cannot be undone…`                                     |
+| T7  | **Live-clearance overwrite** — rewrite sealId/clearedAt of an open corridor                                                                                                                                  | same `AlreadyCleared` guard                                                                                                                                         | `one corridor, one clearance…`                                                            |
+| T8  | **Inactive/forged seal**                                                                                                                                                                                     | `verifySeal` must be true; `getSealIdByJob` reverts for unsealed jobs                                                                                               | `rejects an inactive (revoked/expired) seal`                                              |
+| T9  | **Unauthorized revocation / policy change / pause**                                                                                                                                                          | `onlyOwner` on all three                                                                                                                                            | `non-owner cannot revoke`, `only owner can set the compliance policy`, pause test         |
+| T10 | **Required-without-gate state** (settlement bricked by misconfig)                                                                                                                                            | fail-closed wiring: cannot enable without a gate; clearing the gate auto-disables                                                                                   | `cannot enable enforcement without a gate`, `clearing the gate auto-disables enforcement` |
+| T11 | **Stranded escrow** — corridor closes with funds locked                                                                                                                                                      | refunds to sender are deliberately NOT seal-gated                                                                                                                   | `refunds remain possible while the corridor is closed`                                    |
+| T12 | **Tier confusion** — cleared corridor used to bypass per-payment screening                                                                                                                                   | settlement still requires TEE-tier PASSED                                                                                                                           | `still enforces the TEE tier on top of the seal`                                          |
+| T13 | **Ownership takeover / fat-finger**                                                                                                                                                                          | `Ownable2Step`; non-pending acceptor rejected                                                                                                                       | two-step test                                                                             |
+| T14 | **Reentrancy** during clear                                                                                                                                                                                  | `nonReentrant`; precompile calls are `view`; state written after checks                                                                                             | (guard present; no external value transfer in the gate)                                   |
+| T15 | **Zero corridor endpoints**                                                                                                                                                                                  | `ZeroCorridor` on either zero address                                                                                                                               | zero-endpoint test                                                                        |
+| T16 | **Escrow fund-lock** — a payment whose amount can't cover its fee escrows, passes TEE, then `settlePayment` underflows (`amount - fee`) forever; a PASSED payment can't be refunded/cancelled → funds locked | `AmountBelowFee` guard rejects `amount <= fee` at `initiatePayment` and per batch item; settle-side cap `fee = min(fee, amount)` defends a post-initiation fee hike | `fund-lock fix` + `settle-side fee cap` tests                                             |
+| T17 | **Settlement reentrancy** — malicious native recipient re-enters settle/refund/cancel mid-transfer                                                                                                           | `nonReentrant` on all three + CEI (status set before the external call)                                                                                             | `reentrancy (real attack fixtures)` — MaliciousNativeReceiver, asserts no double-settle   |
+| T18 | **Hostile seal gate** — a governance-wired gate re-enters settlement from `isCleared`                                                                                                                        | `ISealSettlementGate.isCleared` is `view` → NoblePay invokes it via STATICCALL, so a state-changing re-entry reverts at the EVM level                               | `hostile seal gate cannot reenter settlement` — ReentrantSealGate                         |
+
+**Self-audit finding (fixed this pass):** T16 was a real permanent-fund-lock
+bug in the pre-existing settlement path (not introduced by the seal tier). A
+payment with `amount <= _calculateFee(amount)` — e.g. any amount below `baseFee`
+— escrowed and passed TEE screening, but `settlePayment` computes
+`netAmount = amount - fee` and underflow-reverts on every call; because a PASSED
+payment is neither refundable (BLOCKED/FLAGGED only) nor cancellable (PENDING
+only), the escrow was locked forever. Fixed with a fail-fast `AmountBelowFee`
+guard at both initiation paths plus a `fee = min(fee, amount)` cap at settlement
+for governance fee changes. Also removed a dead `onlyComplianceOfficer` modifier
+(unused; `refundPayment` uses an inline `hasRole` check).
 
 **Suites:**
 
@@ -66,11 +80,13 @@ no authority.
 - `contracts/test/NoblePaySealGate.test.js` — **13 integration tests** over the
   REAL NoblePay + gate stack (only the precompile boundary is mocked, via
   setCode at 0x0900, state set after install).
-- Full contracts suite **1503 passing** with the tier added.
+- `contracts/test/NoblePayHardening.test.js` — **13 tests**: constructor guards,
+  the AmountBelowFee fund-lock fix (single + batch + settle-side cap), and real
+  reentrancy/hostile-gate attack fixtures with post-revert state assertions.
+- Full contracts suite **1516 passing** with the tier + hardening added.
 - Measured coverage (`hardhat test --coverage`):
-  **SealSettlementGate.sol 100.00% lines / 100.00% statements, zero uncovered
-  lines**; NoblePay.sol 99.0% (the two uncovered lines are pre-existing
-  constructor zero-checks).
+  **SealSettlementGate.sol AND NoblePay.sol both 100.00% lines / 100.00%
+  statements, zero uncovered lines.**
 
 ---
 
@@ -118,6 +134,20 @@ precompile, live revocation, and clearance permanence. See
   computation ran under policy on attested infrastructure; it does not prove
   the screening model is complete. Model registration/review is a program
   control.
+- **Supported-token allowlist excludes fee-on-transfer / rebasing tokens.**
+  NoblePay records `amount` on escrow and settles `amount - fee`; a
+  fee-on-transfer or rebasing token would leave the contract holding less than
+  recorded and could let one payment's settlement draw on another's escrow.
+  Only `ADMIN_ROLE`-allowlisted, standard-behaviour stablecoins (USDC/USDT
+  class) must be added — this is an admin responsibility, not enforced in code.
+- **A hostile seal gate can DoS settlement, not steal.** `setSealGate` is
+  `ADMIN_ROLE`; a malicious/buggy gate whose `isCleared` reverts would block
+  settlement while enforcement is on (griefing), but cannot reenter or move
+  funds (T18). Production should hold `ADMIN_ROLE` behind a multisig/timelock.
+- **Bad treasury bricks native settlement.** Native settlement transfers the
+  fee to `treasury` with a `require`-checked call; a treasury contract that
+  rejects value would revert settlement atomically. `treasury` is
+  `TREASURY_ROLE`-set — an admin responsibility.
 - **Governance is trusted** to set a sane CEAP policy; production should place
   the gate's `owner` and NoblePay's `ADMIN_ROLE` behind the platform's
   multisig/timelock.
