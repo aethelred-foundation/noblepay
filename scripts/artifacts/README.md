@@ -24,3 +24,17 @@ a fresh, policy-satisfying seal — `AlreadyCleared`).
 
 The vendored `.bin` here is byte-identical (SHA-256) to the chain repo's copy;
 keep them in lockstep when the contract is recompiled.
+
+## Editable source
+
+`../../contracts/src/SealSettlementGate.sol` is a faithful reconstruction of
+this artifact: its **ABI is byte-for-byte identical** to `SealSettlementGate.abi`
+(verified), and its behaviour is covered by
+`../../contracts/test/SealSettlementGate.test.js` (15 cases mirroring the chain
+repo's real-precompile assertions — direction sensitivity, CEAP policy, live
+revocation, clearance permanence). Recompiling that source produces functionally
+equivalent but **not** byte-identical bytecode (different compiler
+provenance/metadata), so the `.bin` vendored here — the reviewed artifact — stays
+the deploy artifact of record. If the on-chain contract must change, edit the
+source, recompile, and re-vendor both this `.bin` and the chain repo's testdata
+copy together.
