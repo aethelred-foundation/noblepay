@@ -366,4 +366,101 @@ describe("SealSettlementGate", function () {
       expect(policy[4]).to.deep.equal([]);
     });
   });
+
+  describe("ZeroID identity layer (ecosystem responsibility: consume, don't reimplement)", function () {
+    async function identityFixture() {
+      const base = await deployFixture();
+      const Registry = await ethers.getContractFactory("MockZeroIDRegistry");
+      const registry = await Registry.deploy();
+      await registry.waitForDeployment();
+      return { ...base, registry };
+    }
+
+    const DID_PAYER = "0x" + "11".repeat(32);
+    const DID_PAYEE = "0x" + "22".repeat(32);
+
+    async function clearCorridor(base) {
+      const { gate, seal, payer, payee } = base;
+      await seal.setSeal(JOB, SEAL_ID, purposeFor(payer.address, payee.address), true);
+      await gate.clear(payer.address, payee.address, JOB);
+    }
+
+    it("gate is OFF by default — clearing needs no identity registry", async function () {
+      const base = await networkHelpers.loadFixture(deployFixture);
+      await clearCorridor(base);
+      expect(await base.gate.isCleared(base.payer.address, base.payee.address)).to.equal(true);
+    });
+
+    it("setIdentityRegistry is owner-only and rejects required-with-zero-registry", async function () {
+      const { gate, registry, stranger } = await networkHelpers.loadFixture(identityFixture);
+      await expect(
+        gate.connect(stranger).setIdentityRegistry(registry.target, true),
+      ).to.be.revertedWith("Ownable: caller is not the owner");
+      await expect(
+        gate.setIdentityRegistry(ethers.ZeroAddress, true),
+      ).to.be.revertedWithCustomError(gate, "InvalidIdentityRegistry");
+    });
+
+    it("with the gate ON, both corridor parties must hold ACTIVE ZeroID identities to clear", async function () {
+      const base = await networkHelpers.loadFixture(identityFixture);
+      const { gate, seal, registry, payer, payee } = base;
+      await gate.setIdentityRegistry(registry.target, true);
+      await seal.setSeal(JOB, SEAL_ID, purposeFor(payer.address, payee.address), true);
+
+      // Neither registered → payer named first.
+      await expect(gate.clear(payer.address, payee.address, JOB))
+        .to.be.revertedWithCustomError(gate, "IdentityNotVerified")
+        .withArgs(payer.address);
+
+      // Payer registered, payee not → payee named.
+      await registry.setIdentity(payer.address, DID_PAYER, true);
+      await expect(gate.clear(payer.address, payee.address, JOB))
+        .to.be.revertedWithCustomError(gate, "IdentityNotVerified")
+        .withArgs(payee.address);
+
+      // Both active → clears.
+      await registry.setIdentity(payee.address, DID_PAYEE, true);
+      await gate.clear(payer.address, payee.address, JOB);
+      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
+    });
+
+    it("identity suspension in ZeroID closes the corridor LIVE — and reactivation reopens it", async function () {
+      const base = await networkHelpers.loadFixture(identityFixture);
+      const { gate, seal, registry, payer, payee } = base;
+      await registry.setIdentity(payer.address, DID_PAYER, true);
+      await registry.setIdentity(payee.address, DID_PAYEE, true);
+      await gate.setIdentityRegistry(registry.target, true);
+      await clearCorridor(base);
+      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
+
+      // ZeroID is the canonical status authority: suspension closes the
+      // corridor with NO transaction on the gate…
+      await registry.setIdentity(payee.address, DID_PAYEE, false);
+      expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
+
+      // …and reinstatement (unlike seal/local revocation) reopens it — the
+      // clearance record itself was never consumed.
+      await registry.setIdentity(payee.address, DID_PAYEE, true);
+      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
+    });
+
+    it("a broken registry fails CLOSED: isCleared false, clear reverts", async function () {
+      const base = await networkHelpers.loadFixture(identityFixture);
+      const { gate, seal, payer, payee, stranger } = base;
+      // Point at an EOA — staticcalls return empty data, decoding fails.
+      await gate.setIdentityRegistry(stranger.address, true);
+      await seal.setSeal(JOB, SEAL_ID, purposeFor(payer.address, payee.address), true);
+      await expect(gate.clear(payer.address, payee.address, JOB)).to.be.revert(ethers);
+      expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
+    });
+
+    it("turning the gate off restores seal-only semantics", async function () {
+      const base = await networkHelpers.loadFixture(identityFixture);
+      const { gate, registry, payer, payee } = base;
+      await gate.setIdentityRegistry(registry.target, true);
+      await gate.setIdentityRegistry(ethers.ZeroAddress, false);
+      await clearCorridor(base);
+      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
+    });
+  });
 });

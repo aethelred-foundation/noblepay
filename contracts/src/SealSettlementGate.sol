@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 import "./interfaces/ISeal.sol";
+import "./interfaces/IZeroIDRegistry.sol";
 
 /**
  * @title SealSettlementGate — consensus-anchored corridor clearance
@@ -75,6 +76,17 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     // a seal admits exactly one clearance (replay protection)
     mapping(string => bool) public sealUsed;
 
+    // ── ZeroID identity layer (optional; ecosystem responsibility matrix) ──
+    // ZeroID — not NoblePay — is the canonical identity authority. When the
+    // layer is on, BOTH corridor parties must hold registered, ACTIVE ZeroID
+    // identities: enforced at clearance AND re-checked live in {isCleared},
+    // so an identity suspension (e.g. a sanctions hit surfacing through
+    // ZeroID) closes the corridor instantly, exactly like seal revocation.
+    // Unlike seal/local revocation, identity REINSTATEMENT reopens the
+    // corridor — the clearance record itself is never consumed by it.
+    IZeroIDRegistry public identityRegistry;
+    bool public identityRequired;
+
     // CEAP policy every backing seal must satisfy (empty arrays = any).
     string[] private _allowedBackends;
     string private _minVerification;
@@ -89,6 +101,7 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     event CorridorCleared(
         address indexed payer, address indexed payee, string sealId, string jobId
     );
+    event IdentityRegistrySet(address registry, bool required);
     event ClearanceRevoked(address indexed payer, address indexed payee, address indexed by);
     event CompliancePolicySet(
         string[] allowedBackends,
@@ -109,6 +122,8 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     error SealNotBoundToCorridor(string expectedPurpose);
     error PolicyNotSatisfied(string reason);
     error NoSuchClearance();
+    error InvalidIdentityRegistry();
+    error IdentityNotVerified(address party);
 
     constructor(address governance) {
         _transferOwnership(governance);
@@ -132,6 +147,14 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         nonReentrant
     {
         if (payer == address(0) || payee == address(0)) revert ZeroCorridor();
+
+        // ZeroID identity layer: both corridor parties must currently hold
+        // registered, ACTIVE identities. Reverts name the failing party so
+        // integrators and UIs can route the right onboarding flow.
+        if (identityRequired) {
+            if (!_identityActive(payer)) revert IdentityNotVerified(payer);
+            if (!_identityActive(payee)) revert IdentityNotVerified(payee);
+        }
 
         // One corridor, one clearance, forever. Without this guard a second
         // corridor-bound seal could overwrite the record — including rewriting
@@ -188,6 +211,12 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     function isCleared(address payer, address payee) public view returns (bool) {
         Clearance storage c = _clearances[payer][payee];
         if (!c.exists || c.revoked) return false;
+        // Live ZeroID check: a suspended/revoked identity closes the corridor
+        // instantly (fail-closed — a broken registry also reads as closed);
+        // reinstatement in ZeroID reopens it without touching the record.
+        if (identityRequired && (!_identityOk(payer) || !_identityOk(payee))) {
+            return false;
+        }
         return SEAL.verifySeal(c.sealId);
     }
 
@@ -255,6 +284,19 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         return (_allowedBackends, _minVerification, _allowedPlatforms, _requireVendorRoot, _dataResidency);
     }
 
+    /**
+     * @notice Wire (or unwire) the ZeroID identity registry and toggle the
+     *         identity layer. ZeroID is the ecosystem's canonical identity
+     *         authority — this gate consumes its status, it never issues or
+     *         mutates identities.
+     */
+    function setIdentityRegistry(address registry, bool required) external onlyOwner {
+        if (required && registry == address(0)) revert InvalidIdentityRegistry();
+        identityRegistry = IZeroIDRegistry(registry);
+        identityRequired = required;
+        emit IdentityRegistrySet(registry, required);
+    }
+
     /// @notice Pause clearing (verification reads stay live).
     function pause() external onlyOwner {
         _pause();
@@ -278,6 +320,29 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         returns (string memory)
     {
         return string.concat("noblepay:", _toHexAddress(payer), ":", _toHexAddress(payee));
+    }
+
+    /// @dev Strict check used on the CLEAR path — a reverting registry
+    ///      bubbles up (fail closed with the registry's own error).
+    function _identityActive(address party) private view returns (bool) {
+        bytes32 did = identityRegistry.resolveByController(party);
+        return did != bytes32(0) && identityRegistry.isActiveIdentity(did);
+    }
+
+    /// @dev Non-reverting check used on the VIEW path — any registry failure
+    ///      (broken upgrade, wrong address) reads as NOT verified, so the
+    ///      corridor fails CLOSED without bricking settlement-path reads.
+    function _identityOk(address party) private view returns (bool) {
+        try identityRegistry.resolveByController(party) returns (bytes32 did) {
+            if (did == bytes32(0)) return false;
+            try identityRegistry.isActiveIdentity(did) returns (bool active) {
+                return active;
+            } catch {
+                return false;
+            }
+        } catch {
+            return false;
+        }
     }
 
     // hex helper (lowercase, unchecksummed — purpose strings are canonical)
