@@ -31,7 +31,7 @@ export interface TreasuryProposal {
   recipient: string;
   /** Requested amount (human-readable) */
   amount: number;
-  /** Token symbol for the request (e.g. 'USDC', 'AET') */
+  /** Token symbol for the request (e.g. 'USDC', 'AETHEL') */
   tokenSymbol: string;
   /** Current proposal status */
   status: ProposalStatus;

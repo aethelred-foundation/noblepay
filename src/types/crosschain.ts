@@ -16,7 +16,7 @@ export interface ChainInfo {
   chainId: number;
   /** Chain name */
   name: string;
-  /** Chain symbol (e.g. 'ETH', 'AETH') */
+  /** Chain symbol (e.g. 'ETH', 'AETHEL') */
   symbol: string;
   /** RPC endpoint URL */
   rpcUrl: string;

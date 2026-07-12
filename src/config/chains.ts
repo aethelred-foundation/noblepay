@@ -13,7 +13,12 @@ import { defineChain } from 'viem';
 
 export const AETHELRED_MAINNET_ID = 7331;
 export const AETHELRED_TESTNET_ID = 7332;
-export const AETHELRED_DEVNET_ID = 7333;
+// Devnet shares the confirmed live EVM chain id (7332): a local
+// `aethelredd start --json-rpc.enable` node reports 7332, and the canonical
+// ecosystem manifest (aethelred repo ecosystem/manifest.json v2.0.0) pins
+// devnet_chain_id = 7332. The prior 7333 value matched no real node and
+// caused wagmi chain-mismatch errors against a local devnet.
+export const AETHELRED_DEVNET_ID = 7332;
 
 // ---------------------------------------------------------------------------
 // Chain Definitions
