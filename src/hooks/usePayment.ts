@@ -5,12 +5,16 @@
  * React Query for API-backed payment data.
  */
 
-import { useState, useCallback, useMemo } from 'react';
-import { useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
-import { parseEther, parseUnits, keccak256, encodePacked } from 'viem';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { CONTRACT_ADDRESSES } from '@/config/chains';
-import { NOBLEPAY_ABI } from '@/config/abis';
+import { useState, useCallback, useMemo } from "react";
+import {
+  useReadContract,
+  useWriteContract,
+  useWaitForTransactionReceipt,
+} from "wagmi";
+import { parseEther, parseUnits, keccak256, encodePacked } from "viem";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { CONTRACT_ADDRESSES } from "@/config/chains";
+import { NOBLEPAY_ABI } from "@/config/abis";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -59,11 +63,11 @@ export interface InitiatePaymentParams {
 // API helpers
 // ---------------------------------------------------------------------------
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { "Content-Type": "application/json" },
     ...init,
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
@@ -76,7 +80,7 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function usePayment(paymentId: string | undefined) {
   return useQuery({
-    queryKey: ['payment', paymentId],
+    queryKey: ["payment", paymentId],
     queryFn: () => fetchJson<PaymentDetails>(`/v1/payments/${paymentId}`),
     enabled: !!paymentId,
     staleTime: 10_000,
@@ -89,16 +93,16 @@ export function usePayment(paymentId: string | undefined) {
 
 export function usePayments(filters: PaymentFilter = {}) {
   const params = new URLSearchParams();
-  if (filters.status) params.set('status', filters.status);
-  if (filters.currency) params.set('currency', filters.currency);
-  if (filters.dateRange) params.set('dateRange', filters.dateRange);
-  if (filters.riskLevel) params.set('riskLevel', filters.riskLevel);
-  if (filters.search) params.set('search', filters.search);
-  params.set('page', String(filters.page ?? 1));
-  params.set('pageSize', String(filters.pageSize ?? 20));
+  if (filters.status) params.set("status", filters.status);
+  if (filters.currency) params.set("currency", filters.currency);
+  if (filters.dateRange) params.set("dateRange", filters.dateRange);
+  if (filters.riskLevel) params.set("riskLevel", filters.riskLevel);
+  if (filters.search) params.set("search", filters.search);
+  params.set("page", String(filters.page ?? 1));
+  params.set("pageSize", String(filters.pageSize ?? 20));
 
   return useQuery({
-    queryKey: ['payments', filters],
+    queryKey: ["payments", filters],
     queryFn: () =>
       fetchJson<{ payments: PaymentDetails[]; total: number }>(
         `/v1/payments?${params.toString()}`,
@@ -121,19 +125,25 @@ export function useInitiatePayment() {
   const initiate = useCallback(
     (params: InitiatePaymentParams) => {
       const purposeHash = keccak256(
-        encodePacked(['string'], [params.purposeHash]),
+        encodePacked(["string"], [params.purposeHash]),
       );
 
       const amount =
-        params.currency === 'AET'
+        params.currency === "AETHEL"
           ? parseEther(params.amount)
           : parseUnits(params.amount, 6); // USDC/USDT use 6 decimals
 
       writeContract({
         address: CONTRACT_ADDRESSES.noblepay as `0x${string}`,
         abi: NOBLEPAY_ABI,
-        functionName: 'initiatePayment',
-        args: [params.recipient as `0x${string}`, amount, purposeHash, '0x4145' as `0x${string}`, '0x' as `0x${string}`],
+        functionName: "initiatePayment",
+        args: [
+          params.recipient as `0x${string}`,
+          amount,
+          purposeHash,
+          "0x4145" as `0x${string}`,
+          "0x" as `0x${string}`,
+        ],
       });
     },
     [writeContract],
@@ -142,8 +152,8 @@ export function useInitiatePayment() {
   // Invalidate payment list cache on success
   useMemo(() => {
     if (isSuccess) {
-      queryClient.invalidateQueries({ queryKey: ['payments'] });
-      queryClient.invalidateQueries({ queryKey: ['paymentStats'] });
+      queryClient.invalidateQueries({ queryKey: ["payments"] });
+      queryClient.invalidateQueries({ queryKey: ["paymentStats"] });
     }
   }, [isSuccess, queryClient]);
 
@@ -162,8 +172,8 @@ export function useInitiatePayment() {
 
 export function usePaymentStats() {
   return useQuery({
-    queryKey: ['paymentStats'],
-    queryFn: () => fetchJson<PaymentStats>('/v1/payments/stats'),
+    queryKey: ["paymentStats"],
+    queryFn: () => fetchJson<PaymentStats>("/v1/payments/stats"),
     staleTime: 15_000,
     refetchInterval: 30_000,
   });
@@ -178,9 +188,9 @@ export function useCancelPayment() {
 
   return useMutation({
     mutationFn: (paymentId: string) =>
-      fetchJson(`/v1/payments/${paymentId}/cancel`, { method: 'POST' }),
+      fetchJson(`/v1/payments/${paymentId}/cancel`, { method: "POST" }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['payments'] });
+      queryClient.invalidateQueries({ queryKey: ["payments"] });
     },
   });
 }
@@ -194,9 +204,9 @@ export function useRefundPayment() {
 
   return useMutation({
     mutationFn: (paymentId: string) =>
-      fetchJson(`/v1/payments/${paymentId}/refund`, { method: 'POST' }),
+      fetchJson(`/v1/payments/${paymentId}/refund`, { method: "POST" }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['payments'] });
+      queryClient.invalidateQueries({ queryKey: ["payments"] });
     },
   });
 }

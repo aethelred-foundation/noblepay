@@ -9,14 +9,14 @@
 
 /** Invoice status */
 export type InvoiceStatus =
-  | 'Draft'
-  | 'Issued'
-  | 'Accepted'
-  | 'Financed'
-  | 'Paid'
-  | 'Overdue'
-  | 'Disputed'
-  | 'Cancelled';
+  | "Draft"
+  | "Issued"
+  | "Accepted"
+  | "Financed"
+  | "Paid"
+  | "Overdue"
+  | "Disputed"
+  | "Cancelled";
 
 /** An invoice record for cross-border trade financing */
 export interface Invoice {
@@ -64,12 +64,12 @@ export interface Invoice {
 
 /** Financing request status */
 export type FinancingStatus =
-  | 'Pending'
-  | 'Approved'
-  | 'Funded'
-  | 'Repaid'
-  | 'Defaulted'
-  | 'Rejected';
+  | "Pending"
+  | "Approved"
+  | "Funded"
+  | "Repaid"
+  | "Defaulted"
+  | "Rejected";
 
 /** A financing request against an invoice */
 export interface FinancingRequest {
@@ -118,7 +118,7 @@ export interface CreditScore {
   /** Overall credit score (300-850) */
   score: number;
   /** Score grade */
-  grade: 'AAA' | 'AA' | 'A' | 'BBB' | 'BB' | 'B' | 'CCC' | 'D';
+  grade: "AAA" | "AA" | "A" | "BBB" | "BB" | "B" | "CCC" | "D";
   /** Maximum financing amount eligible (USD) */
   maxFinancingAmount: number;
   /** Maximum advance rate percentage */

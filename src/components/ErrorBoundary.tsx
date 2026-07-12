@@ -4,9 +4,9 @@
  * and displays a fallback UI instead of crashing the app
  */
 
-import React, { Component, ErrorInfo, ReactNode } from 'react';
-import { AlertTriangle, RefreshCw, Home, MessageCircle } from 'lucide-react';
-import { BRAND } from '@/lib/constants';
+import React, { Component, ErrorInfo, ReactNode } from "react";
+import { AlertTriangle, RefreshCw, Home, MessageCircle } from "lucide-react";
+import { BRAND } from "@/lib/constants";
 
 interface Props {
   children: ReactNode;
@@ -40,7 +40,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
     // Log error to monitoring service
-    console.error('ErrorBoundary caught an error:', error, errorInfo);
+    console.error("ErrorBoundary caught an error:", error, errorInfo);
 
     this.setState({
       error,
@@ -48,7 +48,7 @@ export class ErrorBoundary extends Component<Props, State> {
     });
 
     // Send to error tracking service (Sentry)
-    if (typeof window !== 'undefined' && (window as any).Sentry) {
+    if (typeof window !== "undefined" && (window as any).Sentry) {
       (window as any).Sentry.captureException(error, {
         extra: {
           componentStack: errorInfo.componentStack,
@@ -71,7 +71,7 @@ export class ErrorBoundary extends Component<Props, State> {
   };
 
   handleGoHome = (): void => {
-    window.location.href = '/';
+    window.location.href = "/";
   };
 
   render(): ReactNode {
@@ -101,11 +101,12 @@ export class ErrorBoundary extends Component<Props, State> {
                 </h1>
 
                 <p className="text-neutral-400 text-center mb-6">
-                  We apologize for the inconvenience. Our team has been notified and is working on a fix.
+                  We apologize for the inconvenience. Our team has been notified
+                  and is working on a fix.
                 </p>
 
                 {/* Error Details (Development Only) */}
-                {process.env.NODE_ENV === 'development' && this.state.error && (
+                {process.env.NODE_ENV === "development" && this.state.error && (
                   <div className="mb-6 p-4 bg-red-500/5 border border-red-500/10 rounded-lg">
                     <p className="text-red-400 font-mono text-sm mb-2">
                       {this.state.error.toString()}
@@ -150,7 +151,7 @@ export class ErrorBoundary extends Component<Props, State> {
             {/* Support Link */}
             <div className="mt-6 text-center">
               <p className="text-neutral-500 text-sm">
-                Need help?{' '}
+                Need help?{" "}
                 <a
                   href="https://discord.gg/aethelred"
                   target="_blank"
@@ -166,7 +167,7 @@ export class ErrorBoundary extends Component<Props, State> {
             {/* Brand */}
             <div className="mt-8 text-center">
               <p className="text-neutral-600 text-xs">
-                {BRAND.NAME} v{process.env.NEXT_PUBLIC_APP_VERSION || '1.0.0'}
+                {BRAND.NAME} v{process.env.NEXT_PUBLIC_APP_VERSION || "1.0.0"}
               </p>
             </div>
           </div>
@@ -187,7 +188,10 @@ interface SectionErrorBoundaryProps {
   sectionName: string;
 }
 
-export class SectionErrorBoundary extends Component<SectionErrorBoundaryProps, State> {
+export class SectionErrorBoundary extends Component<
+  SectionErrorBoundaryProps,
+  State
+> {
   constructor(props: SectionErrorBoundaryProps) {
     super(props);
     this.state = {
@@ -206,7 +210,11 @@ export class SectionErrorBoundary extends Component<SectionErrorBoundaryProps, S
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo): void {
-    console.error(`Error in section "${this.props.sectionName}":`, error, errorInfo);
+    console.error(
+      `Error in section "${this.props.sectionName}":`,
+      error,
+      errorInfo,
+    );
     this.setState({ error, errorInfo });
   }
 

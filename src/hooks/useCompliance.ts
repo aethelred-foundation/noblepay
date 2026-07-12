@@ -5,10 +5,10 @@
  * metrics, and sanctions list freshness.
  */
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useReadContract } from 'wagmi';
-import { CONTRACT_ADDRESSES } from '@/config/chains';
-import { COMPLIANCE_ORACLE_ABI } from '@/config/abis';
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useReadContract } from "wagmi";
+import { CONTRACT_ADDRESSES } from "@/config/chains";
+import { COMPLIANCE_ORACLE_ABI } from "@/config/abis";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -69,11 +69,11 @@ export interface FlaggedPayment {
 // API helpers
 // ---------------------------------------------------------------------------
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { "Content-Type": "application/json" },
     ...init,
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
@@ -86,8 +86,8 @@ async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export function useComplianceStatus() {
   return useQuery({
-    queryKey: ['complianceStatus'],
-    queryFn: () => fetchJson<ComplianceEngineStatus>('/v1/compliance/status'),
+    queryKey: ["complianceStatus"],
+    queryFn: () => fetchJson<ComplianceEngineStatus>("/v1/compliance/status"),
     staleTime: 10_000,
     refetchInterval: 15_000,
   });
@@ -99,7 +99,7 @@ export function useComplianceStatus() {
 
 export function useScreeningResult(paymentId: string | undefined) {
   return useQuery({
-    queryKey: ['screening', paymentId],
+    queryKey: ["screening", paymentId],
     queryFn: () =>
       fetchJson<ScreeningResult>(`/v1/compliance/screenings/${paymentId}`),
     enabled: !!paymentId,
@@ -113,8 +113,8 @@ export function useScreeningResult(paymentId: string | undefined) {
 
 export function useComplianceMetrics() {
   return useQuery({
-    queryKey: ['complianceMetrics'],
-    queryFn: () => fetchJson<ComplianceMetrics>('/v1/compliance/metrics'),
+    queryKey: ["complianceMetrics"],
+    queryFn: () => fetchJson<ComplianceMetrics>("/v1/compliance/metrics"),
     staleTime: 30_000,
     refetchInterval: 60_000,
   });
@@ -126,9 +126,9 @@ export function useComplianceMetrics() {
 
 export function useSanctionsListStatus() {
   return useQuery({
-    queryKey: ['sanctionsListStatus'],
+    queryKey: ["sanctionsListStatus"],
     queryFn: () =>
-      fetchJson<SanctionsListStatus[]>('/v1/compliance/sanctions/status'),
+      fetchJson<SanctionsListStatus[]>("/v1/compliance/sanctions/status"),
     staleTime: 60_000,
   });
 }
@@ -139,10 +139,10 @@ export function useSanctionsListStatus() {
 
 export function useFlaggedPayments() {
   return useQuery({
-    queryKey: ['flaggedPayments'],
+    queryKey: ["flaggedPayments"],
     queryFn: () =>
       fetchJson<{ payments: FlaggedPayment[]; total: number }>(
-        '/v1/compliance/flagged',
+        "/v1/compliance/flagged",
       ),
     staleTime: 10_000,
     refetchInterval: 30_000,
@@ -163,16 +163,16 @@ export function useReviewFlaggedPayment() {
       notes,
     }: {
       paymentId: string;
-      decision: 'clear' | 'escalate' | 'block';
+      decision: "clear" | "escalate" | "block";
       notes: string;
     }) =>
       fetchJson(`/v1/compliance/flagged/${paymentId}/review`, {
-        method: 'POST',
+        method: "POST",
         body: JSON.stringify({ decision, notes }),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['flaggedPayments'] });
-      queryClient.invalidateQueries({ queryKey: ['complianceMetrics'] });
+      queryClient.invalidateQueries({ queryKey: ["flaggedPayments"] });
+      queryClient.invalidateQueries({ queryKey: ["complianceMetrics"] });
     },
   });
 }
@@ -186,12 +186,12 @@ export function useUpdateSanctionsList() {
 
   return useMutation({
     mutationFn: (listName: string) =>
-      fetchJson('/v1/compliance/sanctions/update', {
-        method: 'POST',
+      fetchJson("/v1/compliance/sanctions/update", {
+        method: "POST",
         body: JSON.stringify({ list: listName }),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['sanctionsListStatus'] });
+      queryClient.invalidateQueries({ queryKey: ["sanctionsListStatus"] });
     },
   });
 }
@@ -204,7 +204,7 @@ export function useRiskThresholds() {
   const { data: thresholds } = useReadContract({
     address: CONTRACT_ADDRESSES.complianceOracle as `0x${string}`,
     abi: COMPLIANCE_ORACLE_ABI,
-    functionName: 'getRiskThresholds',
+    functionName: "getRiskThresholds",
     query: {
       enabled: !!CONTRACT_ADDRESSES.complianceOracle,
     },

@@ -5,11 +5,15 @@
  * and payment limit tracking.
  */
 
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
-import { useAccount } from 'wagmi';
-import { CONTRACT_ADDRESSES } from '@/config/chains';
-import { BUSINESS_REGISTRY_ABI } from '@/config/abis';
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import {
+  useReadContract,
+  useWriteContract,
+  useWaitForTransactionReceipt,
+} from "wagmi";
+import { useAccount } from "wagmi";
+import { CONTRACT_ADDRESSES } from "@/config/chains";
+import { BUSINESS_REGISTRY_ABI } from "@/config/abis";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -22,8 +26,8 @@ export interface BusinessProfile {
   businessName: string;
   jurisdiction: string;
   businessType: string;
-  kycStatus: 'PENDING' | 'VERIFIED' | 'SUSPENDED' | 'REVOKED' | 'EXPIRED';
-  tier: 'STANDARD' | 'PREMIUM' | 'ENTERPRISE';
+  kycStatus: "PENDING" | "VERIFIED" | "SUSPENDED" | "REVOKED" | "EXPIRED";
+  tier: "STANDARD" | "PREMIUM" | "ENTERPRISE";
   complianceOfficer: string;
   contactEmail: string;
   registeredAt: number;
@@ -54,11 +58,11 @@ export interface BusinessRegistrationParams {
 // API helpers
 // ---------------------------------------------------------------------------
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || '';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: { "Content-Type": "application/json" },
     ...init,
   });
   if (!res.ok) throw new Error(`API ${res.status}: ${res.statusText}`);
@@ -73,7 +77,7 @@ export function useBusinessProfile() {
   const { address } = useAccount();
 
   return useQuery({
-    queryKey: ['businessProfile', address],
+    queryKey: ["businessProfile", address],
     queryFn: () => fetchJson<BusinessProfile>(`/v1/businesses/${address}`),
     enabled: !!address,
     staleTime: 30_000,
@@ -90,7 +94,7 @@ export function useBusinessRegistered() {
   const { data: isRegistered } = useReadContract({
     address: CONTRACT_ADDRESSES.businessRegistry as `0x${string}`,
     abi: BUSINESS_REGISTRY_ABI,
-    functionName: 'isBusinessRegistered',
+    functionName: "isBusinessRegistered",
     args: address ? [address] : undefined,
     query: {
       enabled: !!address && !!CONTRACT_ADDRESSES.businessRegistry,
@@ -115,19 +119,23 @@ export function useBusinessRegistration() {
     writeContract({
       address: CONTRACT_ADDRESSES.businessRegistry as `0x${string}`,
       abi: BUSINESS_REGISTRY_ABI,
-      functionName: 'registerBusiness',
-      args: [params.licenseNumber, '0x4145' as `0x${string}`, '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`],
+      functionName: "registerBusiness",
+      args: [
+        params.licenseNumber,
+        "0x4145" as `0x${string}`,
+        "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+      ],
     });
 
     // Also register via API for off-chain data
-    fetchJson('/v1/businesses', {
-      method: 'POST',
+    fetchJson("/v1/businesses", {
+      method: "POST",
       body: JSON.stringify(params),
     }).catch(console.error);
   };
 
   if (isSuccess) {
-    queryClient.invalidateQueries({ queryKey: ['businessProfile'] });
+    queryClient.invalidateQueries({ queryKey: ["businessProfile"] });
   }
 
   return {
@@ -147,8 +155,9 @@ export function useBusinessPaymentLimits() {
   const { address } = useAccount();
 
   return useQuery({
-    queryKey: ['businessLimits', address],
-    queryFn: () => fetchJson<BusinessLimits>(`/v1/businesses/${address}/limits`),
+    queryKey: ["businessLimits", address],
+    queryFn: () =>
+      fetchJson<BusinessLimits>(`/v1/businesses/${address}/limits`),
     enabled: !!address,
     staleTime: 15_000,
     refetchInterval: 30_000,
@@ -168,15 +177,15 @@ export function useBusinessList(filters?: {
   pageSize?: number;
 }) {
   const params = new URLSearchParams();
-  if (filters?.tier) params.set('tier', filters.tier);
-  if (filters?.kycStatus) params.set('kycStatus', filters.kycStatus);
-  if (filters?.jurisdiction) params.set('jurisdiction', filters.jurisdiction);
-  if (filters?.search) params.set('search', filters.search);
-  params.set('page', String(filters?.page ?? 1));
-  params.set('pageSize', String(filters?.pageSize ?? 20));
+  if (filters?.tier) params.set("tier", filters.tier);
+  if (filters?.kycStatus) params.set("kycStatus", filters.kycStatus);
+  if (filters?.jurisdiction) params.set("jurisdiction", filters.jurisdiction);
+  if (filters?.search) params.set("search", filters.search);
+  params.set("page", String(filters?.page ?? 1));
+  params.set("pageSize", String(filters?.pageSize ?? 20));
 
   return useQuery({
-    queryKey: ['businesses', filters],
+    queryKey: ["businesses", filters],
     queryFn: () =>
       fetchJson<{ businesses: BusinessProfile[]; total: number }>(
         `/v1/businesses?${params.toString()}`,
@@ -194,9 +203,9 @@ export function useVerifyBusiness() {
 
   return useMutation({
     mutationFn: (businessId: string) =>
-      fetchJson(`/v1/businesses/${businessId}/verify`, { method: 'POST' }),
+      fetchJson(`/v1/businesses/${businessId}/verify`, { method: "POST" }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['businesses'] });
+      queryClient.invalidateQueries({ queryKey: ["businesses"] });
     },
   });
 }
@@ -214,15 +223,15 @@ export function useUpgradeTier() {
       newTier,
     }: {
       businessId: string;
-      newTier: 'PREMIUM' | 'ENTERPRISE';
+      newTier: "PREMIUM" | "ENTERPRISE";
     }) =>
       fetchJson(`/v1/businesses/${businessId}/upgrade`, {
-        method: 'POST',
+        method: "POST",
         body: JSON.stringify({ tier: newTier }),
       }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['businesses'] });
-      queryClient.invalidateQueries({ queryKey: ['businessProfile'] });
+      queryClient.invalidateQueries({ queryKey: ["businesses"] });
+      queryClient.invalidateQueries({ queryKey: ["businessProfile"] });
     },
   });
 }

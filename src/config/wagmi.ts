@@ -5,21 +5,21 @@
  * for the NoblePay dApp frontend.
  */
 
-import { http, createConfig, createStorage } from 'wagmi';
-import { injected, walletConnect, coinbaseWallet } from 'wagmi/connectors';
+import { http, createConfig, createStorage } from "wagmi";
+import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
 import {
   aethelredMainnet,
   aethelredTestnet,
   aethelredDevnet,
   activeChain,
-} from './chains';
+} from "./chains";
 
 // ---------------------------------------------------------------------------
 // WalletConnect Project ID
 // ---------------------------------------------------------------------------
 
 const WALLETCONNECT_PROJECT_ID =
-  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || '';
+  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "";
 
 // ---------------------------------------------------------------------------
 // Connectors
@@ -34,18 +34,18 @@ const connectors = [
         walletConnect({
           projectId: WALLETCONNECT_PROJECT_ID,
           metadata: {
-            name: 'NoblePay by Aethelred',
-            description: 'Compliant cross-border payments',
-            url: 'https://noblepay.aethelred.network',
-            icons: ['https://noblepay.aethelred.network/icon.png'],
+            name: "NoblePay by Aethelred",
+            description: "Compliant cross-border payments",
+            url: "https://noblepay.aethelred.network",
+            icons: ["https://noblepay.aethelred.network/icon.png"],
           },
           showQrModal: true,
         }),
       ]
     : []),
   coinbaseWallet({
-    appName: 'NoblePay by Aethelred',
-    appLogoUrl: 'https://noblepay.aethelred.network/icon.png',
+    appName: "NoblePay by Aethelred",
+    appLogoUrl: "https://noblepay.aethelred.network/icon.png",
   }),
 ];
 
@@ -86,14 +86,14 @@ export const wagmiConfig = createConfig({
   // Use noopStorage on server to avoid hydration mismatches
   storage: createStorage({
     storage:
-      typeof window !== 'undefined'
+      typeof window !== "undefined"
         ? window.localStorage
         : {
             getItem: () => null,
             setItem: () => {},
             removeItem: () => {},
           },
-    key: 'noblepay-wallet',
+    key: "noblepay-wallet",
   }),
   // Disable auto-connect on SSR
   ssr: true,

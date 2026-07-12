@@ -8,64 +8,117 @@
  * All mock data uses seededRandom for deterministic SSR hydration.
  */
 
-import { useState, useEffect, useMemo, useCallback } from 'react';
-import { SEOHead } from '@/components/SEOHead';
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { SEOHead } from "@/components/SEOHead";
 import {
-  AreaChart, Area, LineChart, Line, BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer,
-  Legend, ReferenceLine,
-} from 'recharts';
+  AreaChart,
+  Area,
+  LineChart,
+  Line,
+  BarChart,
+  Bar,
+  PieChart,
+  Pie,
+  Cell,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip as RechartsTooltip,
+  ResponsiveContainer,
+  Legend,
+  ReferenceLine,
+} from "recharts";
 import {
-  Activity, Shield, Cpu, TrendingUp, Clock, CheckCircle,
-  ArrowUpRight, ArrowDownRight, ChevronRight, ExternalLink,
-  Zap, Lock, Server, Globe, Eye, ShieldCheck,
-  BarChart3, AlertCircle, FileText, Upload, DollarSign,
-  Building2, Timer, Fingerprint, Radio, Heart, Wifi,
-  CreditCard, Send, Download, Users,
-} from 'lucide-react';
-import { useApp } from '@/contexts/AppContext';
-import { TopNav, Footer } from '@/components/SharedComponents';
-import { seededRandom, seededHex, seededAddress, formatNumber, truncateAddress } from '@/lib/utils';
-import { BRAND } from '@/lib/constants';
-import { GlassCard, SectionHeader, Sparkline } from '@/components/PagePrimitives';
-
+  Activity,
+  Shield,
+  Cpu,
+  TrendingUp,
+  Clock,
+  CheckCircle,
+  ArrowUpRight,
+  ArrowDownRight,
+  ChevronRight,
+  ExternalLink,
+  Zap,
+  Lock,
+  Server,
+  Globe,
+  Eye,
+  ShieldCheck,
+  BarChart3,
+  AlertCircle,
+  FileText,
+  Upload,
+  DollarSign,
+  Building2,
+  Timer,
+  Fingerprint,
+  Radio,
+  Heart,
+  Wifi,
+  CreditCard,
+  Send,
+  Download,
+  Users,
+} from "lucide-react";
+import { useApp } from "@/contexts/AppContext";
+import { TopNav, Footer } from "@/components/SharedComponents";
+import {
+  seededRandom,
+  seededHex,
+  seededAddress,
+  formatNumber,
+  truncateAddress,
+} from "@/lib/utils";
+import { BRAND } from "@/lib/constants";
+import {
+  GlassCard,
+  SectionHeader,
+  Sparkline,
+} from "@/components/PagePrimitives";
 
 // =============================================================================
 // CHART & LOCAL CONSTANTS
 // =============================================================================
 
 const CHART_COLORS = [
-  '#DC2626', '#F87171', '#FCA5A5', '#FECACA', '#FEE2E2',
-  '#10B981', '#3B82F6', '#8B5CF6', '#F59E0B',
+  "#DC2626",
+  "#F87171",
+  "#FCA5A5",
+  "#FECACA",
+  "#FEE2E2",
+  "#10B981",
+  "#3B82F6",
+  "#8B5CF6",
+  "#F59E0B",
 ];
 
 const PAYMENT_STATUS_COLORS: Record<string, string> = {
-  Pending: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  Screening: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-  Passed: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30',
-  Flagged: 'bg-red-500/20 text-red-400 border-red-500/30',
-  Settled: 'bg-cyan-500/20 text-cyan-400 border-cyan-500/30',
-  Blocked: 'bg-red-700/20 text-red-500 border-red-700/30',
-  Refunded: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
+  Pending: "bg-amber-500/20 text-amber-400 border-amber-500/30",
+  Screening: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+  Passed: "bg-emerald-500/20 text-emerald-400 border-emerald-500/30",
+  Flagged: "bg-red-500/20 text-red-400 border-red-500/30",
+  Settled: "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+  Blocked: "bg-red-700/20 text-red-500 border-red-700/30",
+  Refunded: "bg-purple-500/20 text-purple-400 border-purple-500/30",
 };
 
 const PAYMENT_STATUS_DOT: Record<string, string> = {
-  Pending: 'bg-amber-400',
-  Screening: 'bg-blue-400',
-  Passed: 'bg-emerald-400',
-  Flagged: 'bg-red-400',
-  Settled: 'bg-cyan-400',
-  Blocked: 'bg-red-500',
-  Refunded: 'bg-purple-400',
+  Pending: "bg-amber-400",
+  Screening: "bg-blue-400",
+  Passed: "bg-emerald-400",
+  Flagged: "bg-red-400",
+  Settled: "bg-cyan-400",
+  Blocked: "bg-red-500",
+  Refunded: "bg-purple-400",
 };
 
 const RISK_COLORS: Record<string, string> = {
-  Low: '#10B981',
-  Medium: '#F59E0B',
-  High: '#F87171',
-  Critical: '#DC2626',
+  Low: "#10B981",
+  Medium: "#F59E0B",
+  High: "#F87171",
+  Critical: "#DC2626",
 };
-
 
 // =============================================================================
 // TYPES
@@ -97,7 +150,7 @@ interface MockBusiness {
 
 interface MockTEENode {
   id: string;
-  status: 'online' | 'offline';
+  status: "online" | "offline";
   lastHeartbeat: number;
   attestationValid: boolean;
   region: string;
@@ -112,45 +165,91 @@ interface MockFlag {
   timestamp: number;
 }
 
-
 // =============================================================================
 // DATA GENERATORS
 // =============================================================================
 
 const UAE_BUSINESS_NAMES = [
-  'Emirates Digital Holdings', 'Abu Dhabi FinTech Corp', 'Dubai Precious Metals LLC',
-  'Al Habtoor Trading Group', 'Majid Al Futtaim Finance', 'RAK Free Zone Ventures',
-  'Sharjah Capital Partners', 'DIFC Investment Authority', 'Nakheel Payment Systems',
-  'Emaar Digital Services', 'Al Ghurair Exchange', 'Mashreq Tech Solutions',
-  'ADGM Custody Services', 'Jumeirah Blockchain Lab', 'Gulf Capital Pay',
-  'Ajman Trade Finance', 'Fujairah Commodities Inc', 'Damac Financial Technologies',
+  "Emirates Digital Holdings",
+  "Abu Dhabi FinTech Corp",
+  "Dubai Precious Metals LLC",
+  "Al Habtoor Trading Group",
+  "Majid Al Futtaim Finance",
+  "RAK Free Zone Ventures",
+  "Sharjah Capital Partners",
+  "DIFC Investment Authority",
+  "Nakheel Payment Systems",
+  "Emaar Digital Services",
+  "Al Ghurair Exchange",
+  "Mashreq Tech Solutions",
+  "ADGM Custody Services",
+  "Jumeirah Blockchain Lab",
+  "Gulf Capital Pay",
+  "Ajman Trade Finance",
+  "Fujairah Commodities Inc",
+  "Damac Financial Technologies",
 ];
 
-const JURISDICTIONS = ['DIFC', 'ADGM', 'RAK DAO', 'DAFZA', 'DMCC', 'SCA', 'CBUAE'];
-const CURRENCIES = ['USD', 'AED', 'USDC', 'USDT', 'AET'];
-const PAYMENT_STATUSES = ['Pending', 'Screening', 'Passed', 'Flagged', 'Settled', 'Blocked', 'Refunded'] as const;
-const TIERS = ['Enterprise', 'Professional', 'Standard'];
-const TEE_REGIONS = ['UAE-DXB-1', 'UAE-AUH-1', 'UAE-DXB-2', 'SG-SGP-1', 'UK-LDN-1', 'US-NYC-1',
-                     'UAE-DXB-3', 'UAE-AUH-2', 'EU-FRA-1', 'JP-TKY-1', 'AU-SYD-1', 'CA-TOR-1'];
+const JURISDICTIONS = [
+  "DIFC",
+  "ADGM",
+  "RAK DAO",
+  "DAFZA",
+  "DMCC",
+  "SCA",
+  "CBUAE",
+];
+const CURRENCIES = ["USD", "AED", "USDC", "USDT", "AETHEL"];
+const PAYMENT_STATUSES = [
+  "Pending",
+  "Screening",
+  "Passed",
+  "Flagged",
+  "Settled",
+  "Blocked",
+  "Refunded",
+] as const;
+const TIERS = ["Enterprise", "Professional", "Standard"];
+const TEE_REGIONS = [
+  "UAE-DXB-1",
+  "UAE-AUH-1",
+  "UAE-DXB-2",
+  "SG-SGP-1",
+  "UK-LDN-1",
+  "US-NYC-1",
+  "UAE-DXB-3",
+  "UAE-AUH-2",
+  "EU-FRA-1",
+  "JP-TKY-1",
+  "AU-SYD-1",
+  "CA-TOR-1",
+];
 const FLAG_REASONS = [
-  'Sanctions match (partial)', 'High-risk jurisdiction', 'Unusual transaction pattern',
-  'PEP association detected', 'Velocity threshold exceeded',
+  "Sanctions match (partial)",
+  "High-risk jurisdiction",
+  "Unusual transaction pattern",
+  "PEP association detected",
+  "Velocity threshold exceeded",
 ];
 
 function generateMockPayment(seed: number, idx: number): MockPayment {
   const statusRoll = seededRandom(seed + 1);
   let status: string;
-  if (statusRoll < 0.15) status = 'Pending';
-  else if (statusRoll < 0.25) status = 'Screening';
-  else if (statusRoll < 0.55) status = 'Passed';
-  else if (statusRoll < 0.65) status = 'Flagged';
-  else if (statusRoll < 0.90) status = 'Settled';
-  else if (statusRoll < 0.95) status = 'Blocked';
-  else status = 'Refunded';
+  if (statusRoll < 0.15) status = "Pending";
+  else if (statusRoll < 0.25) status = "Screening";
+  else if (statusRoll < 0.55) status = "Passed";
+  else if (statusRoll < 0.65) status = "Flagged";
+  else if (statusRoll < 0.9) status = "Settled";
+  else if (statusRoll < 0.95) status = "Blocked";
+  else status = "Refunded";
 
   const currIdx = Math.floor(seededRandom(seed + 2) * CURRENCIES.length);
-  const senderIdx = Math.floor(seededRandom(seed + 3) * UAE_BUSINESS_NAMES.length);
-  const recipientIdx = Math.floor(seededRandom(seed + 4) * UAE_BUSINESS_NAMES.length);
+  const senderIdx = Math.floor(
+    seededRandom(seed + 3) * UAE_BUSINESS_NAMES.length,
+  );
+  const recipientIdx = Math.floor(
+    seededRandom(seed + 4) * UAE_BUSINESS_NAMES.length,
+  );
   const amount = Math.round(500 + seededRandom(seed + 5) * 499500);
   const riskScore = Math.floor(seededRandom(seed + 6) * 100);
 
@@ -164,15 +263,26 @@ function generateMockPayment(seed: number, idx: number): MockPayment {
     currency: CURRENCIES[currIdx],
     status,
     riskScore,
-    timestamp: Date.now() - idx * 45000 - Math.floor(seededRandom(seed + 10) * 30000) - (idx >= 8 ? 86400000 * (idx - 7) : idx >= 5 ? 3600000 * (idx - 4) : 0),
-    settlementTime: status === 'Settled' ? Math.round(60 + seededRandom(seed + 11) * 240) : null,
+    timestamp:
+      Date.now() -
+      idx * 45000 -
+      Math.floor(seededRandom(seed + 10) * 30000) -
+      (idx >= 8 ? 86400000 * (idx - 7) : idx >= 5 ? 3600000 * (idx - 4) : 0),
+    settlementTime:
+      status === "Settled"
+        ? Math.round(60 + seededRandom(seed + 11) * 240)
+        : null,
     teeAttestation: `0x${seededHex(seed + 12, 64)}`,
   };
 }
 
 function generateMockBusiness(seed: number): MockBusiness {
-  const nameIdx = Math.floor(seededRandom(seed + 1) * UAE_BUSINESS_NAMES.length);
-  const jurisdictionIdx = Math.floor(seededRandom(seed + 2) * JURISDICTIONS.length);
+  const nameIdx = Math.floor(
+    seededRandom(seed + 1) * UAE_BUSINESS_NAMES.length,
+  );
+  const jurisdictionIdx = Math.floor(
+    seededRandom(seed + 2) * JURISDICTIONS.length,
+  );
   const tierIdx = Math.floor(seededRandom(seed + 3) * TIERS.length);
   return {
     name: UAE_BUSINESS_NAMES[nameIdx],
@@ -187,12 +297,14 @@ function generateMockBusiness(seed: number): MockBusiness {
 function generateMockTEENode(seed: number, idx: number): MockTEENode {
   const isOnline = seededRandom(seed + 1) > 0.08;
   return {
-    id: `TEE-${String(idx + 1).padStart(2, '0')}`,
-    status: isOnline ? 'online' : 'offline',
-    lastHeartbeat: Date.now() - Math.floor(seededRandom(seed + 2) * (isOnline ? 30000 : 600000)),
+    id: `TEE-${String(idx + 1).padStart(2, "0")}`,
+    status: isOnline ? "online" : "offline",
+    lastHeartbeat:
+      Date.now() -
+      Math.floor(seededRandom(seed + 2) * (isOnline ? 30000 : 600000)),
     attestationValid: isOnline && seededRandom(seed + 3) > 0.05,
     region: TEE_REGIONS[idx % TEE_REGIONS.length],
-    version: `v${Math.floor(2 + seededRandom(seed + 4))}.${ Math.floor(seededRandom(seed + 5) * 5)}.${Math.floor(seededRandom(seed + 6) * 10)}`,
+    version: `v${Math.floor(2 + seededRandom(seed + 4))}.${Math.floor(seededRandom(seed + 5) * 5)}.${Math.floor(seededRandom(seed + 6) * 10)}`,
     uptime: isOnline ? Math.round(95 + seededRandom(seed + 7) * 5) : 0,
   };
 }
@@ -207,12 +319,15 @@ function generateMockFlag(seed: number): MockFlag {
   };
 }
 
-
 // ---------------------------------------------------------------------------
 // Chart data generators
 // ---------------------------------------------------------------------------
 
-function generateVolumeChart(): { day: string; total: number; settled: number }[] {
+function generateVolumeChart(): {
+  day: string;
+  total: number;
+  settled: number;
+}[] {
   const data: { day: string; total: number; settled: number }[] = [];
   for (let i = 29; i >= 0; i--) {
     const total = Math.round(1_800_000 + seededRandom(i * 13 + 7) * 1_200_000);
@@ -222,56 +337,101 @@ function generateVolumeChart(): { day: string; total: number; settled: number }[
   return data;
 }
 
-function generateSettlementChart(): { day: string; avg: number; p95: number }[] {
+function generateSettlementChart(): {
+  day: string;
+  avg: number;
+  p95: number;
+}[] {
   const data: { day: string; avg: number; p95: number }[] = [];
   for (let i = 29; i >= 0; i--) {
     const avg = Math.round((120 + seededRandom(i * 11 + 5) * 100) * 10) / 10;
-    const p95 = Math.round((avg * (1.5 + seededRandom(i * 19 + 9) * 0.8)) * 10) / 10;
+    const p95 =
+      Math.round(avg * (1.5 + seededRandom(i * 19 + 9) * 0.8) * 10) / 10;
     data.push({ day: `Day ${30 - i}`, avg: avg / 60, p95: p95 / 60 });
   }
   return data;
 }
 
-function generateRiskDistribution(): { name: string; value: number; color: string }[] {
-  return [
-    { name: 'Low', value: Math.round(60 + seededRandom(100) * 15), color: RISK_COLORS.Low },
-    { name: 'Medium', value: Math.round(15 + seededRandom(101) * 10), color: RISK_COLORS.Medium },
-    { name: 'High', value: Math.round(3 + seededRandom(102) * 5), color: RISK_COLORS.High },
-    { name: 'Critical', value: Math.round(1 + seededRandom(103) * 2), color: RISK_COLORS.Critical },
-  ];
-}
-
-function generateCompliancePipeline(): { name: string; count: number; color: string }[] {
-  return [
-    { name: 'Sanctions Screening', count: Math.floor(8 + seededRandom(200) * 15), color: '#3B82F6' },
-    { name: 'AML Risk Scoring', count: Math.floor(5 + seededRandom(201) * 10), color: '#8B5CF6' },
-    { name: 'Travel Rule Verification', count: Math.floor(3 + seededRandom(202) * 8), color: '#F59E0B' },
-  ];
-}
-
-function generatePipelineDistribution(): { name: string; pass: number; flag: number; block: number }[] {
+function generateRiskDistribution(): {
+  name: string;
+  value: number;
+  color: string;
+}[] {
   return [
     {
-      name: 'Sanctions',
+      name: "Low",
+      value: Math.round(60 + seededRandom(100) * 15),
+      color: RISK_COLORS.Low,
+    },
+    {
+      name: "Medium",
+      value: Math.round(15 + seededRandom(101) * 10),
+      color: RISK_COLORS.Medium,
+    },
+    {
+      name: "High",
+      value: Math.round(3 + seededRandom(102) * 5),
+      color: RISK_COLORS.High,
+    },
+    {
+      name: "Critical",
+      value: Math.round(1 + seededRandom(103) * 2),
+      color: RISK_COLORS.Critical,
+    },
+  ];
+}
+
+function generateCompliancePipeline(): {
+  name: string;
+  count: number;
+  color: string;
+}[] {
+  return [
+    {
+      name: "Sanctions Screening",
+      count: Math.floor(8 + seededRandom(200) * 15),
+      color: "#3B82F6",
+    },
+    {
+      name: "AML Risk Scoring",
+      count: Math.floor(5 + seededRandom(201) * 10),
+      color: "#8B5CF6",
+    },
+    {
+      name: "Travel Rule Verification",
+      count: Math.floor(3 + seededRandom(202) * 8),
+      color: "#F59E0B",
+    },
+  ];
+}
+
+function generatePipelineDistribution(): {
+  name: string;
+  pass: number;
+  flag: number;
+  block: number;
+}[] {
+  return [
+    {
+      name: "Sanctions",
       pass: Math.floor(80 + seededRandom(300) * 15),
       flag: Math.floor(3 + seededRandom(301) * 5),
       block: Math.floor(1 + seededRandom(302) * 2),
     },
     {
-      name: 'AML',
+      name: "AML",
       pass: Math.floor(75 + seededRandom(303) * 15),
       flag: Math.floor(5 + seededRandom(304) * 8),
       block: Math.floor(1 + seededRandom(305) * 3),
     },
     {
-      name: 'Travel Rule',
+      name: "Travel Rule",
       pass: Math.floor(85 + seededRandom(306) * 10),
       flag: Math.floor(2 + seededRandom(307) * 4),
       block: Math.floor(0 + seededRandom(308) * 2),
     },
   ];
 }
-
 
 // ---------------------------------------------------------------------------
 // Generate initial datasets
@@ -309,7 +469,6 @@ function generateInitialFlags(): MockFlag[] {
   return flags;
 }
 
-
 // =============================================================================
 // UTILITY FUNCTIONS
 // =============================================================================
@@ -322,14 +481,14 @@ function formatUSD(n: number): string {
 }
 
 function formatCurrency(n: number, currency: string): string {
-  if (currency === 'AED') return `${formatUSD(n).replace('$', '')} AED`;
-  if (currency === 'AET') return `${formatNumber(n)} AET`;
+  if (currency === "AED") return `${formatUSD(n).replace("$", "")} AED`;
+  if (currency === "AETHEL") return `${formatNumber(n)} AETHEL`;
   return formatUSD(n);
 }
 
 function timeAgo(timestamp: number): string {
   const diff = Math.max(0, Date.now() - timestamp);
-  if (diff < 1000) return 'just now';
+  if (diff < 1000) return "just now";
   if (diff < 60000) return `${Math.floor(diff / 1000)}s ago`;
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`;
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`;
@@ -337,10 +496,10 @@ function timeAgo(timestamp: number): string {
 }
 
 function riskColor(score: number): string {
-  if (score < 30) return 'text-emerald-400';
-  if (score < 60) return 'text-amber-400';
-  if (score < 80) return 'text-orange-400';
-  return 'text-red-400';
+  if (score < 30) return "text-emerald-400";
+  if (score < 60) return "text-amber-400";
+  if (score < 80) return "text-orange-400";
+  return "text-red-400";
 }
 
 function generateSparklineData(seed: number, count: number): number[] {
@@ -351,23 +510,35 @@ function generateSparklineData(seed: number, count: number): number[] {
   return data;
 }
 
-
 // =============================================================================
 // REUSABLE LOCAL COMPONENTS
 // =============================================================================
 
 function PaymentStatusBadge({ status }: { status: string }) {
-  const style = PAYMENT_STATUS_COLORS[status] || 'bg-slate-700/50 text-slate-300 border-slate-600/30';
-  const dot = PAYMENT_STATUS_DOT[status] || 'bg-slate-400';
+  const style =
+    PAYMENT_STATUS_COLORS[status] ||
+    "bg-slate-700/50 text-slate-300 border-slate-600/30";
+  const dot = PAYMENT_STATUS_DOT[status] || "bg-slate-400";
   return (
-    <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${style}`}>
-      <span className={`w-1.5 h-1.5 rounded-full ${dot} ${status === 'Screening' ? 'animate-pulse' : ''}`} />
+    <span
+      className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-medium border ${style}`}
+    >
+      <span
+        className={`w-1.5 h-1.5 rounded-full ${dot} ${status === "Screening" ? "animate-pulse" : ""}`}
+      />
       {status}
     </span>
   );
 }
 
-function StatCard({ icon: Icon, label, value, change, sparkData, sparkColor }: {
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  change,
+  sparkData,
+  sparkColor,
+}: {
   icon: React.ElementType;
   label: string;
   value: string;
@@ -385,15 +556,26 @@ function StatCard({ icon: Icon, label, value, change, sparkData, sparkColor }: {
           </div>
           <p className="text-xl font-bold text-white truncate">{value}</p>
           {change && (
-            <div className={`flex items-center gap-1 mt-1 text-xs ${change.positive ? 'text-emerald-400' : 'text-red-400'}`}>
-              {change.positive ? <ArrowUpRight className="w-3 h-3" /> : <ArrowDownRight className="w-3 h-3" />}
+            <div
+              className={`flex items-center gap-1 mt-1 text-xs ${change.positive ? "text-emerald-400" : "text-red-400"}`}
+            >
+              {change.positive ? (
+                <ArrowUpRight className="w-3 h-3" />
+              ) : (
+                <ArrowDownRight className="w-3 h-3" />
+              )}
               {change.value}
             </div>
           )}
         </div>
         {sparkData && (
           <div className="flex-shrink-0 ml-2">
-            <Sparkline data={sparkData} color={sparkColor || BRAND.red} height={28} width={64} />
+            <Sparkline
+              data={sparkData}
+              color={sparkColor || BRAND.red}
+              height={28}
+              width={64}
+            />
           </div>
         )}
       </div>
@@ -401,9 +583,25 @@ function StatCard({ icon: Icon, label, value, change, sparkData, sparkColor }: {
   );
 }
 
-function SanctionsListRow({ name, updatedAgo, status }: { name: string; updatedAgo: string; status: 'fresh' | 'stale' | 'warning' }) {
-  const dotColors = { fresh: 'bg-emerald-400', stale: 'bg-red-400', warning: 'bg-amber-400' };
-  const textColors = { fresh: 'text-emerald-400', stale: 'text-red-400', warning: 'text-amber-400' };
+function SanctionsListRow({
+  name,
+  updatedAgo,
+  status,
+}: {
+  name: string;
+  updatedAgo: string;
+  status: "fresh" | "stale" | "warning";
+}) {
+  const dotColors = {
+    fresh: "bg-emerald-400",
+    stale: "bg-red-400",
+    warning: "bg-amber-400",
+  };
+  const textColors = {
+    fresh: "text-emerald-400",
+    stale: "text-red-400",
+    warning: "text-amber-400",
+  };
   return (
     <div className="flex items-center justify-between py-2 border-b border-slate-800 last:border-0">
       <div className="flex items-center gap-2">
@@ -417,43 +615,54 @@ function SanctionsListRow({ name, updatedAgo, status }: { name: string; updatedA
 
 function TierBadge({ tier }: { tier: string }) {
   const colors: Record<string, string> = {
-    Enterprise: 'bg-red-500/20 text-red-400 border-red-500/30',
-    Professional: 'bg-blue-500/20 text-blue-400 border-blue-500/30',
-    Standard: 'bg-slate-500/20 text-slate-400 border-slate-500/30',
+    Enterprise: "bg-red-500/20 text-red-400 border-red-500/30",
+    Professional: "bg-blue-500/20 text-blue-400 border-blue-500/30",
+    Standard: "bg-slate-500/20 text-slate-400 border-slate-500/30",
   };
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${colors[tier] || colors.Standard}`}>
+    <span
+      className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium border ${colors[tier] || colors.Standard}`}
+    >
       {tier}
     </span>
   );
 }
 
-
 // =============================================================================
 // CUSTOM TOOLTIP
 // =============================================================================
 
-function CustomTooltip({ active, payload, label, formatValue }: {
+function CustomTooltip({
+  active,
+  payload,
+  label,
+  formatValue,
+}: {
   active?: boolean;
   payload?: Array<{ color: string; name: string; value: number | string }>;
   label?: string;
   formatValue?: (v: number | string) => string;
 }) {
   if (!active || !payload?.length) return null;
-  const fmt = formatValue || ((v: number | string) => typeof v === 'number' ? formatUSD(v) : String(v));
+  const fmt =
+    formatValue ||
+    ((v: number | string) =>
+      typeof v === "number" ? formatUSD(v) : String(v));
   return (
     <div className="bg-slate-800 text-white px-3 py-2 rounded-lg text-xs shadow-xl border border-slate-700">
       {label && <p className="font-medium mb-1">{label}</p>}
       {payload.map((entry, i) => (
         <p key={i} className="flex items-center gap-1.5">
-          <span className="w-2 h-2 rounded-full" style={{ backgroundColor: entry.color }} />
+          <span
+            className="w-2 h-2 rounded-full"
+            style={{ backgroundColor: entry.color }}
+          />
           {entry.name}: {fmt(entry.value)}
         </p>
       ))}
     </div>
   );
 }
-
 
 // =============================================================================
 // MAIN PAGE COMPONENT
@@ -473,9 +682,12 @@ export default function DashboardPage() {
   const settlementChart = useMemo(() => generateSettlementChart(), []);
   const riskDistribution = useMemo(() => generateRiskDistribution(), []);
   const compliancePipeline = useMemo(() => generateCompliancePipeline(), []);
-  const pipelineDistribution = useMemo(() => generatePipelineDistribution(), []);
+  const pipelineDistribution = useMemo(
+    () => generatePipelineDistribution(),
+    [],
+  );
 
-  const onlineNodes = teeNodes.filter(n => n.status === 'online').length;
+  const onlineNodes = teeNodes.filter((n) => n.status === "online").length;
 
   return (
     <>
@@ -489,16 +701,22 @@ export default function DashboardPage() {
         <TopNav activePage="/" />
 
         <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-
           {/* ============================================================ */}
           {/* HERO STATS BAR                                               */}
           {/* ============================================================ */}
 
           <div className="mb-8">
             <div className="mb-6">
-              <p className="text-xs uppercase tracking-[0.2em] text-red-400">NoblePay Operations</p>
-              <h1 className="mt-2 text-3xl font-bold text-white">Payment Dashboard</h1>
-              <p className="mt-1 text-sm text-slate-400">Real-time cross-border payment operations and compliance monitoring</p>
+              <p className="text-xs uppercase tracking-[0.2em] text-red-400">
+                NoblePay Operations
+              </p>
+              <h1 className="mt-2 text-3xl font-bold text-white">
+                Payment Dashboard
+              </h1>
+              <p className="mt-1 text-sm text-slate-400">
+                Real-time cross-border payment operations and compliance
+                monitoring
+              </p>
             </div>
 
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
@@ -506,7 +724,7 @@ export default function DashboardPage() {
                 icon={DollarSign}
                 label="Total Volume (24h)"
                 value="$2.4M"
-                change={{ value: '+12.3%', positive: true }}
+                change={{ value: "+12.3%", positive: true }}
                 sparkData={generateSparklineData(1000, 12)}
                 sparkColor="#3B82F6"
               />
@@ -514,7 +732,7 @@ export default function DashboardPage() {
                 icon={CreditCard}
                 label="Payments Processed"
                 value="847"
-                change={{ value: '+8.7%', positive: true }}
+                change={{ value: "+8.7%", positive: true }}
                 sparkData={generateSparklineData(1100, 12)}
                 sparkColor="#10B981"
               />
@@ -522,30 +740,29 @@ export default function DashboardPage() {
                 icon={Timer}
                 label="Avg Settlement Time"
                 value="2.3 min"
-                change={{ value: '-0.4 min', positive: true }}
+                change={{ value: "-0.4 min", positive: true }}
               />
               <StatCard
                 icon={ShieldCheck}
                 label="Compliance Pass Rate"
                 value="97.8%"
-                change={{ value: '+0.3%', positive: true }}
+                change={{ value: "+0.3%", positive: true }}
               />
               <StatCard
                 icon={Building2}
                 label="Active Businesses"
                 value="142"
-                change={{ value: '+6', positive: true }}
+                change={{ value: "+6", positive: true }}
               />
               <StatCard
                 icon={Cpu}
                 label="TEE Nodes Online"
                 value={`${onlineNodes}/12`}
                 sparkData={generateSparklineData(1200, 12)}
-                sparkColor={onlineNodes === 12 ? '#10B981' : '#F59E0B'}
+                sparkColor={onlineNodes === 12 ? "#10B981" : "#F59E0B"}
               />
             </div>
           </div>
-
 
           {/* ============================================================ */}
           {/* LIVE PAYMENT FEED + COMPLIANCE PIPELINE                      */}
@@ -571,18 +788,34 @@ export default function DashboardPage() {
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 mb-1">
-                          <code className="text-xs text-slate-500 font-mono">{truncateAddress(payment.id, 8, 4)}</code>
+                          <code className="text-xs text-slate-500 font-mono">
+                            {truncateAddress(payment.id, 8, 4)}
+                          </code>
                           <PaymentStatusBadge status={payment.status} />
                         </div>
                         <div className="flex items-center gap-1 text-sm">
-                          <span className="text-slate-300 truncate max-w-[140px]" title={payment.senderName}>{payment.senderName}</span>
+                          <span
+                            className="text-slate-300 truncate max-w-[140px]"
+                            title={payment.senderName}
+                          >
+                            {payment.senderName}
+                          </span>
                           <ChevronRight className="w-3 h-3 text-slate-600 flex-shrink-0" />
-                          <span className="text-slate-300 truncate max-w-[140px]" title={payment.recipientName}>{payment.recipientName}</span>
+                          <span
+                            className="text-slate-300 truncate max-w-[140px]"
+                            title={payment.recipientName}
+                          >
+                            {payment.recipientName}
+                          </span>
                         </div>
                       </div>
                       <div className="text-right flex-shrink-0">
-                        <p className="text-sm font-semibold text-white">{formatCurrency(payment.amount, payment.currency)}</p>
-                        <p className="text-xs text-slate-500">{mounted ? timeAgo(payment.timestamp) : '--'}</p>
+                        <p className="text-sm font-semibold text-white">
+                          {formatCurrency(payment.amount, payment.currency)}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {mounted ? timeAgo(payment.timestamp) : "--"}
+                        </p>
                       </div>
                     </div>
                   </div>
@@ -601,13 +834,23 @@ export default function DashboardPage() {
               {/* Queue counts */}
               <div className="space-y-3 mb-6">
                 {compliancePipeline.map((item) => (
-                  <div key={item.name} className="flex items-center justify-between">
+                  <div
+                    key={item.name}
+                    className="flex items-center justify-between"
+                  >
                     <div className="flex items-center gap-2">
-                      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: item.color }} />
-                      <span className="text-sm text-slate-300">{item.name}</span>
+                      <span
+                        className="w-2 h-2 rounded-full"
+                        style={{ backgroundColor: item.color }}
+                      />
+                      <span className="text-sm text-slate-300">
+                        {item.name}
+                      </span>
                     </div>
                     <div className="flex items-center gap-2">
-                      <span className="text-sm font-semibold text-white">{item.count}</span>
+                      <span className="text-sm font-semibold text-white">
+                        {item.count}
+                      </span>
                       <span className="text-xs text-slate-500">in queue</span>
                     </div>
                   </div>
@@ -615,23 +858,63 @@ export default function DashboardPage() {
               </div>
 
               {/* Pass/Flag/Block distribution bar chart */}
-              <p className="text-xs text-slate-500 uppercase tracking-wider mb-3">Pass / Flag / Block Distribution</p>
+              <p className="text-xs text-slate-500 uppercase tracking-wider mb-3">
+                Pass / Flag / Block Distribution
+              </p>
               {mounted && (
                 <ResponsiveContainer width="100%" height={160}>
-                  <BarChart data={pipelineDistribution} layout="vertical" barGap={2}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(51,65,85,0.4)" horizontal={false} />
-                    <XAxis type="number" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} />
-                    <YAxis type="category" dataKey="name" tick={{ fill: '#cbd5e1', fontSize: 11 }} width={70} axisLine={false} tickLine={false} />
-                    <RechartsTooltip content={<CustomTooltip formatValue={(v) => String(v)} />} />
-                    <Bar dataKey="pass" name="Pass" fill="#10B981" stackId="a" radius={[0, 0, 0, 0]} />
-                    <Bar dataKey="flag" name="Flag" fill="#F59E0B" stackId="a" />
-                    <Bar dataKey="block" name="Block" fill="#DC2626" stackId="a" radius={[0, 4, 4, 0]} />
+                  <BarChart
+                    data={pipelineDistribution}
+                    layout="vertical"
+                    barGap={2}
+                  >
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="rgba(51,65,85,0.4)"
+                      horizontal={false}
+                    />
+                    <XAxis
+                      type="number"
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      type="category"
+                      dataKey="name"
+                      tick={{ fill: "#cbd5e1", fontSize: 11 }}
+                      width={70}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <RechartsTooltip
+                      content={<CustomTooltip formatValue={(v) => String(v)} />}
+                    />
+                    <Bar
+                      dataKey="pass"
+                      name="Pass"
+                      fill="#10B981"
+                      stackId="a"
+                      radius={[0, 0, 0, 0]}
+                    />
+                    <Bar
+                      dataKey="flag"
+                      name="Flag"
+                      fill="#F59E0B"
+                      stackId="a"
+                    />
+                    <Bar
+                      dataKey="block"
+                      name="Block"
+                      fill="#DC2626"
+                      stackId="a"
+                      radius={[0, 4, 4, 0]}
+                    />
                   </BarChart>
                 </ResponsiveContainer>
               )}
             </GlassCard>
           </div>
-
 
           {/* ============================================================ */}
           {/* PAYMENT VOLUME CHART                                         */}
@@ -648,28 +931,85 @@ export default function DashboardPage() {
                 <ResponsiveContainer width="100%" height={300}>
                   <AreaChart data={volumeChart}>
                     <defs>
-                      <linearGradient id="gradTotal" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#3B82F6" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#3B82F6" stopOpacity={0} />
+                      <linearGradient
+                        id="gradTotal"
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2="1"
+                      >
+                        <stop
+                          offset="5%"
+                          stopColor="#3B82F6"
+                          stopOpacity={0.3}
+                        />
+                        <stop
+                          offset="95%"
+                          stopColor="#3B82F6"
+                          stopOpacity={0}
+                        />
                       </linearGradient>
-                      <linearGradient id="gradSettled" x1="0" y1="0" x2="0" y2="1">
-                        <stop offset="5%" stopColor="#10B981" stopOpacity={0.3} />
-                        <stop offset="95%" stopColor="#10B981" stopOpacity={0} />
+                      <linearGradient
+                        id="gradSettled"
+                        x1="0"
+                        y1="0"
+                        x2="0"
+                        y2="1"
+                      >
+                        <stop
+                          offset="5%"
+                          stopColor="#10B981"
+                          stopOpacity={0.3}
+                        />
+                        <stop
+                          offset="95%"
+                          stopColor="#10B981"
+                          stopOpacity={0}
+                        />
                       </linearGradient>
                     </defs>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(51,65,85,0.4)" />
-                    <XAxis dataKey="day" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} interval={4} />
-                    <YAxis tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} tickFormatter={(v: number) => formatUSD(v)} />
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="rgba(51,65,85,0.4)"
+                    />
+                    <XAxis
+                      dataKey="day"
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      interval={4}
+                    />
+                    <YAxis
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      tickFormatter={(v: number) => formatUSD(v)}
+                    />
                     <RechartsTooltip content={<CustomTooltip />} />
-                    <Legend wrapperStyle={{ paddingTop: '12px', fontSize: '12px' }} />
-                    <Area type="monotone" dataKey="total" name="Total Volume" stroke="#3B82F6" fill="url(#gradTotal)" strokeWidth={2} />
-                    <Area type="monotone" dataKey="settled" name="Settled Volume" stroke="#10B981" fill="url(#gradSettled)" strokeWidth={2} />
+                    <Legend
+                      wrapperStyle={{ paddingTop: "12px", fontSize: "12px" }}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="total"
+                      name="Total Volume"
+                      stroke="#3B82F6"
+                      fill="url(#gradTotal)"
+                      strokeWidth={2}
+                    />
+                    <Area
+                      type="monotone"
+                      dataKey="settled"
+                      name="Settled Volume"
+                      stroke="#10B981"
+                      fill="url(#gradSettled)"
+                      strokeWidth={2}
+                    />
                   </AreaChart>
                 </ResponsiveContainer>
               )}
             </GlassCard>
           </div>
-
 
           {/* ============================================================ */}
           {/* COMPLIANCE OVERVIEW (3 COLUMNS)                              */}
@@ -678,20 +1018,52 @@ export default function DashboardPage() {
           <div className="mb-10 grid grid-cols-1 gap-6 lg:grid-cols-3">
             {/* Sanctions Lists Status */}
             <GlassCard className="p-6" hover={false}>
-              <SectionHeader title="Sanctions Lists" subtitle="Data freshness status" size="sm" />
+              <SectionHeader
+                title="Sanctions Lists"
+                subtitle="Data freshness status"
+                size="sm"
+              />
               <div className="space-y-0">
-                <SanctionsListRow name="OFAC SDN" updatedAgo="2h ago" status="fresh" />
-                <SanctionsListRow name="UAE Central Bank" updatedAgo="4h ago" status="fresh" />
-                <SanctionsListRow name="UN Consolidated" updatedAgo="12h ago" status="warning" />
-                <SanctionsListRow name="EU Sanctions" updatedAgo="8h ago" status="fresh" />
-                <SanctionsListRow name="UK HMT" updatedAgo="6h ago" status="fresh" />
-                <SanctionsListRow name="FATF High-Risk" updatedAgo="24h ago" status="stale" />
+                <SanctionsListRow
+                  name="OFAC SDN"
+                  updatedAgo="2h ago"
+                  status="fresh"
+                />
+                <SanctionsListRow
+                  name="UAE Central Bank"
+                  updatedAgo="4h ago"
+                  status="fresh"
+                />
+                <SanctionsListRow
+                  name="UN Consolidated"
+                  updatedAgo="12h ago"
+                  status="warning"
+                />
+                <SanctionsListRow
+                  name="EU Sanctions"
+                  updatedAgo="8h ago"
+                  status="fresh"
+                />
+                <SanctionsListRow
+                  name="UK HMT"
+                  updatedAgo="6h ago"
+                  status="fresh"
+                />
+                <SanctionsListRow
+                  name="FATF High-Risk"
+                  updatedAgo="24h ago"
+                  status="stale"
+                />
               </div>
             </GlassCard>
 
             {/* Risk Distribution Pie */}
             <GlassCard className="p-6" hover={false}>
-              <SectionHeader title="Risk Distribution" subtitle="Payment risk scoring breakdown" size="sm" />
+              <SectionHeader
+                title="Risk Distribution"
+                subtitle="Payment risk scoring breakdown"
+                size="sm"
+              />
               {mounted && (
                 <div className="flex items-center justify-center">
                   <ResponsiveContainer width="100%" height={200}>
@@ -706,10 +1078,16 @@ export default function DashboardPage() {
                         dataKey="value"
                       >
                         {riskDistribution.map((entry, idx) => (
-                          <Cell key={idx} fill={entry.color} stroke="transparent" />
+                          <Cell
+                            key={idx}
+                            fill={entry.color}
+                            stroke="transparent"
+                          />
                         ))}
                       </Pie>
-                      <RechartsTooltip content={<CustomTooltip formatValue={(v) => `${v}%`} />} />
+                      <RechartsTooltip
+                        content={<CustomTooltip formatValue={(v) => `${v}%`} />}
+                      />
                     </PieChart>
                   </ResponsiveContainer>
                 </div>
@@ -717,8 +1095,13 @@ export default function DashboardPage() {
               <div className="flex flex-wrap justify-center gap-4 mt-2">
                 {riskDistribution.map((item) => (
                   <div key={item.name} className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
-                    <span className="text-xs text-slate-400">{item.name}: {item.value}%</span>
+                    <span
+                      className="w-2.5 h-2.5 rounded-full"
+                      style={{ backgroundColor: item.color }}
+                    />
+                    <span className="text-xs text-slate-400">
+                      {item.name}: {item.value}%
+                    </span>
                   </div>
                 ))}
               </div>
@@ -726,17 +1109,34 @@ export default function DashboardPage() {
 
             {/* Recent Flags */}
             <GlassCard className="p-6" hover={false}>
-              <SectionHeader title="Recent Flags" subtitle="Recently flagged payments" size="sm" />
+              <SectionHeader
+                title="Recent Flags"
+                subtitle="Recently flagged payments"
+                size="sm"
+              />
               <div className="space-y-3">
                 {flags.map((flag, idx) => (
-                  <div key={idx} className="flex items-start justify-between p-3 rounded-xl bg-slate-800/50 border border-slate-700/30">
+                  <div
+                    key={idx}
+                    className="flex items-start justify-between p-3 rounded-xl bg-slate-800/50 border border-slate-700/30"
+                  >
                     <div className="flex-1 min-w-0">
-                      <code className="text-xs font-mono text-slate-500">{truncateAddress(flag.paymentId, 8, 4)}</code>
-                      <p className="text-sm text-slate-300 mt-0.5">{flag.reason}</p>
-                      <p className="text-xs text-slate-500 mt-0.5">{mounted ? timeAgo(flag.timestamp) : '--'}</p>
+                      <code className="text-xs font-mono text-slate-500">
+                        {truncateAddress(flag.paymentId, 8, 4)}
+                      </code>
+                      <p className="text-sm text-slate-300 mt-0.5">
+                        {flag.reason}
+                      </p>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        {mounted ? timeAgo(flag.timestamp) : "--"}
+                      </p>
                     </div>
                     <div className="flex-shrink-0 ml-3 text-right">
-                      <div className={`text-sm font-bold ${riskColor(flag.riskScore)}`}>{flag.riskScore}</div>
+                      <div
+                        className={`text-sm font-bold ${riskColor(flag.riskScore)}`}
+                      >
+                        {flag.riskScore}
+                      </div>
                       <div className="text-xs text-slate-500">risk</div>
                     </div>
                   </div>
@@ -744,7 +1144,6 @@ export default function DashboardPage() {
               </div>
             </GlassCard>
           </div>
-
 
           {/* ============================================================ */}
           {/* TOP BUSINESSES BY VOLUME                                     */}
@@ -761,40 +1160,71 @@ export default function DashboardPage() {
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-slate-700/50">
-                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">#</th>
-                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Business</th>
-                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Jurisdiction</th>
-                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">Tier</th>
-                      <th className="py-3 px-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">24h Volume</th>
-                      <th className="py-3 px-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">Payments</th>
-                      <th className="py-3 px-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">Compliance</th>
+                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        #
+                      </th>
+                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Business
+                      </th>
+                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Jurisdiction
+                      </th>
+                      <th className="py-3 px-3 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Tier
+                      </th>
+                      <th className="py-3 px-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        24h Volume
+                      </th>
+                      <th className="py-3 px-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Payments
+                      </th>
+                      <th className="py-3 px-3 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Compliance
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/50">
                     {businesses.map((biz, idx) => (
-                      <tr key={idx} className="hover:bg-slate-800/30 transition-colors">
-                        <td className="py-3 px-3 text-slate-500 tabular-nums">{idx + 1}</td>
+                      <tr
+                        key={idx}
+                        className="hover:bg-slate-800/30 transition-colors"
+                      >
+                        <td className="py-3 px-3 text-slate-500 tabular-nums">
+                          {idx + 1}
+                        </td>
                         <td className="py-3 px-3">
                           <div className="flex items-center gap-2">
                             <Building2 className="w-4 h-4 text-slate-500" />
-                            <span className="text-slate-200 font-medium">{biz.name}</span>
+                            <span className="text-slate-200 font-medium">
+                              {biz.name}
+                            </span>
                           </div>
                         </td>
                         <td className="py-3 px-3">
-                          <span className="text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded">{biz.jurisdiction}</span>
+                          <span className="text-xs text-slate-400 bg-slate-800 px-2 py-0.5 rounded">
+                            {biz.jurisdiction}
+                          </span>
                         </td>
-                        <td className="py-3 px-3"><TierBadge tier={biz.tier} /></td>
-                        <td className="py-3 px-3 text-right font-semibold text-white tabular-nums">{formatUSD(biz.volume24h)}</td>
-                        <td className="py-3 px-3 text-right text-slate-300 tabular-nums">{biz.paymentCount}</td>
+                        <td className="py-3 px-3">
+                          <TierBadge tier={biz.tier} />
+                        </td>
+                        <td className="py-3 px-3 text-right font-semibold text-white tabular-nums">
+                          {formatUSD(biz.volume24h)}
+                        </td>
+                        <td className="py-3 px-3 text-right text-slate-300 tabular-nums">
+                          {biz.paymentCount}
+                        </td>
                         <td className="py-3 px-3 text-right">
                           <div className="flex items-center justify-end gap-2">
                             <div className="w-16 h-1.5 bg-slate-700/50 rounded-full overflow-hidden">
                               <div
-                                className={`h-full rounded-full ${biz.complianceScore >= 95 ? 'bg-emerald-500' : biz.complianceScore >= 90 ? 'bg-amber-500' : 'bg-red-500'}`}
+                                className={`h-full rounded-full ${biz.complianceScore >= 95 ? "bg-emerald-500" : biz.complianceScore >= 90 ? "bg-amber-500" : "bg-red-500"}`}
                                 style={{ width: `${biz.complianceScore}%` }}
                               />
                             </div>
-                            <span className={`text-xs font-medium tabular-nums ${biz.complianceScore >= 95 ? 'text-emerald-400' : biz.complianceScore >= 90 ? 'text-amber-400' : 'text-red-400'}`}>
+                            <span
+                              className={`text-xs font-medium tabular-nums ${biz.complianceScore >= 95 ? "text-emerald-400" : biz.complianceScore >= 90 ? "text-amber-400" : "text-red-400"}`}
+                            >
                               {biz.complianceScore}%
                             </span>
                           </div>
@@ -806,7 +1236,6 @@ export default function DashboardPage() {
               </div>
             </GlassCard>
           </div>
-
 
           {/* ============================================================ */}
           {/* SETTLEMENT PERFORMANCE                                       */}
@@ -822,26 +1251,67 @@ export default function DashboardPage() {
               {mounted && (
                 <ResponsiveContainer width="100%" height={280}>
                   <LineChart data={settlementChart}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="rgba(51,65,85,0.4)" />
-                    <XAxis dataKey="day" tick={{ fill: '#94a3b8', fontSize: 11 }} axisLine={false} tickLine={false} interval={4} />
+                    <CartesianGrid
+                      strokeDasharray="3 3"
+                      stroke="rgba(51,65,85,0.4)"
+                    />
+                    <XAxis
+                      dataKey="day"
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      interval={4}
+                    />
                     <YAxis
-                      tick={{ fill: '#94a3b8', fontSize: 11 }}
+                      tick={{ fill: "#94a3b8", fontSize: 11 }}
                       axisLine={false}
                       tickLine={false}
                       tickFormatter={(v: number) => `${v.toFixed(1)}m`}
-                      domain={[0, 'auto']}
+                      domain={[0, "auto"]}
                     />
-                    <RechartsTooltip content={<CustomTooltip formatValue={(v) => `${Number(v).toFixed(1)} min`} />} />
-                    <Legend wrapperStyle={{ paddingTop: '12px', fontSize: '12px' }} />
-                    <ReferenceLine y={5} stroke="#DC2626" strokeDasharray="8 4" label={{ value: 'Target (5m)', fill: '#DC2626', fontSize: 11, position: 'right' }} />
-                    <Line type="monotone" dataKey="avg" name="Average" stroke="#3B82F6" strokeWidth={2} dot={false} />
-                    <Line type="monotone" dataKey="p95" name="95th Percentile" stroke="#F59E0B" strokeWidth={2} dot={false} strokeDasharray="4 2" />
+                    <RechartsTooltip
+                      content={
+                        <CustomTooltip
+                          formatValue={(v) => `${Number(v).toFixed(1)} min`}
+                        />
+                      }
+                    />
+                    <Legend
+                      wrapperStyle={{ paddingTop: "12px", fontSize: "12px" }}
+                    />
+                    <ReferenceLine
+                      y={5}
+                      stroke="#DC2626"
+                      strokeDasharray="8 4"
+                      label={{
+                        value: "Target (5m)",
+                        fill: "#DC2626",
+                        fontSize: 11,
+                        position: "right",
+                      }}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="avg"
+                      name="Average"
+                      stroke="#3B82F6"
+                      strokeWidth={2}
+                      dot={false}
+                    />
+                    <Line
+                      type="monotone"
+                      dataKey="p95"
+                      name="95th Percentile"
+                      stroke="#F59E0B"
+                      strokeWidth={2}
+                      dot={false}
+                      strokeDasharray="4 2"
+                    />
                   </LineChart>
                 </ResponsiveContainer>
               )}
             </GlassCard>
           </div>
-
 
           {/* ============================================================ */}
           {/* NETWORK & TEE HEALTH (2 COLUMNS)                             */}
@@ -850,36 +1320,51 @@ export default function DashboardPage() {
           <div className="mb-10 grid grid-cols-1 gap-6 lg:grid-cols-2">
             {/* TEE Node Grid */}
             <GlassCard className="p-6" hover={false}>
-              <SectionHeader title="TEE Node Grid" subtitle="Trusted Execution Environment status" size="sm" />
+              <SectionHeader
+                title="TEE Node Grid"
+                subtitle="Trusted Execution Environment status"
+                size="sm"
+              />
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
                 {teeNodes.map((node) => (
                   <div
                     key={node.id}
                     className={`p-3 rounded-xl border ${
-                      node.status === 'online'
-                        ? 'bg-slate-800/40 border-slate-700/30'
-                        : 'bg-red-950/20 border-red-800/30'
+                      node.status === "online"
+                        ? "bg-slate-800/40 border-slate-700/30"
+                        : "bg-red-950/20 border-red-800/30"
                     }`}
                   >
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-xs font-mono font-medium text-slate-300">{node.id}</span>
-                      <span className={`w-2 h-2 rounded-full ${node.status === 'online' ? 'bg-emerald-400 animate-pulse' : 'bg-red-500'}`} />
+                      <span className="text-xs font-mono font-medium text-slate-300">
+                        {node.id}
+                      </span>
+                      <span
+                        className={`w-2 h-2 rounded-full ${node.status === "online" ? "bg-emerald-400 animate-pulse" : "bg-red-500"}`}
+                      />
                     </div>
                     <p className="text-xs text-slate-500">{node.region}</p>
                     <div className="flex items-center justify-between mt-1.5">
-                      <span className="text-xs text-slate-500">{node.version}</span>
+                      <span className="text-xs text-slate-500">
+                        {node.version}
+                      </span>
                       {node.attestationValid ? (
                         <CheckCircle className="w-3 h-3 text-emerald-400" />
                       ) : (
                         <AlertCircle className="w-3 h-3 text-red-400" />
                       )}
                     </div>
-                    {node.status === 'online' && (
+                    {node.status === "online" && (
                       <div className="mt-1.5">
                         <div className="w-full h-1 bg-slate-700/50 rounded-full overflow-hidden">
-                          <div className="h-full bg-emerald-500 rounded-full" style={{ width: `${node.uptime}%` }} />
+                          <div
+                            className="h-full bg-emerald-500 rounded-full"
+                            style={{ width: `${node.uptime}%` }}
+                          />
                         </div>
-                        <p className="text-xs text-slate-500 mt-0.5">{node.uptime}% uptime</p>
+                        <p className="text-xs text-slate-500 mt-0.5">
+                          {node.uptime}% uptime
+                        </p>
                       </div>
                     )}
                   </div>
@@ -889,36 +1374,52 @@ export default function DashboardPage() {
 
             {/* Network Stats */}
             <GlassCard className="p-6" hover={false}>
-              <SectionHeader title="Network Status" subtitle="Aethelred blockchain metrics" size="sm" />
+              <SectionHeader
+                title="Network Status"
+                subtitle="Aethelred blockchain metrics"
+                size="sm"
+              />
               <div className="space-y-4">
                 <div className="grid grid-cols-2 gap-4">
                   <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/30">
                     <div className="flex items-center gap-2 mb-1">
                       <Activity className="w-4 h-4 text-blue-400" />
-                      <span className="text-xs text-slate-400">Block Height</span>
+                      <span className="text-xs text-slate-400">
+                        Block Height
+                      </span>
                     </div>
-                    <p className="text-lg font-bold text-white tabular-nums">{formatNumber(realTime.blockHeight)}</p>
+                    <p className="text-lg font-bold text-white tabular-nums">
+                      {formatNumber(realTime.blockHeight)}
+                    </p>
                   </div>
                   <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/30">
                     <div className="flex items-center gap-2 mb-1">
                       <Zap className="w-4 h-4 text-amber-400" />
                       <span className="text-xs text-slate-400">TPS</span>
                     </div>
-                    <p className="text-lg font-bold text-white tabular-nums">{formatNumber(realTime.tps)}</p>
+                    <p className="text-lg font-bold text-white tabular-nums">
+                      {formatNumber(realTime.tps)}
+                    </p>
                   </div>
                   <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/30">
                     <div className="flex items-center gap-2 mb-1">
                       <Server className="w-4 h-4 text-purple-400" />
                       <span className="text-xs text-slate-400">Gas Price</span>
                     </div>
-                    <p className="text-lg font-bold text-white tabular-nums">{realTime.gasPrice} gwei</p>
+                    <p className="text-lg font-bold text-white tabular-nums">
+                      {realTime.gasPrice} gwei
+                    </p>
                   </div>
                   <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/30">
                     <div className="flex items-center gap-2 mb-1">
                       <Globe className="w-4 h-4 text-cyan-400" />
-                      <span className="text-xs text-slate-400">Network Load</span>
+                      <span className="text-xs text-slate-400">
+                        Network Load
+                      </span>
                     </div>
-                    <p className="text-lg font-bold text-white tabular-nums">{realTime.networkLoad}%</p>
+                    <p className="text-lg font-bold text-white tabular-nums">
+                      {realTime.networkLoad}%
+                    </p>
                   </div>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/30">
@@ -926,39 +1427,52 @@ export default function DashboardPage() {
                     <Shield className="w-4 h-4 text-red-400" />
                     <span className="text-xs text-slate-400">Epoch</span>
                   </div>
-                  <p className="text-lg font-bold text-white tabular-nums">{realTime.epoch}</p>
-                  <p className="text-xs text-slate-500 mt-1">AETHEL Price: ${realTime.aethelPrice.toFixed(2)}</p>
+                  <p className="text-lg font-bold text-white tabular-nums">
+                    {realTime.epoch}
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    AETHEL Price: ${realTime.aethelPrice.toFixed(2)}
+                  </p>
                 </div>
                 <div className="p-4 rounded-xl bg-slate-800/40 border border-slate-700/30">
                   <div className="flex items-center gap-2 mb-2">
                     <Heart className="w-4 h-4 text-emerald-400" />
-                    <span className="text-xs text-slate-400">System Health</span>
+                    <span className="text-xs text-slate-400">
+                      System Health
+                    </span>
                   </div>
                   <div className="flex items-center gap-3">
                     <div className="flex items-center gap-1.5">
                       <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                      <span className="text-sm text-emerald-400">All systems operational</span>
+                      <span className="text-sm text-emerald-400">
+                        All systems operational
+                      </span>
                     </div>
                   </div>
                   <div className="mt-3 grid grid-cols-3 gap-2">
                     <div className="text-center">
                       <p className="text-xs text-slate-500">Payment API</p>
-                      <p className="text-xs text-emerald-400 font-medium">99.99%</p>
+                      <p className="text-xs text-emerald-400 font-medium">
+                        99.99%
+                      </p>
                     </div>
                     <div className="text-center">
                       <p className="text-xs text-slate-500">Compliance</p>
-                      <p className="text-xs text-emerald-400 font-medium">99.97%</p>
+                      <p className="text-xs text-emerald-400 font-medium">
+                        99.97%
+                      </p>
                     </div>
                     <div className="text-center">
                       <p className="text-xs text-slate-500">Settlement</p>
-                      <p className="text-xs text-emerald-400 font-medium">99.95%</p>
+                      <p className="text-xs text-emerald-400 font-medium">
+                        99.95%
+                      </p>
                     </div>
                   </div>
                 </div>
               </div>
             </GlassCard>
           </div>
-
 
           {/* ============================================================ */}
           {/* QUICK ACTIONS                                                */}
@@ -973,8 +1487,12 @@ export default function DashboardPage() {
                     <Send className="w-5 h-5 text-red-400" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-white">Initiate Payment</h3>
-                    <p className="text-xs text-slate-500">Create a new cross-border payment</p>
+                    <h3 className="text-sm font-semibold text-white">
+                      Initiate Payment
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Create a new cross-border payment
+                    </p>
                   </div>
                 </div>
                 <button className="w-full py-2 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition-colors">
@@ -988,8 +1506,12 @@ export default function DashboardPage() {
                     <Building2 className="w-5 h-5 text-blue-400" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-white">Register Business</h3>
-                    <p className="text-xs text-slate-500">Onboard a new merchant entity</p>
+                    <h3 className="text-sm font-semibold text-white">
+                      Register Business
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Onboard a new merchant entity
+                    </p>
                   </div>
                 </div>
                 <button className="w-full py-2 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:border-slate-500 hover:text-white transition-colors">
@@ -1003,8 +1525,12 @@ export default function DashboardPage() {
                     <FileText className="w-5 h-5 text-emerald-400" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-white">Compliance Reports</h3>
-                    <p className="text-xs text-slate-500">View screening and audit reports</p>
+                    <h3 className="text-sm font-semibold text-white">
+                      Compliance Reports
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      View screening and audit reports
+                    </p>
                   </div>
                 </div>
                 <button className="w-full py-2 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:border-slate-500 hover:text-white transition-colors">
@@ -1018,8 +1544,12 @@ export default function DashboardPage() {
                     <Download className="w-5 h-5 text-purple-400" />
                   </div>
                   <div>
-                    <h3 className="text-sm font-semibold text-white">Export Audit Logs</h3>
-                    <p className="text-xs text-slate-500">Download full audit trail</p>
+                    <h3 className="text-sm font-semibold text-white">
+                      Export Audit Logs
+                    </h3>
+                    <p className="text-xs text-slate-500">
+                      Download full audit trail
+                    </p>
                   </div>
                 </div>
                 <button className="w-full py-2 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:border-slate-500 hover:text-white transition-colors">
@@ -1028,7 +1558,6 @@ export default function DashboardPage() {
               </GlassCard>
             </div>
           </div>
-
         </main>
 
         <Footer />

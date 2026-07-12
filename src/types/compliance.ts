@@ -9,10 +9,10 @@
 // ---------------------------------------------------------------------------
 
 /** AI model decision outcome */
-export type DecisionOutcome = 'Approve' | 'Flag' | 'Block' | 'Review';
+export type DecisionOutcome = "Approve" | "Flag" | "Block" | "Review";
 
 /** AI confidence level classification */
-export type ConfidenceLevel = 'High' | 'Medium' | 'Low';
+export type ConfidenceLevel = "High" | "Medium" | "Low";
 
 /** An individual AI compliance decision */
 export interface AIDecision {
@@ -41,7 +41,7 @@ export interface AIDecision {
   /** Whether this decision was appealed */
   appealed: boolean;
   /** Appeal outcome, if appealed */
-  appealOutcome?: 'Upheld' | 'Overturned' | 'Pending';
+  appealOutcome?: "Upheld" | "Overturned" | "Pending";
 }
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,7 @@ export interface AIDecision {
 // ---------------------------------------------------------------------------
 
 /** AI model operational status */
-export type ModelStatus = 'Active' | 'Training' | 'Deprecated' | 'Shadow';
+export type ModelStatus = "Active" | "Training" | "Deprecated" | "Shadow";
 
 /** AI compliance model metadata */
 export interface AIModel {
@@ -88,7 +88,7 @@ export interface BehavioralScore {
   /** Overall behavioral score (0-100, higher = more trustworthy) */
   score: number;
   /** Score trend over 30 days */
-  trend: 'Improving' | 'Stable' | 'Declining';
+  trend: "Improving" | "Stable" | "Declining";
   /** Transaction pattern regularity (0-100) */
   patternScore: number;
   /** Counterparty quality score (0-100) */
@@ -116,7 +116,7 @@ export interface CorridorRisk {
   /** Destination jurisdiction (ISO 3166-1 alpha-2) */
   destJurisdiction: string;
   /** Corridor risk level */
-  riskLevel: 'Low' | 'Medium' | 'High' | 'Critical';
+  riskLevel: "Low" | "Medium" | "High" | "Critical";
   /** Risk score (0-100) */
   riskScore: number;
   /** Transaction volume through this corridor (USD, 30d) */
@@ -152,10 +152,20 @@ export interface NetworkAnalysis {
 // ---------------------------------------------------------------------------
 
 /** Regulatory report type */
-export type ReportType = 'SAR' | 'CTR' | 'STR' | 'AML_QUARTERLY' | 'ANNUAL_AUDIT';
+export type ReportType =
+  | "SAR"
+  | "CTR"
+  | "STR"
+  | "AML_QUARTERLY"
+  | "ANNUAL_AUDIT";
 
 /** Regulatory report status */
-export type ReportStatus = 'Draft' | 'Pending' | 'Submitted' | 'Acknowledged' | 'Rejected';
+export type ReportStatus =
+  | "Draft"
+  | "Pending"
+  | "Submitted"
+  | "Acknowledged"
+  | "Rejected";
 
 /** A regulatory compliance report */
 export interface RegulatoryReport {

@@ -9,11 +9,11 @@
  *   - Wallet not detected: install prompt
  */
 
-import React, { useCallback, useRef, useState, useEffect } from 'react';
-import { useAccount, useConnect } from 'wagmi';
-import { useApp } from '@/contexts/AppContext';
-import { truncateAddress, formatNumber, formatCurrency } from '@/lib/utils';
-import { activeChain } from '@/config/wagmi';
+import React, { useCallback, useRef, useState, useEffect } from "react";
+import { useAccount, useConnect } from "wagmi";
+import { useApp } from "@/contexts/AppContext";
+import { truncateAddress, formatNumber, formatCurrency } from "@/lib/utils";
+import { activeChain } from "@/config/wagmi";
 
 export function WalletButton() {
   const { wallet, connectWallet, disconnectWallet, switchNetwork } = useApp();
@@ -33,8 +33,8 @@ export function WalletButton() {
         setShowConnectorModal(false);
       }
     };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
   }, []);
 
   // --- Wrong Network State ---
@@ -57,11 +57,7 @@ export function WalletButton() {
         disabled
         className="flex items-center gap-2 rounded-lg bg-gray-800 border border-gray-700 px-4 py-2 text-sm font-medium text-gray-400 cursor-wait"
       >
-        <svg
-          className="h-4 w-4 animate-spin"
-          viewBox="0 0 24 24"
-          fill="none"
-        >
+        <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none">
           <circle
             cx="12"
             cy="12"
@@ -94,7 +90,7 @@ export function WalletButton() {
             {truncateAddress(wallet.address, 6, 4)}
           </span>
           <svg
-            className={`h-3.5 w-3.5 text-gray-400 transition-transform ${showDropdown ? 'rotate-180' : ''}`}
+            className={`h-3.5 w-3.5 text-gray-400 transition-transform ${showDropdown ? "rotate-180" : ""}`}
             viewBox="0 0 20 20"
             fill="currentColor"
           >
@@ -125,13 +121,13 @@ export function WalletButton() {
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-500">USDC</span>
                 <span className="text-sm font-medium text-gray-200">
-                  {formatCurrency(wallet.usdcBalance, 'USDC')}
+                  {formatCurrency(wallet.usdcBalance, "USDC")}
                 </span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-500">USDT</span>
                 <span className="text-sm font-medium text-gray-200">
-                  {formatCurrency(wallet.usdtBalance, 'USDT')}
+                  {formatCurrency(wallet.usdtBalance, "USDT")}
                 </span>
               </div>
               <div className="flex items-center justify-between">
@@ -171,7 +167,13 @@ export function WalletButton() {
         }}
         className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-500 transition-colors shadow-lg shadow-red-900/30"
       >
-        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+        <svg
+          className="h-4 w-4"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
           <path d="M21 12V7H5a2 2 0 010-4h14v4" />
           <path d="M3 5v14a2 2 0 002 2h16v-5" />
           <path d="M18 12a1 1 0 100 2 1 1 0 000-2z" />
