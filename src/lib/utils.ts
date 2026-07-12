@@ -92,7 +92,7 @@ export function copyToClipboard(text: string): Promise<void> {
  * Supports AED, USD, AETHEL, USDC, and USDT formatting.
  *
  * @param amount - The numeric amount to format
- * @param currency - Currency code (AED, USD, AETHEL, USDC, USDT)
+ * @param currency - Currency code (AED, USD, AETHEL, USDC, USDT; 'AET' accepted as a legacy alias)
  * @param decimals - Decimal places (default varies by currency)
  */
 export function formatCurrency(
@@ -111,7 +111,7 @@ export function formatCurrency(
         minimumFractionDigits: decimals ?? 2,
         maximumFractionDigits: decimals ?? 2,
       })}`;
-    case 'AETHEL':
+    case 'AET': // legacy alias for the renamed native token
     case 'AETHEL':
       return `${amount.toLocaleString('en-US', {
         minimumFractionDigits: decimals ?? 4,

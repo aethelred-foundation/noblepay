@@ -129,7 +129,7 @@ export const SUPPORTED_CURRENCIES: Record<string, SupportedCurrency> = {
     decimals: 18,
     locale: 'en-US',
     currencyCode: 'AETHEL',
-    logoPath: '/tokens/aet.svg',
+    logoPath: '/tokens/aethel.svg',
   },
   USDC: {
     symbol: 'USDC',

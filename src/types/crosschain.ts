@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 /** Chain operational status */
-export type ChainStatus = 'Online' | 'Degraded' | 'Offline' | 'Maintenance';
+export type ChainStatus = "Online" | "Degraded" | "Offline" | "Maintenance";
 
 /** Supported chain information */
 export interface ChainInfo {
@@ -42,13 +42,13 @@ export interface ChainInfo {
 
 /** Cross-chain transfer status */
 export type TransferStatus =
-  | 'Initiated'
-  | 'SourceConfirmed'
-  | 'Relaying'
-  | 'DestPending'
-  | 'Completed'
-  | 'Failed'
-  | 'Refunded';
+  | "Initiated"
+  | "SourceConfirmed"
+  | "Relaying"
+  | "DestPending"
+  | "Completed"
+  | "Failed"
+  | "Refunded";
 
 /** A single step in a cross-chain transfer */
 export interface TransferStep {
@@ -59,7 +59,7 @@ export interface TransferStep {
   /** Chain ID where this step executes */
   chainId: number;
   /** Step status */
-  status: 'Pending' | 'InProgress' | 'Completed' | 'Failed';
+  status: "Pending" | "InProgress" | "Completed" | "Failed";
   /** Transaction hash for this step, if available */
   txHash?: string;
   /** Timestamp when step started (Unix ms) */
@@ -137,7 +137,7 @@ export interface RouteOption {
 // ---------------------------------------------------------------------------
 
 /** Relay node operational status */
-export type RelayNodeStatus = 'Active' | 'Syncing' | 'Offline' | 'Maintenance';
+export type RelayNodeStatus = "Active" | "Syncing" | "Offline" | "Maintenance";
 
 /** A cross-chain relay node */
 export interface RelayNode {

@@ -1,7 +1,7 @@
-import { renderHook, act } from '@testing-library/react';
-import { useTreasury } from '@/hooks/useTreasury';
+import { renderHook, act } from "@testing-library/react";
+import { useTreasury } from "@/hooks/useTreasury";
 
-describe('useTreasury', () => {
+describe("useTreasury", () => {
   beforeEach(() => {
     jest.useFakeTimers();
   });
@@ -10,7 +10,7 @@ describe('useTreasury', () => {
     jest.useRealTimers();
   });
 
-  it('returns loading state initially', () => {
+  it("returns loading state initially", () => {
     const { result } = renderHook(() => useTreasury());
 
     expect(result.current.isLoading).toBe(true);
@@ -21,7 +21,7 @@ describe('useTreasury', () => {
     expect(result.current.thresholds).toEqual([]);
   });
 
-  it('loads mock data after timeout', () => {
+  it("loads mock data after timeout", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -36,7 +36,7 @@ describe('useTreasury', () => {
     expect(result.current.thresholds.length).toBe(4);
   });
 
-  it('overview has correct structure', () => {
+  it("overview has correct structure", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -53,7 +53,7 @@ describe('useTreasury', () => {
     expect(overview.pendingApprovals).toBe(2);
   });
 
-  it('overview token balances have correct structure', () => {
+  it("overview token balances have correct structure", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -61,12 +61,12 @@ describe('useTreasury', () => {
     });
 
     const tokenBalance = result.current.overview!.tokenBalances[0];
-    expect(tokenBalance).toHaveProperty('symbol');
-    expect(tokenBalance).toHaveProperty('amount');
-    expect(tokenBalance).toHaveProperty('valueUsd');
+    expect(tokenBalance).toHaveProperty("symbol");
+    expect(tokenBalance).toHaveProperty("amount");
+    expect(tokenBalance).toHaveProperty("valueUsd");
   });
 
-  it('proposals have correct structure', () => {
+  it("proposals have correct structure", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -74,21 +74,21 @@ describe('useTreasury', () => {
     });
 
     const proposal = result.current.proposals[0];
-    expect(proposal).toHaveProperty('id');
-    expect(proposal).toHaveProperty('title');
-    expect(proposal).toHaveProperty('description');
-    expect(proposal).toHaveProperty('proposer');
-    expect(proposal).toHaveProperty('recipient');
-    expect(proposal).toHaveProperty('amount');
-    expect(proposal).toHaveProperty('tokenSymbol');
-    expect(proposal).toHaveProperty('status');
-    expect(proposal).toHaveProperty('votesFor');
-    expect(proposal).toHaveProperty('votesAgainst');
-    expect(proposal).toHaveProperty('quorum');
-    expect(proposal).toHaveProperty('votingDeadline');
+    expect(proposal).toHaveProperty("id");
+    expect(proposal).toHaveProperty("title");
+    expect(proposal).toHaveProperty("description");
+    expect(proposal).toHaveProperty("proposer");
+    expect(proposal).toHaveProperty("recipient");
+    expect(proposal).toHaveProperty("amount");
+    expect(proposal).toHaveProperty("tokenSymbol");
+    expect(proposal).toHaveProperty("status");
+    expect(proposal).toHaveProperty("votesFor");
+    expect(proposal).toHaveProperty("votesAgainst");
+    expect(proposal).toHaveProperty("quorum");
+    expect(proposal).toHaveProperty("votingDeadline");
   });
 
-  it('policies have correct structure', () => {
+  it("policies have correct structure", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -96,18 +96,18 @@ describe('useTreasury', () => {
     });
 
     const policy = result.current.policies[0];
-    expect(policy).toHaveProperty('id');
-    expect(policy).toHaveProperty('name');
-    expect(policy).toHaveProperty('description');
-    expect(policy).toHaveProperty('maxSingleTx');
-    expect(policy).toHaveProperty('dailyLimit');
-    expect(policy).toHaveProperty('monthlyLimit');
-    expect(policy).toHaveProperty('requiredApprovals');
-    expect(policy).toHaveProperty('enforcement');
-    expect(policy).toHaveProperty('active');
+    expect(policy).toHaveProperty("id");
+    expect(policy).toHaveProperty("name");
+    expect(policy).toHaveProperty("description");
+    expect(policy).toHaveProperty("maxSingleTx");
+    expect(policy).toHaveProperty("dailyLimit");
+    expect(policy).toHaveProperty("monthlyLimit");
+    expect(policy).toHaveProperty("requiredApprovals");
+    expect(policy).toHaveProperty("enforcement");
+    expect(policy).toHaveProperty("active");
   });
 
-  it('strategies have correct structure', () => {
+  it("strategies have correct structure", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -115,18 +115,18 @@ describe('useTreasury', () => {
     });
 
     const strategy = result.current.strategies[0];
-    expect(strategy).toHaveProperty('id');
-    expect(strategy).toHaveProperty('name');
-    expect(strategy).toHaveProperty('description');
-    expect(strategy).toHaveProperty('protocol');
-    expect(strategy).toHaveProperty('allocated');
-    expect(strategy).toHaveProperty('apy');
-    expect(strategy).toHaveProperty('risk');
-    expect(strategy).toHaveProperty('active');
-    expect(strategy).toHaveProperty('earnedToDate');
+    expect(strategy).toHaveProperty("id");
+    expect(strategy).toHaveProperty("name");
+    expect(strategy).toHaveProperty("description");
+    expect(strategy).toHaveProperty("protocol");
+    expect(strategy).toHaveProperty("allocated");
+    expect(strategy).toHaveProperty("apy");
+    expect(strategy).toHaveProperty("risk");
+    expect(strategy).toHaveProperty("active");
+    expect(strategy).toHaveProperty("earnedToDate");
   });
 
-  it('thresholds have correct structure and tiers', () => {
+  it("thresholds have correct structure and tiers", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -134,7 +134,7 @@ describe('useTreasury', () => {
     });
 
     const tiers = result.current.thresholds.map((t) => t.tier);
-    expect(tiers).toEqual(['Low', 'Medium', 'High', 'Critical']);
+    expect(tiers).toEqual(["Low", "Medium", "High", "Critical"]);
 
     const lowThreshold = result.current.thresholds[0];
     expect(lowThreshold.minAmount).toBe(0);
@@ -148,7 +148,7 @@ describe('useTreasury', () => {
     expect(criticalThreshold.requiredSignatures).toBe(5);
   });
 
-  it('voteOnProposal increments votesFor when supporting', () => {
+  it("voteOnProposal increments votesFor when supporting", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -159,15 +159,15 @@ describe('useTreasury', () => {
     const originalVotesAgainst = result.current.proposals[0].votesAgainst;
 
     act(() => {
-      result.current.voteOnProposal('0xprop001', true);
+      result.current.voteOnProposal("0xprop001", true);
     });
 
-    const updated = result.current.proposals.find((p) => p.id === '0xprop001')!;
+    const updated = result.current.proposals.find((p) => p.id === "0xprop001")!;
     expect(updated.votesFor).toBe(originalVotesFor + 100_000);
     expect(updated.votesAgainst).toBe(originalVotesAgainst);
   });
 
-  it('voteOnProposal increments votesAgainst when opposing', () => {
+  it("voteOnProposal increments votesAgainst when opposing", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -178,33 +178,37 @@ describe('useTreasury', () => {
     const originalVotesAgainst = result.current.proposals[0].votesAgainst;
 
     act(() => {
-      result.current.voteOnProposal('0xprop001', false);
+      result.current.voteOnProposal("0xprop001", false);
     });
 
-    const updated = result.current.proposals.find((p) => p.id === '0xprop001')!;
+    const updated = result.current.proposals.find((p) => p.id === "0xprop001")!;
     expect(updated.votesFor).toBe(originalVotesFor);
     expect(updated.votesAgainst).toBe(originalVotesAgainst + 100_000);
   });
 
-  it('voteOnProposal does not affect other proposals', () => {
+  it("voteOnProposal does not affect other proposals", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
       jest.advanceTimersByTime(700);
     });
 
-    const prop2Before = { ...result.current.proposals.find((p) => p.id === '0xprop002')! };
+    const prop2Before = {
+      ...result.current.proposals.find((p) => p.id === "0xprop002")!,
+    };
 
     act(() => {
-      result.current.voteOnProposal('0xprop001', true);
+      result.current.voteOnProposal("0xprop001", true);
     });
 
-    const prop2After = result.current.proposals.find((p) => p.id === '0xprop002')!;
+    const prop2After = result.current.proposals.find(
+      (p) => p.id === "0xprop002",
+    )!;
     expect(prop2After.votesFor).toBe(prop2Before.votesFor);
     expect(prop2After.votesAgainst).toBe(prop2Before.votesAgainst);
   });
 
-  it('createProposal adds a new proposal in Draft status', () => {
+  it("createProposal adds a new proposal in Draft status", () => {
     const { result } = renderHook(() => useTreasury());
 
     act(() => {
@@ -215,12 +219,12 @@ describe('useTreasury', () => {
 
     act(() => {
       result.current.createProposal({
-        title: 'Test Proposal',
-        description: 'Test description',
-        proposer: '0xproposer',
-        recipient: '0xrecipient',
+        title: "Test Proposal",
+        description: "Test description",
+        proposer: "0xproposer",
+        recipient: "0xrecipient",
         amount: 100_000,
-        tokenSymbol: 'USDC',
+        tokenSymbol: "USDC",
         quorum: 2_000_000,
         votingDeadline: Date.now() + 7 * 86_400_000,
       });
@@ -228,17 +232,17 @@ describe('useTreasury', () => {
 
     expect(result.current.proposals.length).toBe(initialCount + 1);
     const newProposal = result.current.proposals[0]; // prepended
-    expect(newProposal.status).toBe('Draft');
+    expect(newProposal.status).toBe("Draft");
     expect(newProposal.votesFor).toBe(0);
     expect(newProposal.votesAgainst).toBe(0);
-    expect(newProposal.title).toBe('Test Proposal');
+    expect(newProposal.title).toBe("Test Proposal");
     expect(newProposal.amount).toBe(100_000);
     expect(newProposal.executedAt).toBe(0);
     expect(newProposal.id).toMatch(/^0xprop/);
   });
 
-  it('cleans up timer on unmount', () => {
-    const clearTimeoutSpy = jest.spyOn(global, 'clearTimeout');
+  it("cleans up timer on unmount", () => {
+    const clearTimeoutSpy = jest.spyOn(global, "clearTimeout");
     const { unmount } = renderHook(() => useTreasury());
 
     unmount();

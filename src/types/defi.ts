@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------------
 
 /** Liquidity pool status */
-export type PoolStatus = 'Active' | 'Paused' | 'Deprecated';
+export type PoolStatus = "Active" | "Paused" | "Deprecated";
 
 /** A liquidity pool for payment settlement */
 export interface LiquidityPool {
@@ -67,7 +67,7 @@ export interface LPPosition {
 // ---------------------------------------------------------------------------
 
 /** Payment stream status */
-export type StreamStatus = 'Active' | 'Paused' | 'Completed' | 'Cancelled';
+export type StreamStatus = "Active" | "Paused" | "Completed" | "Cancelled";
 
 /** A continuous payment stream (salary, subscription, etc.) */
 export interface PaymentStream {
@@ -118,7 +118,7 @@ export interface StreamBalance {
 // ---------------------------------------------------------------------------
 
 /** FX hedge status */
-export type HedgeStatus = 'Active' | 'Settled' | 'Expired' | 'Liquidated';
+export type HedgeStatus = "Active" | "Settled" | "Expired" | "Liquidated";
 
 /** An FX hedging position for cross-border rate protection */
 export interface FXHedge {

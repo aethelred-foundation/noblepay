@@ -9,13 +9,13 @@
 
 /** Treasury proposal status */
 export type ProposalStatus =
-  | 'Draft'
-  | 'Active'
-  | 'Queued'
-  | 'Executed'
-  | 'Defeated'
-  | 'Expired'
-  | 'Cancelled';
+  | "Draft"
+  | "Active"
+  | "Queued"
+  | "Executed"
+  | "Defeated"
+  | "Expired"
+  | "Cancelled";
 
 /** A DAO treasury spending proposal */
 export interface TreasuryProposal {
@@ -56,7 +56,7 @@ export interface TreasuryProposal {
 // ---------------------------------------------------------------------------
 
 /** Spending policy enforcement mode */
-export type PolicyEnforcement = 'Strict' | 'Advisory' | 'Disabled';
+export type PolicyEnforcement = "Strict" | "Advisory" | "Disabled";
 
 /** Treasury spending policy configuration */
 export interface SpendingPolicy {
@@ -101,7 +101,7 @@ export interface ApprovalThreshold {
 // ---------------------------------------------------------------------------
 
 /** Yield strategy risk level */
-export type YieldRisk = 'Conservative' | 'Moderate' | 'Aggressive';
+export type YieldRisk = "Conservative" | "Moderate" | "Aggressive";
 
 /** Treasury yield strategy allocation */
 export interface YieldStrategy {

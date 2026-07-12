@@ -151,8 +151,8 @@ describe('formatCurrency', () => {
     expect(result).toContain('1.5');
   });
 
-  it('formats AETHEL same as AETHEL', () => {
-    const result = formatCurrency(1.5, 'AETHEL');
+  it('formats legacy AET alias same as AETHEL', () => {
+    const result = formatCurrency(1.5, 'AET');
     expect(result).toContain('AETHEL');
   });
 

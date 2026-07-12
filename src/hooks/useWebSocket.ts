@@ -6,28 +6,32 @@
  * connection status tracking.
  */
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from "react";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 /** WebSocket connection state */
-export type WSConnectionState = 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
+export type WSConnectionState =
+  | "connecting"
+  | "connected"
+  | "disconnected"
+  | "reconnecting";
 
 /** Supported WebSocket event types */
 export type WSEventType =
-  | 'payment:initiated'
-  | 'payment:settled'
-  | 'payment:flagged'
-  | 'compliance:screening'
-  | 'compliance:decision'
-  | 'stream:update'
-  | 'pool:tvl'
-  | 'fx:rate'
-  | 'crosschain:status'
-  | 'treasury:proposal'
-  | 'invoice:status';
+  | "payment:initiated"
+  | "payment:settled"
+  | "payment:flagged"
+  | "compliance:screening"
+  | "compliance:decision"
+  | "stream:update"
+  | "pool:tvl"
+  | "fx:rate"
+  | "crosschain:status"
+  | "treasury:proposal"
+  | "invoice:status";
 
 /** WebSocket event payload */
 export interface WSEvent<T = unknown> {
@@ -43,7 +47,7 @@ export type WSSubscriptionCallback<T = unknown> = (event: WSEvent<T>) => void;
 // Configuration
 // ---------------------------------------------------------------------------
 
-const DEFAULT_WS_URL = 'ws://localhost:3003';
+const DEFAULT_WS_URL = "ws://localhost:3003";
 const RECONNECT_DELAY_MS = 3_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const HEARTBEAT_INTERVAL_MS = 30_000;
@@ -55,12 +59,15 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 export function useWebSocket(url?: string) {
   const wsUrl = url || process.env.NEXT_PUBLIC_WS_URL || DEFAULT_WS_URL;
 
-  const [connectionState, setConnectionState] = useState<WSConnectionState>('disconnected');
+  const [connectionState, setConnectionState] =
+    useState<WSConnectionState>("disconnected");
   const [lastEvent, setLastEvent] = useState<WSEvent | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const subscriptionsRef = useRef<Map<WSEventType, Set<WSSubscriptionCallback>>>(new Map());
+  const subscriptionsRef = useRef<
+    Map<WSEventType, Set<WSSubscriptionCallback>>
+  >(new Map());
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mountedRef = useRef(true);
@@ -74,7 +81,7 @@ export function useWebSocket(url?: string) {
         try {
           cb(event);
         } catch (err) {
-          console.error('[NoblePay WS] Subscriber error:', err);
+          console.error("[NoblePay WS] Subscriber error:", err);
         }
       });
     }
@@ -85,7 +92,7 @@ export function useWebSocket(url?: string) {
     if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
     heartbeatTimerRef.current = setInterval(() => {
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: 'ping' }));
+        wsRef.current.send(JSON.stringify({ type: "ping" }));
       }
     }, HEARTBEAT_INTERVAL_MS);
   }, []);
@@ -104,7 +111,7 @@ export function useWebSocket(url?: string) {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     try {
-      setConnectionState('connecting');
+      setConnectionState("connecting");
       const ws = new WebSocket(wsUrl);
 
       ws.onopen = () => {
@@ -112,14 +119,14 @@ export function useWebSocket(url?: string) {
           ws.close();
           return;
         }
-        setConnectionState('connected');
+        setConnectionState("connected");
         setReconnectAttempts(0);
         startHeartbeat();
 
         // Re-subscribe to all active event types
         const types = Array.from(subscriptionsRef.current.keys());
         if (types.length > 0) {
-          ws.send(JSON.stringify({ action: 'subscribe', types }));
+          ws.send(JSON.stringify({ action: "subscribe", types }));
         }
       };
 
@@ -136,7 +143,7 @@ export function useWebSocket(url?: string) {
 
       ws.onclose = () => {
         if (!mountedRef.current) return;
-        setConnectionState('disconnected');
+        setConnectionState("disconnected");
         stopHeartbeat();
         wsRef.current = null;
 
@@ -144,7 +151,7 @@ export function useWebSocket(url?: string) {
         setReconnectAttempts((prev) => {
           const next = prev + 1;
           if (next <= MAX_RECONNECT_ATTEMPTS) {
-            setConnectionState('reconnecting');
+            setConnectionState("reconnecting");
             const delay = RECONNECT_DELAY_MS * Math.min(next, 5);
             reconnectTimerRef.current = setTimeout(connect, delay);
           }
@@ -158,8 +165,8 @@ export function useWebSocket(url?: string) {
 
       wsRef.current = ws;
     } catch (err) {
-      console.error('[NoblePay WS] Connection error:', err);
-      setConnectionState('disconnected');
+      console.error("[NoblePay WS] Connection error:", err);
+      setConnectionState("disconnected");
     }
   }, [wsUrl, dispatch, startHeartbeat, stopHeartbeat]);
 
@@ -185,11 +192,15 @@ export function useWebSocket(url?: string) {
       if (!subscriptionsRef.current.has(type)) {
         subscriptionsRef.current.set(type, new Set());
       }
-      subscriptionsRef.current.get(type)!.add(callback as WSSubscriptionCallback);
+      subscriptionsRef.current
+        .get(type)!
+        .add(callback as WSSubscriptionCallback);
 
       // Tell server about new subscription
       if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ action: 'subscribe', types: [type] }));
+        wsRef.current.send(
+          JSON.stringify({ action: "subscribe", types: [type] }),
+        );
       }
     },
     [],
@@ -204,7 +215,9 @@ export function useWebSocket(url?: string) {
         if (subs.size === 0) {
           subscriptionsRef.current.delete(type);
           if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(JSON.stringify({ action: 'unsubscribe', types: [type] }));
+            wsRef.current.send(
+              JSON.stringify({ action: "unsubscribe", types: [type] }),
+            );
           }
         }
       }
@@ -227,7 +240,7 @@ export function useWebSocket(url?: string) {
       wsRef.current.close();
       wsRef.current = null;
     }
-    setConnectionState('disconnected');
+    setConnectionState("disconnected");
     setReconnectAttempts(0);
   }, [stopHeartbeat]);
 

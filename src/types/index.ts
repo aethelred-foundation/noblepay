@@ -20,13 +20,13 @@ export enum PaymentStatus {
 
 /** Human-readable payment status labels */
 export type PaymentStatusLabel =
-  | 'Pending'
-  | 'Screening'
-  | 'Passed'
-  | 'Flagged'
-  | 'Blocked'
-  | 'Settled'
-  | 'Refunded';
+  | "Pending"
+  | "Screening"
+  | "Passed"
+  | "Flagged"
+  | "Blocked"
+  | "Settled"
+  | "Refunded";
 
 /** A single cross-border payment record */
 export interface Payment {
@@ -71,7 +71,7 @@ export interface PaymentBatch {
   /** Total value across all payments (USD equivalent) */
   totalValue: number;
   /** Batch status */
-  status: 'Processing' | 'Complete' | 'PartialFailure';
+  status: "Processing" | "Complete" | "PartialFailure";
   /** Timestamp of batch creation */
   createdAt: number;
   /** Number of payments that passed screening */
@@ -86,12 +86,12 @@ export interface PaymentBatch {
 
 /** Compliance screening result status */
 export enum ComplianceStatus {
-  Pending = 'Pending',
-  InProgress = 'InProgress',
-  Clear = 'Clear',
-  Review = 'Review',
-  Escalated = 'Escalated',
-  Rejected = 'Rejected',
+  Pending = "Pending",
+  InProgress = "InProgress",
+  Clear = "Clear",
+  Review = "Review",
+  Escalated = "Escalated",
+  Rejected = "Rejected",
 }
 
 /** Detailed compliance screening result for a payment */
@@ -237,7 +237,7 @@ export interface AMLRiskScore {
   /** Overall risk score (0-100) */
   score: number;
   /** Risk level classification */
-  level: 'Low' | 'Medium' | 'High' | 'Critical';
+  level: "Low" | "Medium" | "High" | "Critical";
   /** Individual risk factor contributions */
   factors: {
     jurisdictionRisk: number;
@@ -275,7 +275,7 @@ export interface ScreeningResult {
   /** Payment ID that was screened */
   paymentId: string;
   /** Screening outcome */
-  outcome: 'Pass' | 'Fail' | 'Review';
+  outcome: "Pass" | "Fail" | "Review";
   /** TEE node that performed the screening */
   teeNodeId: string;
   /** Time taken for screening (ms) */
@@ -296,16 +296,16 @@ export interface AuditLogEntry {
   id: string;
   /** Type of audited action */
   action:
-    | 'PAYMENT_INITIATED'
-    | 'COMPLIANCE_CHECK'
-    | 'SANCTIONS_SCREEN'
-    | 'TRAVEL_RULE_SUBMIT'
-    | 'PAYMENT_SETTLED'
-    | 'PAYMENT_REFUNDED'
-    | 'BUSINESS_REGISTERED'
-    | 'KYC_UPDATED'
-    | 'TIER_CHANGED'
-    | 'RISK_ESCALATION';
+    | "PAYMENT_INITIATED"
+    | "COMPLIANCE_CHECK"
+    | "SANCTIONS_SCREEN"
+    | "TRAVEL_RULE_SUBMIT"
+    | "PAYMENT_SETTLED"
+    | "PAYMENT_REFUNDED"
+    | "BUSINESS_REGISTERED"
+    | "KYC_UPDATED"
+    | "TIER_CHANGED"
+    | "RISK_ESCALATION";
   /** Actor (wallet address or system identifier) */
   actor: string;
   /** Subject entity (payment ID, business address, etc.) */
@@ -397,7 +397,7 @@ export interface AnalyticsData {
 /** Notification payload for the toast system */
 export interface NotificationPayload {
   /** Notification type */
-  type: 'success' | 'error' | 'warning' | 'info';
+  type: "success" | "error" | "warning" | "info";
   /** Short title */
   title: string;
   /** Descriptive message */

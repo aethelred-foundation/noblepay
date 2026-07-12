@@ -1,0 +1,52 @@
+{
+  "_format": "hh3-artifact-1",
+  "contractName": "IZeroIDRegistry",
+  "sourceName": "src/interfaces/IZeroIDRegistry.sol",
+  "abi": [
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "didHash",
+          "type": "bytes32"
+        }
+      ],
+      "name": "isActiveIdentity",
+      "outputs": [
+        {
+          "internalType": "bool",
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "controller",
+          "type": "address"
+        }
+      ],
+      "name": "resolveByController",
+      "outputs": [
+        {
+          "internalType": "bytes32",
+          "name": "didHash",
+          "type": "bytes32"
+        }
+      ],
+      "stateMutability": "view",
+      "type": "function"
+    }
+  ],
+  "bytecode": "0x",
+  "deployedBytecode": "0x",
+  "linkReferences": {},
+  "deployedLinkReferences": {},
+  "immutableReferences": {},
+  "inputSourceName": "project/src/interfaces/IZeroIDRegistry.sol",
+  "buildInfoId": "solc-0_8_19-9d18e906cfb12f5f1bc2b6e9cc04d1890b52b5a7"
+}
