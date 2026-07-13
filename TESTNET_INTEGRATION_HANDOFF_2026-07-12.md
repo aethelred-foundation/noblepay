@@ -41,11 +41,57 @@ all verified in-EVM by the ISeal precompile — the same consensus logic that mi
 
 Prereqs: node built from the precompile branch (§1), funded deployer key, `aethelredd` CLI access for PoUW job submission, and — if enabling the identity layer — the ZeroID registry address from the ZeroID deployment (see ZeroID's own handoff).
 
-1. **Deploy** `SealSettlementGate(governance)` — constructor takes the governance address (Ownable2Step; governance must **accept** ownership if it differs from the deployer).
-2. **Set the CEAP policy** (governance):
-   `setCompliancePolicy(allowedBackends, minVerification, allowedPlatforms, requireVendorRoot, dataResidency)` — e.g. `(["tee"], "attested", [...], true, ["AE"])` per your compliance profile. Read back with `compliancePolicy()`.
-3. **(Optional) enable the identity layer** (governance): `setIdentityRegistry(zeroIdRegistry, true)`. Reverts if `required` with a zero registry.
-4. **Wire the core** (NoblePay `ADMIN_ROLE`): `setSealGate(gateAddress)`, then `setSealClearanceRequired(true)`. Unsetting the gate auto-disables the requirement (fail-safe, never fail-open).
+### 4.1 Deployment command
+
+From the repo root (`npm ci` at the root once for `viem`; contract artifacts are
+tracked — run `cd contracts && npm ci && npx hardhat compile` only if they are missing):
+
+```
+RPC_URL=<testnet-evm-rpc> \
+DEPLOYER_KEY=0x<funded-64-hex-key> \
+node scripts/deploy-testnet.mjs
+```
+
+This deploys **NoblePay core + SealSettlementGate**, wires `setSealGate`,
+sanity-reads the wiring, and prints the frontend `.env.local` line and the §7
+manifest values. All parameters, with defaults:
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `DEPLOYER_KEY` | — (required) | 0x-prefixed funded key; becomes NoblePay admin (all roles) **and** gate governance |
+| `RPC_URL` | `http://127.0.0.1:8545` | EVM JSON-RPC of your testnet node |
+| `EXPECT_CHAIN_ID` | `7332` | Refuses to deploy to any other chain |
+| `TREASURY` | deployer | Fee recipient for `NoblePay(admin, treasury, baseFee, percentageFee)` |
+| `BASE_FEE` | `1000000` | Flat fee, token base units (= 1.0 for 6-decimal stablecoins) |
+| `PERCENTAGE_FEE` | `50` | Basis points (0.5%); contract max 500 |
+| `ENABLE_SEAL_CLEARANCE` | off | `true` → `setSealClearanceRequired(true)` at deploy time. Leave off until the ISeal precompile + PoUW pipeline are confirmed live (fail-closed: enabling it before that blocks every settlement) |
+| `ZEROID_REGISTRY` | off | `0x…` → `setIdentityRegistry(registry, true)` on the gate |
+| `NOBLEPAY_ADDRESS` / `GATE_ADDRESS` | — | Reuse an existing deployment instead of deploying (idempotent re-runs) |
+
+After deploying, set the **CEAP policy** (governance, or let the playbook in
+4.2 do it): `setCompliancePolicy(allowedBackends, minVerification,
+allowedPlatforms, requireVendorRoot, dataResidency)` — e.g.
+`(["tee"], "attested", [...], true, ["AE"])`; read back with `compliancePolicy()`.
+
+Frontend `.env.local` (the script prints the first; the rest are the token/
+periphery addresses for your environment, blank = feature hidden):
+
+```
+NEXT_PUBLIC_NOBLEPAY_ADDRESS=<core address>
+NEXT_PUBLIC_USDC_TOKEN_ADDRESS= NEXT_PUBLIC_USDT_TOKEN_ADDRESS=
+NEXT_PUBLIC_AETHEL_TOKEN_ADDRESS= NEXT_PUBLIC_COMPLIANCE_ORACLE_ADDRESS=
+NEXT_PUBLIC_BUSINESS_REGISTRY_ADDRESS= NEXT_PUBLIC_TRAVEL_RULE_ADDRESS=
+```
+
+Manual API equivalents (what the script wires, for reference): deploy
+`SealSettlementGate(governance)` (Ownable2Step — a governance address other
+than the deployer must **accept** ownership); `setIdentityRegistry(registry,
+true)` reverts if required with a zero registry; NoblePay `ADMIN_ROLE` calls
+`setSealGate(gate)` then `setSealClearanceRequired(true)` — unsetting the gate
+auto-disables the requirement (fail-safe, never fail-open).
+
+### 4.2 Corridor clearance playbook
+
 5. **Run the operator playbook**:
    ```
    RPC_URL=<testnet-evm-rpc> DEPLOYER_KEY=<funded-key> \
