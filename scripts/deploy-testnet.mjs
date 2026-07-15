@@ -42,6 +42,7 @@ import {
   createWalletClient,
   defineChain,
   encodeDeployData,
+  encodeFunctionData,
   formatEther,
   http,
 } from "viem";
@@ -118,6 +119,21 @@ const withHeadroom = (estimate, floor) => {
   return doubled > floor ? doubled : floor;
 };
 
+// The node's query state can lag a just-committed deploy by a moment: a
+// simulate/estimate issued immediately after the receipt then executes
+// against pre-deploy state and dies with an empty-reason revert (observed on
+// the public testnet: `wire core -> gate` failing right after both deploys,
+// while the same call succeeds seconds later). Wait until the code is
+// actually visible to queries before touching a fresh contract.
+async function waitForContractCode(label, address) {
+  for (let i = 0; i < 30; i++) {
+    const code = await publicClient.getCode({ address });
+    if (code && code !== "0x") return;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  fail(`${label} code never became visible at ${address} — node state lag`);
+}
+
 async function deployContract(label, { abi, bytecode, args }) {
   const data = encodeDeployData({ abi, bytecode, args });
   const estimate = await publicClient.estimateGas({
@@ -137,25 +153,70 @@ async function deployContract(label, { abi, bytecode, args }) {
   console.log(
     `  ${label.padEnd(18)} ${receipt.contractAddress}  (block ${receipt.blockNumber}, gas ${receipt.gasUsed})`,
   );
+  await waitForContractCode(label, receipt.contractAddress);
   return receipt.contractAddress;
 }
 
+// A revert that decodes to a named error is a real refusal; a revert with NO
+// decodable reason immediately after deploys is the state-lag transient
+// described above and is worth a short retry before giving up. viem nests the
+// useful fields at varying depths, so walk the cause chain.
+function isEmptyReasonRevert(err) {
+  let sawRevert = false;
+  let sawNamedReason = false;
+  for (let e = err; e; e = e.cause) {
+    if (e.data?.errorName || e.reason) sawNamedReason = true;
+    const msg = String(e.shortMessage ?? e.message ?? "");
+    if (/revert/i.test(msg)) sawRevert = true;
+    if (/reverted with the following|custom error/i.test(msg)) sawNamedReason = true;
+  }
+  return sawRevert && !sawNamedReason;
+}
+
 async function writeTo(address, abi, functionName, args) {
-  const { request } = await publicClient.simulateContract({
-    account,
+  let gas = FLOOR_WRITE;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      await publicClient.simulateContract({
+        account,
+        address,
+        abi,
+        functionName,
+        args,
+      });
+      const estimate = await publicClient.estimateGas({
+        account: account.address,
+        to: address,
+        data: encodeFunctionData({ abi, functionName, args }),
+      });
+      gas = withHeadroom(estimate, FLOOR_WRITE);
+      break;
+    } catch (err) {
+      // A decoded custom error is a real refusal — stop immediately. An
+      // empty-reason revert right after deploys is the node's post-deploy
+      // simulation flake: retry briefly, then send anyway with the floor gas
+      // and let the RECEIPT decide — real execution runs against committed
+      // state (verified: the same call succeeds via eth_call moments later),
+      // and a genuine refusal still fails loudly via receipt.status below.
+      if (!isEmptyReasonRevert(err)) throw err;
+      if (attempt < 4) {
+        console.log(
+          `  ${functionName}: empty-reason revert in simulation (node flake) — retry ${attempt}/3 in 2s`,
+        );
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+      console.log(
+        `  ${functionName}: simulation still flaking — sending with floor gas ${FLOOR_WRITE} and trusting the receipt`,
+      );
+    }
+  }
+  const hash = await walletClient.writeContract({
     address,
     abi,
     functionName,
     args,
-  });
-  const estimate = await publicClient.estimateGas({
-    account: account.address,
-    to: address,
-    data: request.data,
-  });
-  const hash = await walletClient.writeContract({
-    ...request,
-    gas: withHeadroom(estimate, FLOOR_WRITE),
+    gas,
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   if (receipt.status !== "success") {
