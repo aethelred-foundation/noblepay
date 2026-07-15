@@ -1,7 +1,7 @@
 {
   "name": "@aethelred/noblepay",
   "version": "1.0.0",
-  "description": "NoblePay — Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
+  "description": "NoblePay \u2014 Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
   "private": true,
   "scripts": {
     "dev": "next dev -p ${PORT:-3002}",
@@ -20,7 +20,7 @@
     "test:e2e:ui": "playwright test --ui",
     "security:audit": "npm audit --audit-level=moderate",
     "analyze": "cross-env ANALYZE=true next build",
-    "postbuild": "next-sitemap",
+    "postbuild": "next-sitemap && node scripts/prepare-standalone.mjs",
     "validate": "npm run type-check && npm run lint && npm run test",
     "validate:frontend": "npm run type-check && npm run lint && npm run build && npm run test:ci",
     "validate:backend": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx prisma generate && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx prisma validate && test -f prisma/migrations/migration_lock.toml && test -f prisma/migrations/20260316_init/migration.sql && echo 'Migration artifacts verified' && npx tsc --noEmit && npx jest --runInBand --forceExit --detectOpenHandles",
@@ -29,7 +29,9 @@
     "validate:compliance": "cd crates/noblepay-compliance && cargo check && cargo test && cargo test --features mock-tee",
     "validate:security": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx jest --runInBand --forceExit --detectOpenHandles src/__tests__/security/exploit-simulations.test.ts",
     "validate:all": "npm run validate:frontend && npm run validate:backend && npm run validate:contracts && npm run validate:gateway && npm run validate:compliance && npm run validate:security",
-    "prerelease": "npm run validate:all"
+    "prerelease": "npm run validate:all",
+    "standalone:prepare": "node scripts/prepare-standalone.mjs",
+    "start:standalone": "node .next/standalone/server.js"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
