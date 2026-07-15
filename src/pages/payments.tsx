@@ -9,8 +9,10 @@
  */
 
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useAccount } from 'wagmi';
 import { SEOHead } from '@/components/SEOHead';
 import { useApp } from '@/contexts/AppContext';
+import { useInitiatePayment } from '@/hooks/usePayment';
 import { TopNav, Footer } from '@/components/SharedComponents';
 import { GlassCard, SectionHeader } from '@/components/PagePrimitives';
 import { seededRandom, seededHex, seededAddress, formatNumber, truncateAddress } from '@/lib/utils';
@@ -587,12 +589,25 @@ function PaymentDetailDrawer({ payment, open, onClose }: {
 // NEW PAYMENT MODAL
 // =============================================================================
 
+const EVM_ADDRESS_RE = /^0x[0-9a-fA-F]{40}$/;
+
 function NewPaymentModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [recipientAddress, setRecipientAddress] = useState('');
   const [amount, setAmount] = useState('');
   const [currency, setCurrency] = useState<Currency>('USDC');
   const [purposeCode, setPurposeCode] = useState(PURPOSE_CODES[0]);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const { isConnected } = useAccount();
+  const {
+    initiate,
+    txHash,
+    isPending,
+    isConfirming,
+    isSuccess,
+    error: txError,
+    reset,
+  } = useInitiatePayment();
 
   useEffect(() => {
     if (open) {
@@ -600,25 +615,68 @@ function NewPaymentModal({ open, onClose }: { open: boolean; onClose: () => void
     } else {
       document.body.style.overflow = '';
       setShowConfirm(false);
+      setFormError(null);
+      reset();
     }
     return () => { document.body.style.overflow = ''; };
-  }, [open]);
+  }, [open, reset]);
 
   const estimatedFee = useMemo(() => {
     const amt = parseFloat(amount) || 0;
     return (amt * 0.0025).toFixed(2);
   }, [amount]);
 
+  // Surface the real on-chain failure instead of silently closing: viem
+  // errors carry a human-readable shortMessage (e.g. decoded custom errors
+  // like NotRegisteredBusiness or InsufficientPayment).
+  const txErrorMessage = txError
+    ? ((txError as { shortMessage?: string }).shortMessage ?? txError.message)
+    : null;
+  const displayError = formError ?? txErrorMessage;
+  const busy = isPending || isConfirming;
+
+  const handleClose = () => {
+    setRecipientAddress('');
+    setAmount('');
+    setCurrency('USDC');
+    setPurposeCode(PURPOSE_CODES[0]);
+    setShowConfirm(false);
+    setFormError(null);
+    reset();
+    onClose();
+  };
+
   const handleSubmit = () => {
-    if (showConfirm) {
-      onClose();
-      setRecipientAddress('');
-      setAmount('');
-      setCurrency('USDC');
-      setPurposeCode(PURPOSE_CODES[0]);
-      setShowConfirm(false);
-    } else {
+    setFormError(null);
+    if (isSuccess) {
+      handleClose();
+      return;
+    }
+    if (!showConfirm) {
+      if (!EVM_ADDRESS_RE.test(recipientAddress)) {
+        setFormError('Recipient must be a valid 0x EVM address (42 hex characters).');
+        return;
+      }
+      if (!(parseFloat(amount) > 0)) {
+        setFormError('Amount must be greater than zero.');
+        return;
+      }
       setShowConfirm(true);
+      return;
+    }
+    if (!isConnected) {
+      setFormError('Connect your Aethelred Wallet first (button in the top navigation).');
+      return;
+    }
+    try {
+      initiate({
+        recipient: recipientAddress,
+        amount,
+        currency,
+        purposeHash: purposeCode,
+      });
+    } catch (e) {
+      setFormError(e instanceof Error ? e.message : String(e));
     }
   };
 
@@ -654,7 +712,7 @@ function NewPaymentModal({ open, onClose }: { open: boolean; onClose: () => void
                     type="text"
                     value={recipientAddress}
                     onChange={(e) => setRecipientAddress(e.target.value)}
-                    placeholder="aeth1..."
+                    placeholder="0x…"
                     className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-600 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500/50 outline-none transition-colors"
                   />
                 </div>
@@ -722,18 +780,33 @@ function NewPaymentModal({ open, onClose }: { open: boolean; onClose: () => void
             ) : (
               /* Confirmation Step */
               <div className="space-y-4">
-                <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20">
-                  <div className="flex items-center gap-2 mb-2">
-                    <AlertTriangle className="w-4 h-4 text-amber-400" />
-                    <p className="text-sm font-medium text-amber-400">Confirm Payment</p>
+                {isSuccess ? (
+                  <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
+                    <div className="flex items-center gap-2 mb-2">
+                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                      <p className="text-sm font-medium text-emerald-400">Payment Initiated On-Chain</p>
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      The payment is escrowed and entering compliance screening.
+                    </p>
+                    {txHash && (
+                      <p className="text-xs text-slate-500 mt-2 font-mono break-all">tx: {txHash}</p>
+                    )}
                   </div>
-                  <p className="text-xs text-slate-400">Please review the payment details before submitting.</p>
-                </div>
+                ) : (
+                  <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/20">
+                    <div className="flex items-center gap-2 mb-2">
+                      <AlertTriangle className="w-4 h-4 text-amber-400" />
+                      <p className="text-sm font-medium text-amber-400">Confirm Payment</p>
+                    </div>
+                    <p className="text-xs text-slate-400">Please review the payment details before submitting.</p>
+                  </div>
+                )}
 
                 <div className="space-y-3">
                   <div className="flex justify-between">
                     <span className="text-sm text-slate-400">Recipient</span>
-                    <code className="text-sm text-slate-200 font-mono">{truncateAddress(recipientAddress || 'aeth1...', 10, 6)}</code>
+                    <code className="text-sm text-slate-200 font-mono">{truncateAddress(recipientAddress, 10, 6)}</code>
                   </div>
                   <div className="flex justify-between">
                     <span className="text-sm text-slate-400">Amount</span>
@@ -757,22 +830,39 @@ function NewPaymentModal({ open, onClose }: { open: boolean; onClose: () => void
               </div>
             )}
 
+            {/* Error surface — never close silently on failure */}
+            {displayError && !isSuccess && (
+              <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-2">
+                <AlertTriangle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+                <p className="text-xs text-red-300 break-words">{displayError}</p>
+              </div>
+            )}
+
             {/* Action Buttons */}
             <div className="flex gap-3 pt-2">
-              {showConfirm && (
+              {showConfirm && !isSuccess && (
                 <button
                   onClick={() => setShowConfirm(false)}
-                  className="flex-1 py-2.5 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:border-slate-500 transition-colors"
+                  disabled={busy}
+                  className="flex-1 py-2.5 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:border-slate-500 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Back
                 </button>
               )}
               <button
                 onClick={handleSubmit}
-                disabled={!recipientAddress || !amount}
+                disabled={!recipientAddress || !amount || busy}
                 className="flex-1 py-2.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               >
-                {showConfirm ? 'Confirm & Send' : 'Initiate Payment'}
+                {isSuccess
+                  ? 'Done'
+                  : isPending
+                    ? 'Confirm in Wallet…'
+                    : isConfirming
+                      ? 'Waiting for Confirmation…'
+                      : showConfirm
+                        ? 'Confirm & Send'
+                        : 'Review Payment'}
               </button>
             </div>
           </div>

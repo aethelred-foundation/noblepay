@@ -53,10 +53,13 @@ jest.mock('wagmi', () => ({
     writeContract: jest.fn(),
     data: undefined,
     isPending: false,
+    error: null,
+    reset: jest.fn(),
   }),
   useWaitForTransactionReceipt: () => ({
     isLoading: false,
     isSuccess: false,
+    error: null,
   }),
   useReadContract: () => ({
     data: undefined,
@@ -123,6 +126,8 @@ jest.mock('viem', () => ({
   parseUnits: jest.fn(() => BigInt(0)),
   keccak256: jest.fn(() => '0x0000000000000000000000000000000000000000000000000000000000000000'),
   encodePacked: jest.fn(() => '0x'),
+  stringToHex: jest.fn(() => '0x414554'),
+  zeroAddress: '0x0000000000000000000000000000000000000000',
   defineChain: jest.fn((config) => config),
 }));
 

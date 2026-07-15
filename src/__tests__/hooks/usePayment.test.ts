@@ -116,7 +116,10 @@ describe('useInitiatePayment', () => {
     expect(result.current).toHaveProperty('isPending');
     expect(result.current).toHaveProperty('isConfirming');
     expect(result.current).toHaveProperty('isSuccess');
+    expect(result.current).toHaveProperty('error');
+    expect(result.current).toHaveProperty('reset');
     expect(typeof result.current.initiate).toBe('function');
+    expect(typeof result.current.reset).toBe('function');
   });
 
   it('has correct default values', () => {
@@ -128,7 +131,29 @@ describe('useInitiatePayment', () => {
     expect(result.current.isSuccess).toBe(false);
   });
 
-  it('initiate function can be called without errors', () => {
+  it('rejects an ERC-20 currency whose token address is not configured', () => {
+    const { CONTRACT_ADDRESSES } = require('@/config/chains');
+    const saved = CONTRACT_ADDRESSES.usdcToken;
+    CONTRACT_ADDRESSES.usdcToken = '';
+    try {
+      const { result } = renderHook(() => useInitiatePayment());
+
+      // Missing token address must fail loudly instead of sending a payment
+      // to the zero token by accident.
+      expect(() => {
+        result.current.initiate({
+          recipient: '0xrecipient',
+          amount: '1000',
+          currency: 'USDC',
+          purposeHash: 'test purpose',
+        });
+      }).toThrow(/USDC token address is not configured/);
+    } finally {
+      CONTRACT_ADDRESSES.usdcToken = saved;
+    }
+  });
+
+  it('initiates a configured ERC-20 payment without throwing', () => {
     const { result } = renderHook(() => useInitiatePayment());
 
     expect(() => {
@@ -141,7 +166,7 @@ describe('useInitiatePayment', () => {
     }).not.toThrow();
   });
 
-  it('initiate function handles AETHEL currency', () => {
+  it('initiate function handles AETHEL currency (native, no token address needed)', () => {
     const { result } = renderHook(() => useInitiatePayment());
 
     expect(() => {

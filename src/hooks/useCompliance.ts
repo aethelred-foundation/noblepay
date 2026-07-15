@@ -201,6 +201,8 @@ export function useUpdateSanctionsList() {
 // ---------------------------------------------------------------------------
 
 export function useRiskThresholds() {
+  // On-chain signature: getRiskThresholds() returns (uint8 lowMax, uint8 mediumMax).
+  // Scores <= lowMax are Low, <= mediumMax are Medium, above is High.
   const { data: thresholds } = useReadContract({
     address: CONTRACT_ADDRESSES.complianceOracle as `0x${string}`,
     abi: COMPLIANCE_ORACLE_ABI,
@@ -210,7 +212,7 @@ export function useRiskThresholds() {
     },
   });
 
-  return thresholds as
-    | { lowThreshold: number; highThreshold: number }
-    | undefined;
+  if (!thresholds) return undefined;
+  const [lowMax, mediumMax] = thresholds as readonly [number, number];
+  return { lowMax, mediumMax };
 }

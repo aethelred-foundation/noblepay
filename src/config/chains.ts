@@ -27,6 +27,21 @@ export const AETHELRED_DEVNET_ID = 7332;
 // Chain Definitions
 // ---------------------------------------------------------------------------
 
+// RPC endpoints are env-overridable because the canonical *.aethelred.network
+// domains are not yet in DNS: without an override every request dies with
+// net::ERR_NAME_NOT_RESOLVED. NEXT_PUBLIC_* values are inlined at BUILD time —
+// set them before `npm run build`, not at `node server.js` time.
+const MAINNET_RPC_HTTP =
+  process.env.NEXT_PUBLIC_AETHELRED_RPC_URL || 'https://evm-rpc.aethelred.network';
+const MAINNET_RPC_WS =
+  process.env.NEXT_PUBLIC_AETHELRED_WS_URL || 'wss://evm-ws.aethelred.network';
+const TESTNET_RPC_HTTP =
+  process.env.NEXT_PUBLIC_AETHELRED_TESTNET_RPC_URL ||
+  'https://evm-rpc-testnet.aethelred.network';
+const TESTNET_RPC_WS =
+  process.env.NEXT_PUBLIC_AETHELRED_TESTNET_WS_URL ||
+  'wss://evm-ws-testnet.aethelred.network';
+
 export const aethelredMainnet = defineChain({
   id: AETHELRED_MAINNET_ID,
   name: 'Aethelred',
@@ -37,12 +52,12 @@ export const aethelredMainnet = defineChain({
   },
   rpcUrls: {
     default: {
-      http: ['https://evm-rpc.aethelred.network'],
-      webSocket: ['wss://evm-ws.aethelred.network'],
+      http: [MAINNET_RPC_HTTP],
+      webSocket: [MAINNET_RPC_WS],
     },
     public: {
-      http: ['https://evm-rpc.aethelred.network'],
-      webSocket: ['wss://evm-ws.aethelred.network'],
+      http: [MAINNET_RPC_HTTP],
+      webSocket: [MAINNET_RPC_WS],
     },
   },
   blockExplorers: {
@@ -67,12 +82,12 @@ export const aethelredTestnet = defineChain({
   },
   rpcUrls: {
     default: {
-      http: ['https://evm-rpc-testnet.aethelred.network'],
-      webSocket: ['wss://evm-ws-testnet.aethelred.network'],
+      http: [TESTNET_RPC_HTTP],
+      webSocket: [TESTNET_RPC_WS],
     },
     public: {
-      http: ['https://evm-rpc-testnet.aethelred.network'],
-      webSocket: ['wss://evm-ws-testnet.aethelred.network'],
+      http: [TESTNET_RPC_HTTP],
+      webSocket: [TESTNET_RPC_WS],
     },
   },
   blockExplorers: {

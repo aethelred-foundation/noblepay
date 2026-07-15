@@ -5,11 +5,11 @@
  * React Query for API-backed payment data.
  */
 
-import { useState, useCallback, useMemo } from 'react';
-import { useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
-import { parseEther, parseUnits, keccak256, encodePacked } from 'viem';
+import { useCallback, useEffect } from 'react';
+import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { parseEther, parseUnits, keccak256, encodePacked, stringToHex, zeroAddress } from 'viem';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { CONTRACT_ADDRESSES } from '@/config/chains';
+import { CONTRACT_ADDRESSES, TOKEN_ADDRESS_KEYS } from '@/config/chains';
 import { NOBLEPAY_ABI } from '@/config/abis';
 
 // ---------------------------------------------------------------------------
@@ -113,8 +113,18 @@ export function usePayments(filters: PaymentFilter = {}) {
 
 export function useInitiatePayment() {
   const queryClient = useQueryClient();
-  const { writeContract, data: txHash, isPending } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+  const {
+    writeContract,
+    data: txHash,
+    isPending,
+    error: writeError,
+    reset,
+  } = useWriteContract();
+  const {
+    isLoading: isConfirming,
+    isSuccess,
+    error: receiptError,
+  } = useWaitForTransactionReceipt({
     hash: txHash,
   });
 
@@ -124,23 +134,48 @@ export function useInitiatePayment() {
         encodePacked(['string'], [params.purposeHash]),
       );
 
-      const amount =
-        params.currency === 'AETHEL'
-          ? parseEther(params.amount)
-          : parseUnits(params.amount, 6); // USDC/USDT use 6 decimals
+      // AETHEL settles natively (token = address(0), escrowed via msg.value);
+      // stablecoins settle via ERC-20 transferFrom and need a prior approval.
+      const isNative = params.currency === 'AETHEL';
+      let tokenAddress: string;
+      if (isNative) {
+        tokenAddress = zeroAddress;
+      } else {
+        const tokenKey = TOKEN_ADDRESS_KEYS[params.currency];
+        tokenAddress = (tokenKey && CONTRACT_ADDRESSES[tokenKey]) || '';
+        if (!tokenAddress) {
+          throw new Error(
+            `${params.currency} token address is not configured — set the corresponding NEXT_PUBLIC_*_TOKEN_ADDRESS at build time.`,
+          );
+        }
+      }
+
+      const amount = isNative
+        ? parseEther(params.amount)
+        : parseUnits(params.amount, 6); // USDC/USDT use 6 decimals
+
+      // bytes3 currency code, e.g. AETHEL -> "AET", USDC -> "USD"
+      const currencyCode = stringToHex(params.currency.slice(0, 3), { size: 3 });
 
       writeContract({
         address: CONTRACT_ADDRESSES.noblepay as `0x${string}`,
         abi: NOBLEPAY_ABI,
         functionName: 'initiatePayment',
-        args: [params.recipient as `0x${string}`, amount, purposeHash, '0x4145' as `0x${string}`, '0x' as `0x${string}`],
+        args: [
+          params.recipient as `0x${string}`,
+          amount,
+          tokenAddress as `0x${string}`,
+          purposeHash,
+          currencyCode,
+        ],
+        value: isNative ? amount : undefined,
       });
     },
     [writeContract],
   );
 
   // Invalidate payment list cache on success
-  useMemo(() => {
+  useEffect(() => {
     if (isSuccess) {
       queryClient.invalidateQueries({ queryKey: ['payments'] });
       queryClient.invalidateQueries({ queryKey: ['paymentStats'] });
@@ -153,6 +188,8 @@ export function useInitiatePayment() {
     isPending,
     isConfirming,
     isSuccess,
+    error: writeError ?? receiptError ?? null,
+    reset,
   };
 }
 

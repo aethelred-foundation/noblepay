@@ -290,10 +290,10 @@ describe('PaymentsPage', () => {
     fireEvent.click(newPaymentBtn!);
     // Modal should show form
     expect(screen.getByText('Recipient Address')).toBeInTheDocument();
-    expect(screen.getByPlaceholderText('aeth1...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('0x…')).toBeInTheDocument();
     expect(screen.getByPlaceholderText('0.00')).toBeInTheDocument();
     // Fill in form
-    fireEvent.change(screen.getByPlaceholderText('aeth1...'), { target: { value: 'aeth1abc123' } });
+    fireEvent.change(screen.getByPlaceholderText('0x…'), { target: { value: '0xab12ab12ab12ab12ab12ab12ab12ab12ab12ab12' } });
     fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '1000' } });
   });
 
@@ -302,10 +302,10 @@ describe('PaymentsPage', () => {
     const newPaymentBtn = screen.getAllByRole('button').find((b) => b.textContent?.includes('New Payment'));
     fireEvent.click(newPaymentBtn!);
     // Fill form
-    fireEvent.change(screen.getByPlaceholderText('aeth1...'), { target: { value: 'aeth1abc123' } });
+    fireEvent.change(screen.getByPlaceholderText('0x…'), { target: { value: '0xab12ab12ab12ab12ab12ab12ab12ab12ab12ab12' } });
     fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '500' } });
     // Click Initiate Payment to go to confirm
-    const initiateBtn = screen.getByText('Initiate Payment');
+    const initiateBtn = screen.getByText('Review Payment');
     fireEvent.click(initiateBtn);
     // Should now show confirmation step
     expect(screen.getByText('Confirm Payment')).toBeInTheDocument();
@@ -317,24 +317,38 @@ describe('PaymentsPage', () => {
     render(<PaymentsPage />);
     const newPaymentBtn = screen.getAllByRole('button').find((b) => b.textContent?.includes('New Payment'));
     fireEvent.click(newPaymentBtn!);
-    fireEvent.change(screen.getByPlaceholderText('aeth1...'), { target: { value: 'aeth1abc123' } });
+    fireEvent.change(screen.getByPlaceholderText('0x…'), { target: { value: '0xab12ab12ab12ab12ab12ab12ab12ab12ab12ab12' } });
     fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '500' } });
-    fireEvent.click(screen.getByText('Initiate Payment'));
+    fireEvent.click(screen.getByText('Review Payment'));
     // Click Back
     fireEvent.click(screen.getByText('Back'));
     // Should be back on form
-    expect(screen.getByPlaceholderText('aeth1...')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('0x…')).toBeInTheDocument();
   });
 
-  it('new payment modal confirm & send closes modal', () => {
+  it('confirm & send keeps the modal open and surfaces config errors (no silent close)', () => {
     render(<PaymentsPage />);
     const newPaymentBtn = screen.getAllByRole('button').find((b) => b.textContent?.includes('New Payment'));
     fireEvent.click(newPaymentBtn!);
-    fireEvent.change(screen.getByPlaceholderText('aeth1...'), { target: { value: 'aeth1abc123' } });
+    fireEvent.change(screen.getByPlaceholderText('0x…'), { target: { value: '0xab12ab12ab12ab12ab12ab12ab12ab12ab12ab12' } });
     fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '500' } });
-    fireEvent.click(screen.getByText('Initiate Payment'));
+    fireEvent.click(screen.getByText('Review Payment'));
     fireEvent.click(screen.getByText('Confirm & Send'));
-    // Modal should close
+    // The transaction was only submitted to the wallet — the modal must stay
+    // open (pending/confirming/error states render here) instead of silently
+    // closing the way the old mock implementation did.
+    expect(screen.getByText('Confirm Payment')).toBeInTheDocument();
+  });
+
+  it('rejects an invalid recipient address with an inline error', () => {
+    render(<PaymentsPage />);
+    const newPaymentBtn = screen.getAllByRole('button').find((b) => b.textContent?.includes('New Payment'));
+    fireEvent.click(newPaymentBtn!);
+    fireEvent.change(screen.getByPlaceholderText('0x…'), { target: { value: 'aeth1notanevmaddress' } });
+    fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '500' } });
+    fireEvent.click(screen.getByText('Review Payment'));
+    // Stays on the form with a validation error
+    expect(screen.getByText(/valid 0x EVM address/)).toBeInTheDocument();
     expect(screen.queryByText('Confirm Payment')).not.toBeInTheDocument();
   });
 

@@ -5,6 +5,7 @@
  * and payment limit tracking.
  */
 
+import { useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   useReadContract,
@@ -91,10 +92,12 @@ export function useBusinessProfile() {
 export function useBusinessRegistered() {
   const { address } = useAccount();
 
+  // BusinessRegistry exposes isBusinessActive (registered + verified + not
+  // suspended) — there is no bare isBusinessRegistered view on-chain.
   const { data: isRegistered } = useReadContract({
     address: CONTRACT_ADDRESSES.businessRegistry as `0x${string}`,
     abi: BUSINESS_REGISTRY_ABI,
-    functionName: "isBusinessRegistered",
+    functionName: "isBusinessActive",
     args: address ? [address] : undefined,
     query: {
       enabled: !!address && !!CONTRACT_ADDRESSES.businessRegistry,
@@ -110,20 +113,36 @@ export function useBusinessRegistered() {
 
 export function useBusinessRegistration() {
   const queryClient = useQueryClient();
-  const { writeContract, data: txHash, isPending } = useWriteContract();
-  const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
+  const {
+    writeContract,
+    data: txHash,
+    isPending,
+    error: writeError,
+    reset,
+  } = useWriteContract();
+  const {
+    isLoading: isConfirming,
+    isSuccess,
+    error: receiptError,
+  } = useWaitForTransactionReceipt({
     hash: txHash,
   });
 
   const register = (params: BusinessRegistrationParams) => {
+    // registerBusiness(licenseNumber, businessName, Jurisdiction, complianceOfficer)
+    // Jurisdiction enum on-chain: 0 = UAE, 1 = INTERNATIONAL.
+    const jurisdiction =
+      params.jurisdiction === "AE" || params.jurisdiction === "UAE" ? 0 : 1;
+
     writeContract({
       address: CONTRACT_ADDRESSES.businessRegistry as `0x${string}`,
       abi: BUSINESS_REGISTRY_ABI,
       functionName: "registerBusiness",
       args: [
         params.licenseNumber,
-        "0x4145" as `0x${string}`,
-        "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+        params.businessName,
+        jurisdiction,
+        params.complianceOfficer as `0x${string}`,
       ],
     });
 
@@ -134,9 +153,11 @@ export function useBusinessRegistration() {
     }).catch(console.error);
   };
 
-  if (isSuccess) {
-    queryClient.invalidateQueries({ queryKey: ["businessProfile"] });
-  }
+  useEffect(() => {
+    if (isSuccess) {
+      queryClient.invalidateQueries({ queryKey: ["businessProfile"] });
+    }
+  }, [isSuccess, queryClient]);
 
   return {
     register,
@@ -144,6 +165,8 @@ export function useBusinessRegistration() {
     isPending,
     isConfirming,
     isSuccess,
+    error: writeError ?? receiptError ?? null,
+    reset,
   };
 }
 
