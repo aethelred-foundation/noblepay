@@ -8,6 +8,8 @@
  */
 
 import { useState, useMemo, useEffect, useCallback } from "react";
+import { useAccount } from "wagmi";
+import { useBusinessRegistration, useBusinessRegistered } from "@/hooks/useBusiness";
 import {
   PieChart,
   Pie,
@@ -1374,179 +1376,260 @@ export default function BusinessRegistryPage() {
           Registration Form (Modal)
           ================================================================ */}
       {showRegistrationModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          <div
-            className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => setShowRegistrationModal(false)}
-            style={{ animation: "modal-overlay-in 0.2s ease-out" }}
-          />
-          <div
-            className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-700/50 bg-slate-900 p-6 shadow-2xl"
-            style={{ animation: "modal-content-in 0.3s ease-out" }}
-          >
-            <div className="flex items-center justify-between mb-6">
-              <div>
-                <h3 className="text-lg font-bold text-white">
-                  Register New Business
-                </h3>
-                <p className="text-xs text-slate-400 mt-1">
-                  Submit UAE business registration for NoblePay onboarding
-                </p>
-              </div>
-              <button
-                onClick={() => setShowRegistrationModal(false)}
-                className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
-              >
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                setShowRegistrationModal(false);
-              }}
-              className="space-y-4"
-            >
-              <div>
-                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
-                  UAE Trade License Number *
-                </label>
-                <input
-                  type="text"
-                  placeholder="e.g., CN-1234567 or DED-2023-445566"
-                  pattern="[A-Z]{2,5}-\d{4,10}(-\d{2,6})?"
-                  required
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
-                />
-                <p className="text-[10px] text-slate-600 mt-1">
-                  Format: PREFIX-NUMBERS (e.g., CN-1234567, DED-2023-445566)
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
-                  Business Name *
-                </label>
-                <input
-                  type="text"
-                  placeholder="Full registered business name"
-                  required
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
-                    Jurisdiction *
-                  </label>
-                  <select
-                    required
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-red-500/50 focus:outline-none"
-                  >
-                    <option value="">Select Emirate</option>
-                    {UAE_EMIRATES.map((e) => (
-                      <option key={e} value={e}>
-                        {e}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
-                    Business Type *
-                  </label>
-                  <select
-                    required
-                    className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-red-500/50 focus:outline-none"
-                  >
-                    <option value="">Select Type</option>
-                    {BUSINESS_TYPES.map((t) => (
-                      <option key={t} value={t}>
-                        {t}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
-                  Compliance Officer Address *
-                </label>
-                <input
-                  type="text"
-                  placeholder="aeth1..."
-                  required
-                  pattern="aeth1[a-z0-9]{38}"
-                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white font-mono placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
-                  KYC Attestation Document
-                </label>
-                <div className="flex items-center justify-center rounded-lg border-2 border-dashed border-slate-700 bg-slate-800/30 p-6 transition-colors hover:border-slate-600">
-                  <div className="text-center">
-                    <Upload className="mx-auto h-8 w-8 text-slate-500" />
-                    <p className="mt-2 text-xs text-slate-400">
-                      Drag & drop or click to upload
-                    </p>
-                    <p className="text-[10px] text-slate-600 mt-1">
-                      PDF, PNG, or JPG up to 10MB
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              <div className="flex items-start gap-2">
-                <input
-                  type="checkbox"
-                  required
-                  id="terms"
-                  className="mt-0.5 rounded border-slate-600 bg-slate-800 text-red-600 focus:ring-red-500/30"
-                />
-                <label htmlFor="terms" className="text-xs text-slate-400">
-                  I confirm that the business details provided are accurate and
-                  I agree to the{" "}
-                  <a
-                    href="#"
-                    className="text-red-400 hover:text-red-300 underline"
-                  >
-                    NoblePay Terms of Service
-                  </a>{" "}
-                  and{" "}
-                  <a
-                    href="#"
-                    className="text-red-400 hover:text-red-300 underline"
-                  >
-                    Compliance Policy
-                  </a>
-                  .
-                </label>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setShowRegistrationModal(false)}
-                  className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-400 hover:bg-slate-800 transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  className="rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
-                >
-                  Submit Registration
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <RegistrationModal onClose={() => setShowRegistrationModal(false)} />
       )}
     </>
+  );
+}
+
+/* ================================================================
+   Registration Modal — on-chain BusinessRegistry.registerBusiness
+   ================================================================ */
+const EVM_ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+const LICENSE_RE = /^[A-Z]{2,5}-\d{4,10}(-\d{2,6})?$/;
+
+function RegistrationModal({ onClose }: { onClose: () => void }) {
+  const { address, isConnected } = useAccount();
+  const {
+    register,
+    txHash,
+    isPending,
+    isConfirming,
+    isSuccess,
+    error: txError,
+    reset,
+  } = useBusinessRegistration();
+
+  const [licenseNumber, setLicenseNumber] = useState("");
+  const [businessName, setBusinessName] = useState("");
+  const [emirate, setEmirate] = useState("");
+  const [businessType, setBusinessType] = useState("");
+  const [complianceOfficer, setComplianceOfficer] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+
+  // Sensible default: the connected account is its own compliance officer.
+  useEffect(() => {
+    if (address && !complianceOfficer) setComplianceOfficer(address);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [address]);
+
+  const txErrorMessage = txError
+    ? ((txError as { shortMessage?: string }).shortMessage ?? txError.message)
+    : null;
+  const displayError = formError ?? txErrorMessage;
+  const busy = isPending || isConfirming;
+
+  const handleClose = () => {
+    reset();
+    onClose();
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError(null);
+    if (isSuccess) {
+      handleClose();
+      return;
+    }
+    if (!isConnected) {
+      setFormError("Connect your Aethelred Wallet first (button in the top navigation).");
+      return;
+    }
+    if (!LICENSE_RE.test(licenseNumber)) {
+      setFormError("Trade license must match PREFIX-NUMBERS, e.g. CN-1234567.");
+      return;
+    }
+    if (!businessName.trim()) {
+      setFormError("Business name is required.");
+      return;
+    }
+    if (!emirate || !businessType) {
+      setFormError("Select a jurisdiction and business type.");
+      return;
+    }
+    if (!EVM_ADDR_RE.test(complianceOfficer)) {
+      setFormError("Compliance officer must be a valid 0x EVM address.");
+      return;
+    }
+    register({
+      licenseNumber,
+      businessName: businessName.trim(),
+      jurisdiction: "AE", // all emirates map to the on-chain UAE jurisdiction
+      businessType,
+      complianceOfficer,
+      contactEmail: "",
+    });
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={handleClose}
+        style={{ animation: "modal-overlay-in 0.2s ease-out" }}
+      />
+      <div
+        className="relative w-full max-w-xl max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-700/50 bg-slate-900 p-6 shadow-2xl"
+        style={{ animation: "modal-content-in 0.3s ease-out" }}
+      >
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h3 className="text-lg font-bold text-white">Register New Business</h3>
+            <p className="text-xs text-slate-400 mt-1">
+              Registers your connected account in the on-chain BusinessRegistry
+            </p>
+          </div>
+          <button
+            onClick={handleClose}
+            className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white transition-colors"
+          >
+            <X className="h-5 w-5" />
+          </button>
+        </div>
+
+        {isSuccess ? (
+          <div className="space-y-4">
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <ShieldCheck className="h-4 w-4 text-emerald-400" />
+                <p className="text-sm font-medium text-emerald-400">
+                  Registration Submitted On-Chain
+                </p>
+              </div>
+              {txHash && (
+                <p className="text-xs text-slate-500 font-mono break-all">tx: {txHash}</p>
+              )}
+              <p className="text-xs text-slate-400 mt-2">
+                Next steps before this account can initiate payments: a
+                verifier approves the business (verifyBusiness), then the
+                NoblePay admin syncs it (scripts/register-business.mjs).
+              </p>
+            </div>
+            <div className="flex justify-end">
+              <button
+                onClick={handleClose}
+                className="rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
+              >
+                Done
+              </button>
+            </div>
+          </div>
+        ) : (
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
+                UAE Trade License Number *
+              </label>
+              <input
+                type="text"
+                value={licenseNumber}
+                onChange={(e) => setLicenseNumber(e.target.value.toUpperCase())}
+                placeholder="e.g., CN-1234567 or DED-2023-445566"
+                className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
+              />
+              <p className="text-[10px] text-slate-600 mt-1">
+                Format: PREFIX-NUMBERS (e.g., CN-1234567, DED-2023-445566)
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
+                Business Name *
+              </label>
+              <input
+                type="text"
+                value={businessName}
+                onChange={(e) => setBusinessName(e.target.value)}
+                placeholder="Full registered business name"
+                className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
+              />
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
+                  Jurisdiction *
+                </label>
+                <select
+                  value={emirate}
+                  onChange={(e) => setEmirate(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-red-500/50 focus:outline-none"
+                >
+                  <option value="">Select Emirate</option>
+                  {UAE_EMIRATES.map((e) => (
+                    <option key={e} value={e}>
+                      {e}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
+                  Business Type *
+                </label>
+                <select
+                  value={businessType}
+                  onChange={(e) => setBusinessType(e.target.value)}
+                  className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-red-500/50 focus:outline-none"
+                >
+                  <option value="">Select Type</option>
+                  {BUSINESS_TYPES.map((t) => (
+                    <option key={t} value={t}>
+                      {t}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            <div>
+              <label className="block text-xs font-medium text-slate-400 uppercase tracking-wide mb-1.5">
+                Compliance Officer Address *
+              </label>
+              <input
+                type="text"
+                value={complianceOfficer}
+                onChange={(e) => setComplianceOfficer(e.target.value)}
+                placeholder="0x…"
+                className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white font-mono placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
+              />
+              <p className="text-[10px] text-slate-600 mt-1">
+                Defaults to your connected account. KYC document handling is
+                part of the verification step, not this transaction.
+              </p>
+            </div>
+
+            {displayError && (
+              <div className="flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/10 p-3">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
+                <p className="text-xs text-red-300 break-words">{displayError}</p>
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={handleClose}
+                disabled={busy}
+                className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-400 hover:bg-slate-800 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={busy}
+                className="rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isPending
+                  ? "Confirm in Wallet…"
+                  : isConfirming
+                    ? "Waiting for Confirmation…"
+                    : "Submit Registration"}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
   );
 }

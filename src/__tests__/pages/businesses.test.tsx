@@ -458,6 +458,34 @@ describe("BusinessesPage", () => {
     }
   });
 
+  it("rejects an invalid trade license with an inline error (no silent close)", () => {
+    render(<BusinessesPage />);
+    fireEvent.click(screen.getAllByText(/Register New Business/i)[0]);
+    fireEvent.change(screen.getByPlaceholderText(/CN-1234567/), { target: { value: "not-a-license" } });
+    fireEvent.change(screen.getByPlaceholderText("Full registered business name"), { target: { value: "Acme FZ LLC" } });
+    const form = document.querySelector("form")!;
+    fireEvent.submit(form);
+    expect(screen.getByText(/Trade license must match/)).toBeInTheDocument();
+    // modal stays open
+    expect(screen.getByText(/Registers your connected account/)).toBeInTheDocument();
+  });
+
+  it("submits a valid registration on-chain and keeps the modal open while pending", () => {
+    render(<BusinessesPage />);
+    fireEvent.click(screen.getAllByText(/Register New Business/i)[0]);
+    fireEvent.change(screen.getByPlaceholderText(/CN-1234567/), { target: { value: "CN-1234567" } });
+    fireEvent.change(screen.getByPlaceholderText("Full registered business name"), { target: { value: "Acme FZ LLC" } });
+    const selects = screen.getAllByRole("combobox");
+    fireEvent.change(selects[selects.length - 2], { target: { value: "Dubai" } });
+    fireEvent.change(selects[selects.length - 1], { target: { value: "LLC" } });
+    // compliance officer defaults to the mocked connected address (0x1234…)
+    const form = document.querySelector("form")!;
+    fireEvent.submit(form);
+    // wagmi write is mocked: no error box, no silent close
+    expect(screen.queryByText(/must be a valid 0x/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Registers your connected account/)).toBeInTheDocument();
+  });
+
   it("registration modal form submission works", () => {
     render(<BusinessesPage />);
     const registerBtn = screen.getAllByText(/Register New Business/i)[0];
@@ -493,7 +521,7 @@ describe("BusinessesPage", () => {
     fireEvent.click(registerBtn);
     expect(
       screen.getByText(
-        "Submit UAE business registration for NoblePay onboarding",
+        "Registers your connected account in the on-chain BusinessRegistry",
       ),
     ).toBeInTheDocument();
     // The X button is the button with p-1 class inside the modal header
@@ -506,7 +534,7 @@ describe("BusinessesPage", () => {
     fireEvent.click(headerBtns[0]);
     expect(
       screen.queryByText(
-        "Submit UAE business registration for NoblePay onboarding",
+        "Registers your connected account in the on-chain BusinessRegistry",
       ),
     ).not.toBeInTheDocument();
   });
