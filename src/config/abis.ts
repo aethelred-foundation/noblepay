@@ -81,6 +81,22 @@ export const NOBLEPAY_ABI = [
     "type": "error"
   },
   {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "sent",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "required",
+        "type": "uint256"
+      }
+    ],
+    "name": "IncorrectNativeAmount",
+    "type": "error"
+  },
+  {
     "inputs": [],
     "name": "InsufficientPayment",
     "type": "error"
@@ -1615,10 +1631,6 @@ export const NOBLEPAY_ABI = [
     "outputs": [],
     "stateMutability": "nonpayable",
     "type": "function"
-  },
-  {
-    "stateMutability": "payable",
-    "type": "receive"
   }
 ] as const;
 

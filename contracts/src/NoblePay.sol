@@ -139,6 +139,13 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     // ──────────────────────────────────────────────────────────────
 
     /// @dev Daily limits per tier in smallest token unit (assuming 6 decimals).
+    /// @dev Tier volume limits are denominated in 6-decimal units (the USDC/
+    ///      USDT scale). Native AETHEL amounts arrive as 18-decimal wei and are
+    ///      normalized by this scaler before limit accounting, so 1 AETHEL
+    ///      counts as one unit toward the tier limits. Do not list an ERC-20
+    ///      with decimals != 6 as a supported token without revisiting this.
+    uint256 private constant NATIVE_LIMIT_SCALER = 1e12;
+
     uint256 public constant STANDARD_DAILY_LIMIT = 50_000 * 1e6;
     uint256 public constant PREMIUM_DAILY_LIMIT = 500_000 * 1e6;
     uint256 public constant ENTERPRISE_DAILY_LIMIT = 5_000_000 * 1e6;
@@ -245,6 +252,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     error SealClearanceMissing(address sender, address recipient);
     error SealGateNotSet();
     error AmountBelowFee(uint256 amount, uint256 fee);
+    error IncorrectNativeAmount(uint256 sent, uint256 required);
 
     // ──────────────────────────────────────────────────────────────
     // Modifiers
@@ -327,16 +335,19 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         uint256 entryFee = _calculateFee(_amount);
         if (_amount <= entryFee) revert AmountBelowFee(_amount, entryFee);
 
-        // Enforce volume limits
-        _enforceVolumeLimits(msg.sender, _amount);
+        // Enforce volume limits (normalized to 6-decimal limit units)
+        _enforceVolumeLimits(msg.sender, _limitUnits(_token, _amount));
 
         // Generate unique payment ID
         paymentId = keccak256(abi.encodePacked(msg.sender, _recipient, _amount, block.timestamp, paymentNonce++));
 
-        // Escrow funds
+        // Escrow funds. Native escrow demands the exact amount and token
+        // payments demand zero value: any surplus native sent here would be
+        // unrecoverable (the contract has no sweep function by design).
         if (_token == address(0)) {
-            if (msg.value < _amount) revert InsufficientPayment();
+            if (msg.value != _amount) revert IncorrectNativeAmount(msg.value, _amount);
         } else {
+            if (msg.value != 0) revert IncorrectNativeAmount(msg.value, 0);
             IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
         }
 
@@ -388,6 +399,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         bytes32[] memory paymentIds = new bytes32[](count);
         uint256 totalAmount;
         uint256 nativeRequired;
+        uint256 limitTotal;
 
         for (uint256 i; i < count;) {
             if (_recipients[i] == address(0)) revert ZeroAddress();
@@ -424,15 +436,17 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
             });
 
             totalAmount += _amounts[i];
+            limitTotal += _limitUnits(_tokens[i], _amounts[i]);
 
             emit PaymentInitiated(pid, msg.sender, _recipients[i], _amounts[i], _tokens[i], _currencyCodes[i]);
 
             unchecked { ++i; }
         }
 
-        if (msg.value < nativeRequired) revert InsufficientPayment();
+        // Exact native escrow — surplus would be unrecoverable (no sweep).
+        if (msg.value != nativeRequired) revert IncorrectNativeAmount(msg.value, nativeRequired);
 
-        _enforceVolumeLimits(msg.sender, totalAmount);
+        _enforceVolumeLimits(msg.sender, limitTotal);
 
         batches[batchId] = PaymentBatch({
             batchId: batchId,
@@ -714,9 +728,19 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     // ──────────────────────────────────────────────────────────────
 
     /**
+     * @dev Converts a payment amount into the 6-decimal units the tier volume
+     *      limits are denominated in. Native AETHEL (18 decimals) scales down
+     *      by NATIVE_LIMIT_SCALER; supported ERC-20s (6-decimal stablecoins)
+     *      pass through unchanged.
+     */
+    function _limitUnits(address _token, uint256 _amount) internal pure returns (uint256) {
+        return _token == address(0) ? _amount / NATIVE_LIMIT_SCALER : _amount;
+    }
+
+    /**
      * @dev Enforces daily and monthly volume limits based on business tier.
      * @param _business Business address.
-     * @param _amount   Payment amount to validate.
+     * @param _amount   Payment amount in 6-decimal limit units (see _limitUnits).
      */
     function _enforceVolumeLimits(address _business, uint256 _amount) internal {
         BusinessTier tier = businessTiers[_business];
@@ -749,6 +773,8 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         return baseFee + (_amount * percentageFee / 10_000);
     }
 
-    /// @notice Allows the contract to receive native AETHEL.
-    receive() external payable {}
+    // NOTE: deliberately NO receive()/fallback. Native funds enter only as
+    // exact escrow through initiatePayment/initiatePaymentBatch; a plain
+    // transfer to this contract would be permanently unrecoverable (there is
+    // no sweep function), so it must revert instead of being accepted.
 }

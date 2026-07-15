@@ -136,8 +136,8 @@ describe("NoblePay", function () {
       const amount = ethers.parseUnits("2", 6); // clears the fee guard (baseFee 1e6)
       await expect(noblepay.connect(business1).initiatePayment(
         recipient.address, amount, ethers.ZeroAddress, ethers.ZeroHash, "0x414554",
-        { value: ethers.parseUnits("1", 6) } // msg.value < amount
-      )).to.be.revertedWithCustomError(noblepay, "InsufficientPayment");
+        { value: ethers.parseUnits("1", 6) } // msg.value != amount
+      )).to.be.revertedWithCustomError(noblepay, "IncorrectNativeAmount");
     });
   });
 

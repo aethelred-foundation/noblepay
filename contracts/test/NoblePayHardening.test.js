@@ -348,3 +348,101 @@ describe("NoblePay — hardening", function () {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Native-unit volume limits + exact escrow — field fix from testnet testing:
+// tier limits are denominated in 6-decimal (stablecoin) units, so an
+// 18-decimal native amount blew through even the ENTERPRISE cap and every
+// realistic AETHEL payment reverted DailyLimitExceeded. Native amounts are
+// now normalized (1 AETHEL = 1e6 limit units) and native escrow is exact —
+// surplus value would be permanently unrecoverable (no sweep, no receive()).
+// ---------------------------------------------------------------------------
+describe("NoblePay — native limit units + exact escrow", function () {
+  const AETHEL = "0x414554";
+
+  async function deployFixture() {
+    const [admin, treasury, teeNode, business1, recipient] =
+      await ethers.getSigners();
+    const NoblePay = await ethers.getContractFactory("NoblePay");
+    const noblepay = await NoblePay.deploy(
+      admin.address,
+      treasury.address,
+      ethers.parseUnits("1", 6),
+      50,
+    );
+    const MockERC20 = await ethers.getContractFactory("MockERC20");
+    const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
+    await noblepay.connect(admin).setSupportedToken(usdc.target, true);
+    await noblepay.connect(admin).syncBusiness(business1.address, 0, true); // STANDARD
+    const bal = ethers.parseUnits("1000000", 6);
+    await usdc.mint(business1.address, bal);
+    await usdc.connect(business1).approve(noblepay.target, bal);
+    return { noblepay, usdc, admin, business1, recipient };
+  }
+
+  it("accepts a realistic native payment (10 AETHEL) at STANDARD tier", async function () {
+    const { noblepay, business1, recipient } = await loadFixture(deployFixture);
+    const amount = ethers.parseEther("10"); // 1e19 wei — impossible before normalization
+    await expect(
+      noblepay.connect(business1).initiatePayment(
+        recipient.address, amount, ethers.ZeroAddress, ethers.ZeroHash, AETHEL,
+        { value: amount },
+      ),
+    ).to.emit(noblepay, "PaymentInitiated");
+  });
+
+  it("still enforces the STANDARD daily cap in normalized units (60k AETHEL > 50k)", async function () {
+    const { noblepay, business1, recipient } = await loadFixture(deployFixture);
+    const amount = ethers.parseEther("60000"); // 6e10 units > 5e10 STANDARD_DAILY_LIMIT
+    await ethers.provider.send("hardhat_setBalance", [
+      business1.address,
+      "0x" + (70000n * 10n ** 18n).toString(16),
+    ]);
+    await expect(
+      noblepay.connect(business1).initiatePayment(
+        recipient.address, amount, ethers.ZeroAddress, ethers.ZeroHash, AETHEL,
+        { value: amount },
+      ),
+    ).to.be.revertedWithCustomError(noblepay, "DailyLimitExceeded");
+  });
+
+  it("rejects native overpayment — surplus would be unrecoverable", async function () {
+    const { noblepay, business1, recipient } = await loadFixture(deployFixture);
+    const amount = ethers.parseEther("1");
+    await expect(
+      noblepay.connect(business1).initiatePayment(
+        recipient.address, amount, ethers.ZeroAddress, ethers.ZeroHash, AETHEL,
+        { value: amount + 1n },
+      ),
+    ).to.be.revertedWithCustomError(noblepay, "IncorrectNativeAmount");
+  });
+
+  it("rejects msg.value attached to an ERC-20 payment", async function () {
+    const { noblepay, usdc, business1, recipient } = await loadFixture(deployFixture);
+    const amount = ethers.parseUnits("100", 6);
+    await expect(
+      noblepay.connect(business1).initiatePayment(
+        recipient.address, amount, usdc.target, ethers.ZeroHash, "0x555344",
+        { value: 1n },
+      ),
+    ).to.be.revertedWithCustomError(noblepay, "IncorrectNativeAmount");
+  });
+
+  it("rejects batch native overpayment (exact escrow)", async function () {
+    const { noblepay, business1, recipient } = await loadFixture(deployFixture);
+    const amount = ethers.parseEther("1");
+    await expect(
+      noblepay.connect(business1).initiatePaymentBatch(
+        [recipient.address], [amount], [ethers.ZeroAddress], [ethers.ZeroHash], [AETHEL],
+        { value: amount * 2n },
+      ),
+    ).to.be.revertedWithCustomError(noblepay, "IncorrectNativeAmount");
+  });
+
+  it("rejects plain native transfers (no receive function)", async function () {
+    const { noblepay, admin } = await loadFixture(deployFixture);
+    await expect(
+      admin.sendTransaction({ to: noblepay.target, value: ethers.parseEther("1") }),
+    ).to.be.revert(ethers);
+  });
+});

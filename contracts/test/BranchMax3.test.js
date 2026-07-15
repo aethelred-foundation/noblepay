@@ -676,7 +676,7 @@ describe("BranchMax3", function () {
       await expect(np.connect(sender).initiatePayment(
         recipient.address, 100000000n, ethers.ZeroAddress, PURPOSE, "0x414544",
         { value: 500 }
-      )).to.be.revertedWithCustomError(np, "InsufficientPayment");
+      )).to.be.revertedWithCustomError(np, "IncorrectNativeAmount");
     });
 
     it("reverts payment with zero recipient", async function () {

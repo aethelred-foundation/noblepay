@@ -244,7 +244,7 @@ describe("NoblePay - Coverage", function () {
         [ethers.ZeroHash, ethers.ZeroHash],
         ["0x414554", "0x414554"],
         { value: amount } // only half
-      )).to.be.revertedWithCustomError(noblepay, "InsufficientPayment");
+      )).to.be.revertedWithCustomError(noblepay, "IncorrectNativeAmount");
     });
   });
 
@@ -300,9 +300,11 @@ describe("NoblePay - Coverage", function () {
   });
 
   describe("Receive Native", function () {
-    it("should accept native tokens", async function () {
+    it("rejects plain native transfers (no receive — funds would be unrecoverable)", async function () {
       const { noblepay, admin } = await loadFixture(deployFixture);
-      await admin.sendTransaction({ to: noblepay.target, value: ethers.parseEther("1") });
+      await expect(
+        admin.sendTransaction({ to: noblepay.target, value: ethers.parseEther("1") })
+      ).to.be.revert(ethers);
     });
   });
 });
