@@ -8,9 +8,9 @@
 import { useState, useCallback, useMemo } from "react";
 import {
   useReadContract,
-  useWriteContract,
   useWaitForTransactionReceipt,
 } from "wagmi";
+import { useSafeWriteContract } from "./useSafeWriteContract";
 import { parseEther, parseUnits, keccak256, encodePacked } from "viem";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { CONTRACT_ADDRESSES } from "@/config/chains";
@@ -117,7 +117,7 @@ export function usePayments(filters: PaymentFilter = {}) {
 
 export function useInitiatePayment() {
   const queryClient = useQueryClient();
-  const { writeContract, data: txHash, isPending } = useWriteContract();
+  const { writeContract, data: txHash, isPending } = useSafeWriteContract();
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
     hash: txHash,
   });

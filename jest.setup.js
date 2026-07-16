@@ -49,8 +49,10 @@ jest.mock('wagmi', () => ({
   useDisconnect: () => ({
     disconnect: jest.fn(),
   }),
+  usePublicClient: () => undefined,
   useWriteContract: () => ({
     writeContract: jest.fn(),
+    writeContractAsync: jest.fn(),
     data: undefined,
     isPending: false,
   }),

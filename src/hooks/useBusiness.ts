@@ -8,9 +8,9 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   useReadContract,
-  useWriteContract,
   useWaitForTransactionReceipt,
 } from "wagmi";
+import { useSafeWriteContract } from "./useSafeWriteContract";
 import { useAccount } from "wagmi";
 import { CONTRACT_ADDRESSES } from "@/config/chains";
 import { BUSINESS_REGISTRY_ABI } from "@/config/abis";
@@ -110,7 +110,7 @@ export function useBusinessRegistered() {
 
 export function useBusinessRegistration() {
   const queryClient = useQueryClient();
-  const { writeContract, data: txHash, isPending } = useWriteContract();
+  const { writeContract, data: txHash, isPending } = useSafeWriteContract();
   const { isLoading: isConfirming, isSuccess } = useWaitForTransactionReceipt({
     hash: txHash,
   });
