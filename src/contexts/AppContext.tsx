@@ -28,9 +28,11 @@ import {
   useSwitchChain,
   useBlockNumber,
 } from "wagmi";
+import type { Connector } from "wagmi";
 
 import { formatUnits } from "viem";
 import { activeChain } from "@/config/wagmi";
+import { orderWalletConnectors } from "@/config/wallet-picker";
 import { CONTRACT_ADDRESSES } from "@/config/chains";
 
 // ---------------------------------------------------------------------------
@@ -99,7 +101,7 @@ export interface Notification {
 export interface AppContextValue {
   // Wallet (real blockchain state)
   wallet: WalletState;
-  connectWallet: () => void;
+  connectWallet: (connector?: Connector) => void;
   disconnectWallet: () => void;
   switchNetwork: () => void;
 
@@ -264,15 +266,23 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   ]);
 
   // Connect: use the first available connector (MetaMask/injected preferred)
-  const connectWallet = useCallback(() => {
-    const injectedConnector = connectors.find(
-      (c) => c.id === "injected" || c.id === "metaMask",
-    );
-    const connector = injectedConnector || connectors[0];
-    if (connector) {
-      connect({ connector, chainId: activeChain.id });
-    }
-  }, [connect, connectors]);
+  const connectWallet = useCallback(
+    (chosen?: Connector) => {
+      // Guard against `onClick={connectWallet}`: a DOM event is not a
+      // connector, so only honor arguments that carry a connector uid.
+      const requested =
+        chosen && typeof (chosen as { uid?: unknown }).uid === "string"
+          ? chosen
+          : undefined;
+      // Explicit choice from the picker wins; otherwise fall back to the
+      // curated order (Aethelred Wallet -> MetaMask -> other -> injected).
+      const connector = requested ?? orderWalletConnectors(connectors)[0];
+      if (connector) {
+        connect({ connector, chainId: activeChain.id });
+      }
+    },
+    [connect, connectors],
+  );
 
   const disconnectWallet = useCallback(() => {
     disconnect();
