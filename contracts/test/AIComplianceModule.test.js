@@ -81,6 +81,19 @@ describe("AIComplianceModule", function () {
         .to.be.revertedWithCustomError(ai, "ModelAlreadyExists");
     });
 
+    it("does not collide on the name/version boundary (NP-01)", async function () {
+      // Under abi.encodePacked, ("ab","c") and ("a","bc") produced the same
+      // modelId, letting one registration block the other. Both must now
+      // register as distinct models.
+      const { ai, aiOp } = await loadFixture(deployFixture);
+      const hash = ethers.keccak256(ethers.toUtf8Bytes("boundary"));
+      const r1 = await (await ai.connect(aiOp).registerModel("ab", "c", hash)).wait();
+      const r2 = await (await ai.connect(aiOp).registerModel("a", "bc", hash)).wait();
+      const id1 = r1.logs.find((l) => l.fragment && l.fragment.name === "ModelRegistered").args[0];
+      const id2 = r2.logs.find((l) => l.fragment && l.fragment.name === "ModelRegistered").args[0];
+      expect(id1).to.not.equal(id2);
+    });
+
     it("should update model status", async function () {
       const { ai, aiOp, modelId } = await loadFixture(deployFixture);
       await expect(ai.connect(aiOp).updateModelStatus(modelId, 1)) // DEPRECATED

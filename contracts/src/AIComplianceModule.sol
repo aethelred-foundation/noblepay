@@ -526,7 +526,12 @@ contract AIComplianceModule is AccessControl, Pausable, ReentrancyGuard {
         string calldata _version,
         bytes32 _modelHash
     ) external onlyRole(AI_OPERATOR_ROLE) returns (bytes32 modelId) {
-        modelId = keccak256(abi.encodePacked(_name, _version, _modelHash));
+        // abi.encode (not encodePacked): both name and version are dynamic
+        // strings, and encodePacked would let ("ab","c") and ("a","bc") hash to
+        // the same modelId — an attacker could pre-register a colliding id to
+        // block a legitimate model name (DoS). abi.encode length-prefixes the
+        // dynamic fields, so distinct inputs always produce distinct ids.
+        modelId = keccak256(abi.encode(_name, _version, _modelHash));
         if (models[modelId].registeredAt != 0) revert ModelAlreadyExists();
 
         models[modelId] = AIModel({
