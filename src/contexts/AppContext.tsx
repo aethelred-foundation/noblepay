@@ -269,8 +269,35 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       (c) => c.id === "injected" || c.id === "metaMask",
     );
     const connector = injectedConnector || connectors[0];
+
+    // Browser wallets only inject their provider on secure origins (https or
+    // localhost). On plain http://<ip> there is nothing to connect to, and
+    // wagmi surfaces that as a mutation error nothing renders — the button
+    // just "does nothing". Say so instead.
+    const hasInjectedProvider =
+      typeof window !== "undefined" &&
+      (window as unknown as { ethereum?: unknown }).ethereum !== undefined;
+    if (!hasInjectedProvider) {
+      addNotificationRef.current(
+        "error",
+        "No wallet detected",
+        "No injected wallet was found on this page. Browser wallets (Aethelred Wallet, MetaMask) only inject on HTTPS or localhost — open the app through an SSH tunnel (http://localhost:<port>) or serve it behind TLS.",
+      );
+      return;
+    }
+
     if (connector) {
-      connect({ connector, chainId: activeChain.id });
+      connect(
+        { connector, chainId: activeChain.id },
+        {
+          onError: (error) =>
+            addNotificationRef.current(
+              "error",
+              "Wallet connection failed",
+              error.message,
+            ),
+        },
+      );
     }
   }, [connect, connectors]);
 

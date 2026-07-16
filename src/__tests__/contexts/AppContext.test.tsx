@@ -205,17 +205,43 @@ describe("AppContext", () => {
     expect(screen.getByTestId("usdtBalance")).toHaveTextContent("0");
   });
 
-  it("connectWallet calls wagmi connect", () => {
+  it("connectWallet calls wagmi connect when a provider is injected", () => {
+    (window as unknown as { ethereum?: unknown }).ethereum = {};
+    try {
+      render(
+        <AppProvider>
+          <TestConsumer />
+        </AppProvider>,
+      );
+
+      fireEvent.click(screen.getByTestId("connect-btn"));
+      expect(mockConnect).toHaveBeenCalledWith(
+        expect.objectContaining({ connector: expect.any(Object) }),
+        expect.objectContaining({ onError: expect.any(Function) }),
+      );
+    } finally {
+      delete (window as unknown as { ethereum?: unknown }).ethereum;
+    }
+  });
+
+  it("connectWallet surfaces a notification instead of a silent no-op without a provider", () => {
+    // Remove the injected provider (e.g. MetaMask does not inject on plain http://<ip>).
+    mockConnect.mockClear();
+    const saved = (window as unknown as { ethereum?: unknown }).ethereum;
+    delete (window as unknown as { ethereum?: unknown }).ethereum;
     render(
       <AppProvider>
         <TestConsumer />
       </AppProvider>,
     );
 
-    fireEvent.click(screen.getByTestId("connect-btn"));
-    expect(mockConnect).toHaveBeenCalledWith(
-      expect.objectContaining({ connector: expect.any(Object) }),
-    );
+    try {
+      fireEvent.click(screen.getByTestId("connect-btn"));
+      expect(mockConnect).not.toHaveBeenCalled();
+      expect(screen.getByTestId("notifCount")).not.toHaveTextContent(/^0$/);
+    } finally {
+      if (saved !== undefined) (window as unknown as { ethereum?: unknown }).ethereum = saved;
+    }
   });
 
   it("disconnectWallet calls wagmi disconnect", () => {
@@ -406,11 +432,14 @@ describe("AppContext", () => {
       </AppProvider>,
     );
 
+    (window as unknown as { ethereum?: unknown }).ethereum = {};
     fireEvent.click(screen.getByTestId("connect-btn"));
+    delete (window as unknown as { ethereum?: unknown }).ethereum;
     expect(fallbackConnect).toHaveBeenCalledWith(
       expect.objectContaining({
         connector: { id: "walletConnect", name: "WalletConnect" },
       }),
+      expect.objectContaining({ onError: expect.any(Function) }),
     );
 
     wagmi.useConnect = origConnect;

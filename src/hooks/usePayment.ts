@@ -6,7 +6,7 @@
  */
 
 import { useCallback, useEffect } from 'react';
-import { useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
+import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi';
 import { parseEther, parseUnits, keccak256, encodePacked, stringToHex, zeroAddress } from 'viem';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { CONTRACT_ADDRESSES, TOKEN_ADDRESS_KEYS } from '@/config/chains';
@@ -191,6 +191,32 @@ export function useInitiatePayment() {
     error: writeError ?? receiptError ?? null,
     reset,
   };
+}
+
+// ---------------------------------------------------------------------------
+// useNoblePayRegistered — is the connected account past the payment gate?
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads NoblePay's own registeredBusinesses mapping (the initiatePayment
+ * onlyRegistered gate — set by the admin via syncBusiness / the
+ * register-business.mjs script). Registration does NOT carry across
+ * deployments, and the node reports the resulting revert with no reason
+ * data, so the UI checks explicitly before submitting.
+ * Returns undefined while unknown (not connected / still loading).
+ */
+export function useNoblePayRegistered(): boolean | undefined {
+  const { address } = useAccount();
+  const { data } = useReadContract({
+    address: CONTRACT_ADDRESSES.noblepay as `0x${string}`,
+    abi: NOBLEPAY_ABI,
+    functionName: 'registeredBusinesses',
+    args: address ? [address] : undefined,
+    query: {
+      enabled: !!address && !!CONTRACT_ADDRESSES.noblepay,
+    },
+  });
+  return data as boolean | undefined;
 }
 
 // ---------------------------------------------------------------------------

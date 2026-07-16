@@ -12,7 +12,7 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { useAccount } from 'wagmi';
 import { SEOHead } from '@/components/SEOHead';
 import { useApp } from '@/contexts/AppContext';
-import { useInitiatePayment } from '@/hooks/usePayment';
+import { useInitiatePayment, useNoblePayRegistered } from '@/hooks/usePayment';
 import { TopNav, Footer } from '@/components/SharedComponents';
 import { GlassCard, SectionHeader } from '@/components/PagePrimitives';
 import { seededRandom, seededHex, seededAddress, formatNumber, truncateAddress } from '@/lib/utils';
@@ -599,6 +599,7 @@ function NewPaymentModal({ open, onClose }: { open: boolean; onClose: () => void
   const [showConfirm, setShowConfirm] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
   const { isConnected } = useAccount();
+  const npRegistered = useNoblePayRegistered();
   const {
     initiate,
     txHash,
@@ -666,6 +667,17 @@ function NewPaymentModal({ open, onClose }: { open: boolean; onClose: () => void
     }
     if (!isConnected) {
       setFormError('Connect your Aethelred Wallet first (button in the top navigation).');
+      return;
+    }
+    // The on-chain gate reverts NotRegisteredBusiness with no reason data the
+    // node passes through — check it here so the user gets the real cause
+    // instead of a wallet gas-estimation failure.
+    if (npRegistered === false) {
+      setFormError(
+        'This account is not registered with NoblePay, so payments would revert '
+        + '(NotRegisteredBusiness). Registration is per-deployment: ask the admin to run '
+        + 'scripts/register-business.mjs for this address against the current contract, then retry.',
+      );
       return;
     }
     try {

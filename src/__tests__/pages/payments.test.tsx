@@ -340,6 +340,24 @@ describe('PaymentsPage', () => {
     expect(screen.getByText('Confirm Payment')).toBeInTheDocument();
   });
 
+  it('blocks Confirm & Send when the account is not registered with NoblePay', () => {
+    const wagmi = jest.requireMock('wagmi');
+    wagmi.useReadContract.mockReturnValue({ data: false, isLoading: false });
+    try {
+      render(<PaymentsPage />);
+      const newPaymentBtn = screen.getAllByRole('button').find((b) => b.textContent?.includes('New Payment'));
+      fireEvent.click(newPaymentBtn!);
+      fireEvent.change(screen.getByPlaceholderText('0x…'), { target: { value: '0xab12ab12ab12ab12ab12ab12ab12ab12ab12ab12' } });
+      fireEvent.change(screen.getByPlaceholderText('0.00'), { target: { value: '500' } });
+      fireEvent.click(screen.getByText('Review Payment'));
+      fireEvent.click(screen.getByText('Confirm & Send'));
+      expect(screen.getByText(/not registered with NoblePay/)).toBeInTheDocument();
+      expect(screen.getByText(/register-business\.mjs/)).toBeInTheDocument();
+    } finally {
+      wagmi.useReadContract.mockReturnValue({ data: undefined, isLoading: false });
+    }
+  });
+
   it('rejects an invalid recipient address with an inline error', () => {
     render(<PaymentsPage />);
     const newPaymentBtn = screen.getAllByRole('button').find((b) => b.textContent?.includes('New Payment'));

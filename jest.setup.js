@@ -61,10 +61,10 @@ jest.mock('wagmi', () => ({
     isSuccess: false,
     error: null,
   }),
-  useReadContract: () => ({
+  useReadContract: jest.fn(() => ({
     data: undefined,
     isLoading: false,
-  }),
+  })),
   useChainId: () => 1,
   useBalance: () => ({
     data: { formatted: '1.0', symbol: 'ETH' },
