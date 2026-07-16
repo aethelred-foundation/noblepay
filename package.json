@@ -1,7 +1,7 @@
 {
   "name": "@aethelred/noblepay",
   "version": "1.0.0",
-  "description": "NoblePay — Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
+  "description": "NoblePay \u2014 Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
   "private": true,
   "scripts": {
     "dev": "next dev -p ${PORT:-3002}",
@@ -29,7 +29,8 @@
     "validate:gateway": "cd services/gateway && go vet ./... && go test ./...",
     "validate:compliance": "cd crates/noblepay-compliance && cargo check && cargo test && cargo test --features mock-tee",
     "validate:security": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx jest --runInBand --forceExit --detectOpenHandles src/__tests__/security/exploit-simulations.test.ts",
-    "validate:all": "npm run validate:frontend && npm run validate:backend && npm run validate:contracts && npm run validate:gateway && npm run validate:compliance && npm run validate:security",
+    "validate:ecosystem": "cd packages/ecosystem-contracts && npx tsc --noEmit && npx jest",
+    "validate:all": "npm run validate:frontend && npm run validate:backend && npm run validate:contracts && npm run validate:gateway && npm run validate:compliance && npm run validate:security && npm run validate:ecosystem",
     "prerelease": "npm run validate:all"
   },
   "dependencies": {
@@ -101,6 +102,7 @@
   },
   "overrides": {
     "serialize-javascript": ">=7.0.3",
-    "@tootallnate/once": ">=3.0.1"
+    "@tootallnate/once": ">=3.0.1",
+    "ws": "^8.21.1"
   }
 }
