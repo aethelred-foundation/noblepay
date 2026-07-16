@@ -31,7 +31,8 @@
     "validate:security": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx jest --runInBand --forceExit --detectOpenHandles src/__tests__/security/exploit-simulations.test.ts",
     "validate:ecosystem": "cd packages/ecosystem-contracts && npx tsc --noEmit && npx jest",
     "validate:all": "npm run validate:frontend && npm run validate:backend && npm run validate:contracts && npm run validate:gateway && npm run validate:compliance && npm run validate:security && npm run validate:ecosystem",
-    "prerelease": "npm run validate:all"
+    "prerelease": "npm run validate:all",
+    "check:boundary": "node scripts/check-conformance-boundary.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
