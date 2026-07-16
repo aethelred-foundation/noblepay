@@ -43,11 +43,16 @@ jest.mock('wagmi', () => ({
   }),
   useConnect: () => ({
     connect: jest.fn(),
-    connectors: [],
+    connectAsync: jest.fn(async () => ({})),
+    connectors: [{ id: 'injected', name: 'MetaMask' }],
     isPending: false,
   }),
   useDisconnect: () => ({
     disconnect: jest.fn(),
+    disconnectAsync: jest.fn(async () => {}),
+  }),
+  useReconnect: () => ({
+    reconnectAsync: jest.fn(async () => []),
   }),
   useWriteContract: () => ({
     writeContract: jest.fn(),
