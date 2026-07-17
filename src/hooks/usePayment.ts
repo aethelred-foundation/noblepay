@@ -13,7 +13,7 @@ import {
 import { useSafeWriteContract } from "./useSafeWriteContract";
 import { parseEther, parseUnits, keccak256, encodePacked } from "viem";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { CONTRACT_ADDRESSES } from "@/config/chains";
+import { CONTRACT_ADDRESSES, TOKEN_ADDRESS_KEYS } from "@/config/chains";
 import { NOBLEPAY_ABI } from "@/config/abis";
 
 // ---------------------------------------------------------------------------
@@ -128,10 +128,22 @@ export function useInitiatePayment() {
         encodePacked(["string"], [params.purposeHash]),
       );
 
-      const amount =
-        params.currency === "AETHEL"
-          ? parseEther(params.amount)
-          : parseUnits(params.amount, 6); // USDC/USDT use 6 decimals
+      const isNative = params.currency === "AETHEL";
+      const amount = isNative
+        ? parseEther(params.amount)
+        : parseUnits(params.amount, 6); // USDC/USDT use 6 decimals
+
+      // address(0) = native AETHEL, escrowed via msg.value; ERC-20 payments
+      // pull via transferFrom from the token registered for the currency.
+      const tokenKey = TOKEN_ADDRESS_KEYS[params.currency];
+      const token = isNative
+        ? "0x0000000000000000000000000000000000000000"
+        : (CONTRACT_ADDRESSES[tokenKey] as `0x${string}`);
+
+      // bytes3 ISO-ish currency tag (AET / USD / ...), as the contract stores.
+      const currencyCode = `0x${[...params.currency.slice(0, 3).toUpperCase()]
+        .map((c) => c.charCodeAt(0).toString(16).padStart(2, "0"))
+        .join("")}` as `0x${string}`;
 
       writeContract({
         address: CONTRACT_ADDRESSES.noblepay as `0x${string}`,
@@ -140,10 +152,11 @@ export function useInitiatePayment() {
         args: [
           params.recipient as `0x${string}`,
           amount,
+          token as `0x${string}`,
           purposeHash,
-          "0x4145" as `0x${string}`,
-          "0x" as `0x${string}`,
+          currencyCode,
         ],
+        value: isNative ? amount : 0n,
       });
     },
     [writeContract],

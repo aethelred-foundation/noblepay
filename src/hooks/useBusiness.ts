@@ -91,17 +91,23 @@ export function useBusinessProfile() {
 export function useBusinessRegistered() {
   const { address } = useAccount();
 
-  const { data: isRegistered } = useReadContract({
+  // The registry exposes no isBusinessRegistered(); the source of truth is
+  // the public businesses(address) record — registeredAt != 0 once enrolled.
+  const { data, refetch } = useReadContract({
     address: CONTRACT_ADDRESSES.businessRegistry as `0x${string}`,
     abi: BUSINESS_REGISTRY_ABI,
-    functionName: "isBusinessRegistered",
+    functionName: "businesses",
     args: address ? [address] : undefined,
     query: {
       enabled: !!address && !!CONTRACT_ADDRESSES.businessRegistry,
     },
   });
 
-  return isRegistered as boolean | undefined;
+  const registeredAt = Array.isArray(data) ? (data[6] as bigint) : undefined;
+  return {
+    isRegistered: registeredAt === undefined ? undefined : registeredAt !== 0n,
+    refetch,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -116,14 +122,19 @@ export function useBusinessRegistration() {
   });
 
   const register = (params: BusinessRegistrationParams) => {
+    // On-chain jurisdiction is the coarse enum (UAE=0, INTERNATIONAL=1);
+    // the specific emirate travels with the off-chain profile below.
+    const jurisdictionEnum = params.jurisdiction === "International" ? 1 : 0;
+
     writeContract({
       address: CONTRACT_ADDRESSES.businessRegistry as `0x${string}`,
       abi: BUSINESS_REGISTRY_ABI,
       functionName: "registerBusiness",
       args: [
         params.licenseNumber,
-        "0x4145" as `0x${string}`,
-        "0x0000000000000000000000000000000000000000000000000000000000000000" as `0x${string}`,
+        params.businessName,
+        jurisdictionEnum,
+        params.complianceOfficer as `0x${string}`,
       ],
     });
 

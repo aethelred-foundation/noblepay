@@ -457,11 +457,11 @@ describe("PaymentsPage", () => {
     fireEvent.click(newPaymentBtn!);
     // Modal should show form
     expect(screen.getByText("Recipient Address")).toBeInTheDocument();
-    expect(screen.getByPlaceholderText("aeth1...")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("0x…")).toBeInTheDocument();
     expect(screen.getByPlaceholderText("0.00")).toBeInTheDocument();
     // Fill in form
-    fireEvent.change(screen.getByPlaceholderText("aeth1..."), {
-      target: { value: "aeth1abc123" },
+    fireEvent.change(screen.getByPlaceholderText("0x…"), {
+      target: { value: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" },
     });
     fireEvent.change(screen.getByPlaceholderText("0.00"), {
       target: { value: "1000" },
@@ -475,8 +475,8 @@ describe("PaymentsPage", () => {
       .find((b) => b.textContent?.includes("New Payment"));
     fireEvent.click(newPaymentBtn!);
     // Fill form
-    fireEvent.change(screen.getByPlaceholderText("aeth1..."), {
-      target: { value: "aeth1abc123" },
+    fireEvent.change(screen.getByPlaceholderText("0x…"), {
+      target: { value: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" },
     });
     fireEvent.change(screen.getByPlaceholderText("0.00"), {
       target: { value: "500" },
@@ -496,8 +496,8 @@ describe("PaymentsPage", () => {
       .getAllByRole("button")
       .find((b) => b.textContent?.includes("New Payment"));
     fireEvent.click(newPaymentBtn!);
-    fireEvent.change(screen.getByPlaceholderText("aeth1..."), {
-      target: { value: "aeth1abc123" },
+    fireEvent.change(screen.getByPlaceholderText("0x…"), {
+      target: { value: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" },
     });
     fireEvent.change(screen.getByPlaceholderText("0.00"), {
       target: { value: "500" },
@@ -506,25 +506,26 @@ describe("PaymentsPage", () => {
     // Click Back
     fireEvent.click(screen.getByText("Back"));
     // Should be back on form
-    expect(screen.getByPlaceholderText("aeth1...")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText("0x…")).toBeInTheDocument();
   });
 
-  it("new payment modal confirm & send closes modal", () => {
+  it("new payment modal confirm & send submits the on-chain payment", () => {
     render(<PaymentsPage />);
     const newPaymentBtn = screen
       .getAllByRole("button")
       .find((b) => b.textContent?.includes("New Payment"));
     fireEvent.click(newPaymentBtn!);
-    fireEvent.change(screen.getByPlaceholderText("aeth1..."), {
-      target: { value: "aeth1abc123" },
+    fireEvent.change(screen.getByPlaceholderText("0x…"), {
+      target: { value: "0x90F79bf6EB2c4f870365E785982E1f101E93b906" },
     });
     fireEvent.change(screen.getByPlaceholderText("0.00"), {
       target: { value: "500" },
     });
     fireEvent.click(screen.getByText("Initiate Payment"));
     fireEvent.click(screen.getByText("Confirm & Send"));
-    // Modal should close
-    expect(screen.queryByText("Confirm Payment")).not.toBeInTheDocument();
+    // The confirm step submits the payment and stays open while the
+    // transaction is pending — it must NOT silently discard the form.
+    expect(screen.getByText("Confirm Payment")).toBeInTheDocument();
   });
 
   it("new payment modal currency select works", () => {

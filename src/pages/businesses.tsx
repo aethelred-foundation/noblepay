@@ -68,6 +68,10 @@ import {
   formatNumber,
   truncateAddress,
 } from "@/lib/utils";
+import {
+  useBusinessRegistration,
+  useBusinessRegistered,
+} from "@/hooks/useBusiness";
 import { BRAND } from "@/lib/constants";
 
 // =============================================================================
@@ -522,6 +526,48 @@ export default function BusinessRegistryPage() {
   const [showRegistrationModal, setShowRegistrationModal] = useState(false);
   const [showDetailPanel, setShowDetailPanel] = useState(false);
   const pageSize = 10;
+
+  // On-chain registration form state + mutation (BusinessRegistry).
+  const [regLicense, setRegLicense] = useState("");
+  const [regName, setRegName] = useState("");
+  const [regEmirate, setRegEmirate] = useState("");
+  const [regType, setRegType] = useState("");
+  const [regOfficer, setRegOfficer] = useState("");
+  const [regError, setRegError] = useState<string | null>(null);
+  const {
+    register: registerBusiness,
+    txHash: regTxHash,
+    isPending: regPending,
+    isConfirming: regConfirming,
+    isSuccess: regSuccess,
+  } = useBusinessRegistration();
+  const { isRegistered, refetch: refetchRegistered } = useBusinessRegistered();
+
+  useEffect(() => {
+    if (regSuccess) {
+      void refetchRegistered();
+    }
+  }, [regSuccess, refetchRegistered]);
+
+  const submitRegistration = () => {
+    setRegError(null);
+    if (!wallet.connected) {
+      setRegError("Connect a wallet before registering.");
+      return;
+    }
+    if (!/^0x[a-fA-F0-9]{40}$/.test(regOfficer.trim())) {
+      setRegError("Compliance officer must be a valid 0x… EVM address.");
+      return;
+    }
+    registerBusiness({
+      licenseNumber: regLicense.trim(),
+      businessName: regName.trim(),
+      jurisdiction: regEmirate,
+      businessType: regType,
+      complianceOfficer: regOfficer.trim(),
+      contactEmail: "",
+    });
+  };
 
   useEffect(() => setMounted(true), []);
 
@@ -1404,7 +1450,7 @@ export default function BusinessRegistryPage() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                setShowRegistrationModal(false);
+                submitRegistration();
               }}
               className="space-y-4"
             >
@@ -1417,6 +1463,8 @@ export default function BusinessRegistryPage() {
                   placeholder="e.g., CN-1234567 or DED-2023-445566"
                   pattern="[A-Z]{2,5}-\d{4,10}(-\d{2,6})?"
                   required
+                  value={regLicense}
+                  onChange={(e) => setRegLicense(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
                 />
                 <p className="text-[10px] text-slate-600 mt-1">
@@ -1432,6 +1480,8 @@ export default function BusinessRegistryPage() {
                   type="text"
                   placeholder="Full registered business name"
                   required
+                  value={regName}
+                  onChange={(e) => setRegName(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
                 />
               </div>
@@ -1443,6 +1493,8 @@ export default function BusinessRegistryPage() {
                   </label>
                   <select
                     required
+                    value={regEmirate}
+                    onChange={(e) => setRegEmirate(e.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-red-500/50 focus:outline-none"
                   >
                     <option value="">Select Emirate</option>
@@ -1459,6 +1511,8 @@ export default function BusinessRegistryPage() {
                   </label>
                   <select
                     required
+                    value={regType}
+                    onChange={(e) => setRegType(e.target.value)}
                     className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white focus:border-red-500/50 focus:outline-none"
                   >
                     <option value="">Select Type</option>
@@ -1477,9 +1531,12 @@ export default function BusinessRegistryPage() {
                 </label>
                 <input
                   type="text"
-                  placeholder="aeth1..."
+                  placeholder="0x…"
                   required
-                  pattern="aeth1[a-z0-9]{38}"
+                  pattern="0x[a-fA-F0-9]{40}"
+                  title="EVM address of the designated compliance officer"
+                  value={regOfficer}
+                  onChange={(e) => setRegOfficer(e.target.value)}
                   className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white font-mono placeholder-slate-600 focus:border-red-500/50 focus:outline-none focus:ring-1 focus:ring-red-500/30"
                 />
               </div>
@@ -1528,19 +1585,40 @@ export default function BusinessRegistryPage() {
                 </label>
               </div>
 
+              {regError && (
+                <p className="text-xs text-red-400" role="alert">
+                  {regError}
+                </p>
+              )}
+              {regSuccess && (
+                <p className="text-xs text-emerald-400" role="status">
+                  Business registered on-chain
+                  {regTxHash
+                    ? ` — tx ${regTxHash.slice(0, 10)}…${regTxHash.slice(-6)}`
+                    : ""}
+                  .
+                </p>
+              )}
               <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
                   onClick={() => setShowRegistrationModal(false)}
                   className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-400 hover:bg-slate-800 transition-colors"
                 >
-                  Cancel
+                  {regSuccess ? "Close" : "Cancel"}
                 </button>
                 <button
                   type="submit"
-                  className="rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
+                  disabled={regPending || regConfirming || isRegistered === true}
+                  className="rounded-lg bg-red-600 px-5 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Submit Registration
+                  {isRegistered === true
+                    ? "Already Registered"
+                    : regPending
+                      ? "Confirm in Wallet…"
+                      : regConfirming
+                        ? "Confirming…"
+                        : "Submit Registration"}
                 </button>
               </div>
             </form>

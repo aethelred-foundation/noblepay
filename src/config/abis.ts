@@ -68,15 +68,17 @@ export const NOBLEPAY_ABI = [
 
   // --- Write Functions ---
   {
+    // Mirrors NoblePay.initiatePayment(address,uint256,address,bytes32,bytes3)
+    // — payable, since native AETHEL payments escrow msg.value.
     name: "initiatePayment",
     type: "function",
-    stateMutability: "nonpayable",
+    stateMutability: "payable",
     inputs: [
-      { name: "recipient", type: "address" },
-      { name: "amount", type: "uint256" },
-      { name: "token", type: "address" },
-      { name: "recipientJurisdiction", type: "bytes2" },
-      { name: "memo", type: "bytes" },
+      { name: "_recipient", type: "address" },
+      { name: "_amount", type: "uint256" },
+      { name: "_token", type: "address" },
+      { name: "_purposeHash", type: "bytes32" },
+      { name: "_currencyCode", type: "bytes3" },
     ],
     outputs: [{ name: "paymentId", type: "bytes32" }],
   },
@@ -235,11 +237,24 @@ export const BUSINESS_REGISTRY_ABI = [
     ],
   },
   {
-    name: "isBusinessRegistered",
+    // Public mapping getter — the deployed BusinessRegistry has no
+    // isBusinessRegistered(); registration state is businesses(addr)
+    // .registeredAt != 0.
+    name: "businesses",
     type: "function",
     stateMutability: "view",
-    inputs: [{ name: "business", type: "address" }],
-    outputs: [{ name: "", type: "bool" }],
+    inputs: [{ name: "", type: "address" }],
+    outputs: [
+      { name: "wallet", type: "address" },
+      { name: "licenseNumber", type: "string" },
+      { name: "businessName", type: "string" },
+      { name: "jurisdiction", type: "uint8" },
+      { name: "kycStatus", type: "uint8" },
+      { name: "tier", type: "uint8" },
+      { name: "registeredAt", type: "uint256" },
+      { name: "lastVerified", type: "uint256" },
+      { name: "complianceOfficer", type: "address" },
+    ],
   },
   {
     name: "getBusinessTier",
@@ -251,13 +266,17 @@ export const BUSINESS_REGISTRY_ABI = [
 
   // --- Write Functions ---
   {
+    // Mirrors BusinessRegistry.registerBusiness(string,string,Jurisdiction,
+    // address) — the previous (string,bytes2,bytes32) shape predated the
+    // deployed contract and mis-encoded every registration.
     name: "registerBusiness",
     type: "function",
     stateMutability: "nonpayable",
     inputs: [
-      { name: "name", type: "string" },
-      { name: "jurisdiction", type: "bytes2" },
-      { name: "kycDocumentHash", type: "bytes32" },
+      { name: "_licenseNumber", type: "string" },
+      { name: "_businessName", type: "string" },
+      { name: "_jurisdiction", type: "uint8" },
+      { name: "_complianceOfficer", type: "address" },
     ],
     outputs: [],
   },

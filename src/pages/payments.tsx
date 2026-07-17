@@ -11,6 +11,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { SEOHead } from "@/components/SEOHead";
 import { useApp } from "@/contexts/AppContext";
+import { useInitiatePayment } from "@/hooks/usePayment";
 import { TopNav, Footer } from "@/components/SharedComponents";
 import { GlassCard, SectionHeader } from "@/components/PagePrimitives";
 import {
@@ -902,9 +903,17 @@ function NewPaymentModal({
 }) {
   const [recipientAddress, setRecipientAddress] = useState("");
   const [amount, setAmount] = useState("");
-  const [currency, setCurrency] = useState<Currency>("USDC");
+  const [currency, setCurrency] = useState<Currency>("AETHEL");
   const [purposeCode, setPurposeCode] = useState(PURPOSE_CODES[0]);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
+  const {
+    initiate,
+    txHash,
+    isPending,
+    isConfirming,
+    isSuccess,
+  } = useInitiatePayment();
 
   useEffect(() => {
     if (open) {
@@ -924,16 +933,26 @@ function NewPaymentModal({
   }, [amount]);
 
   const handleSubmit = () => {
-    if (showConfirm) {
-      onClose();
-      setRecipientAddress("");
-      setAmount("");
-      setCurrency("USDC");
-      setPurposeCode(PURPOSE_CODES[0]);
-      setShowConfirm(false);
-    } else {
+    setFormError(null);
+    if (!showConfirm) {
+      if (!/^0x[a-fA-F0-9]{40}$/.test(recipientAddress.trim())) {
+        setFormError("Recipient must be a valid 0x… EVM address.");
+        return;
+      }
+      if (!(parseFloat(amount) > 0)) {
+        setFormError("Enter a positive amount.");
+        return;
+      }
       setShowConfirm(true);
+      return;
     }
+    // Confirm step: submit the on-chain payment (escrowed by NoblePay).
+    initiate({
+      recipient: recipientAddress.trim(),
+      amount,
+      currency,
+      purposeHash: purposeCode,
+    });
   };
 
   if (!open) return null;
@@ -979,7 +998,7 @@ function NewPaymentModal({
                     type="text"
                     value={recipientAddress}
                     onChange={(e) => setRecipientAddress(e.target.value)}
-                    placeholder="aeth1..."
+                    placeholder="0x…"
                     className="w-full px-4 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-white placeholder-slate-600 text-sm focus:border-red-500 focus:ring-1 focus:ring-red-500/50 outline-none transition-colors"
                   />
                 </div>
@@ -1125,23 +1144,55 @@ function NewPaymentModal({
               </div>
             )}
 
-            {/* Action Buttons */}
+            {/* Status + Action Buttons */}
+            {formError && (
+              <p className="text-xs text-red-400" role="alert">
+                {formError}
+              </p>
+            )}
+            {isSuccess && (
+              <p className="text-xs text-emerald-400" role="status">
+                Payment escrowed on-chain
+                {txHash
+                  ? ` — tx ${txHash.slice(0, 10)}…${txHash.slice(-6)}`
+                  : ""}
+                .
+              </p>
+            )}
             <div className="flex gap-3 pt-2">
-              {showConfirm && (
+              {showConfirm && !isSuccess && (
                 <button
                   onClick={() => setShowConfirm(false)}
-                  className="flex-1 py-2.5 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:border-slate-500 transition-colors"
+                  disabled={isPending || isConfirming}
+                  className="flex-1 py-2.5 rounded-lg border border-slate-600 text-slate-300 text-sm font-medium hover:border-slate-500 transition-colors disabled:opacity-50"
                 >
                   Back
                 </button>
               )}
-              <button
-                onClick={handleSubmit}
-                disabled={!recipientAddress || !amount}
-                className="flex-1 py-2.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {showConfirm ? "Confirm & Send" : "Initiate Payment"}
-              </button>
+              {isSuccess ? (
+                <button
+                  onClick={onClose}
+                  className="flex-1 py-2.5 rounded-lg bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700 transition-colors"
+                >
+                  Done
+                </button>
+              ) : (
+                <button
+                  onClick={handleSubmit}
+                  disabled={
+                    !recipientAddress || !amount || isPending || isConfirming
+                  }
+                  className="flex-1 py-2.5 rounded-lg bg-red-600 text-white text-sm font-medium hover:bg-red-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {isPending
+                    ? "Confirm in Wallet…"
+                    : isConfirming
+                      ? "Confirming…"
+                      : showConfirm
+                        ? "Confirm & Send"
+                        : "Initiate Payment"}
+                </button>
+              )}
             </div>
           </div>
         </div>

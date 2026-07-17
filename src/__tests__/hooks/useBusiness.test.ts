@@ -88,11 +88,13 @@ describe("useBusinessProfile", () => {
 });
 
 describe("useBusinessRegistered", () => {
-  it("returns undefined when contract data is not available", () => {
+  it("reports unknown registration state while contract data is unavailable", () => {
     const { result } = renderHook(() => useBusinessRegistered());
 
-    // useReadContract returns { data: undefined } in the mock
-    expect(result.current).toBeUndefined();
+    // useReadContract returns { data: undefined } in the mock — the hook
+    // reads the businesses(address) record and derives registeredAt != 0,
+    // so with no data the state is unknown (undefined), not false.
+    expect(result.current.isRegistered).toBeUndefined();
   });
 
   it("handles missing address gracefully", () => {
@@ -105,7 +107,7 @@ describe("useBusinessRegistered", () => {
     });
 
     const { result } = renderHook(() => useBusinessRegistered());
-    expect(result.current).toBeUndefined();
+    expect(result.current.isRegistered).toBeUndefined();
 
     wagmi.useAccount = origAccount;
   });
