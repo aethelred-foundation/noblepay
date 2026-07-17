@@ -1,0 +1,35 @@
+# NoblePay frontend — systemd unit (testnet standalone deployment)
+#
+# NOTE: NEXT_PUBLIC_* variables are baked in at BUILD time — rebuild with the
+# correct values before (re)starting this service:
+#   NEXT_PUBLIC_CHAIN_ENV=testnet \
+#   NEXT_PUBLIC_AETHELRED_TESTNET_RPC_URL=http://<node>:8545 \
+#   NEXT_PUBLIC_NOBLEPAY_ADDRESS=0x<deployed> npm run build
+#
+# Install:
+#   1. Adjust User/WorkingDirectory below (run `which npm` as the service
+#      user — nvm installs need the bash -lc wrapper kept).
+#   2. sudo cp deploy/systemd/noblepay.service /etc/systemd/system/
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now noblepay
+#   Logs: journalctl -u noblepay -f
+
+[Unit]
+Description=NoblePay frontend (Next.js standalone)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=administrator
+WorkingDirectory=/home/administrator/noblepay
+Environment=NODE_ENV=production
+Environment=PORT=3000
+ExecStart=/bin/bash -lc 'npm run start:standalone'
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

@@ -496,13 +496,20 @@ describe("TopNav", () => {
     expect(screen.getByText("NoblePay")).toBeInTheDocument();
   });
 
-  it("renders navigation links", () => {
+  it("renders the primary navigation links with the rest under More", () => {
     render(<TopNav />);
     expect(screen.getByText("Dashboard")).toBeInTheDocument();
     expect(screen.getByText("Payments")).toBeInTheDocument();
     expect(screen.getByText("Compliance")).toBeInTheDocument();
     expect(screen.getByText("Businesses")).toBeInTheDocument();
+    // Secondary destinations are condensed into the More dropdown.
+    expect(screen.queryByText("Treasury")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /more/i }));
     expect(screen.getByText("Treasury")).toBeInTheDocument();
+    expect(screen.getByText("Cross-Chain")).toBeInTheDocument();
+    // Selecting an item closes the menu.
+    fireEvent.click(screen.getByText("Treasury"));
+    expect(screen.queryByText("Cross-Chain")).not.toBeInTheDocument();
   });
 
   it("renders Connect Wallet button when disconnected", () => {

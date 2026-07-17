@@ -400,13 +400,19 @@ export function SearchOverlay() {
 // TopNav
 // ============================================================================
 
-const NAV_LINKS = [
+// Primary destinations stay visible; everything else lives under "More"
+// (mirrors Shiora's nav — 16 flat links overflowed the bar on smaller
+// viewports and buried the core payment flows).
+const PRIMARY_NAV_LINKS = [
   { href: "/", label: "Dashboard" },
   { href: "/payments", label: "Payments" },
   { href: "/compliance", label: "Compliance" },
   { href: "/businesses", label: "Businesses" },
   { href: "/analytics", label: "Analytics" },
   { href: "/audit", label: "Audit" },
+];
+
+const MORE_NAV_LINKS = [
   { href: "/treasury", label: "Treasury" },
   { href: "/liquidity", label: "Liquidity" },
   { href: "/streaming", label: "Streaming" },
@@ -423,6 +429,21 @@ export function TopNav({ activePage }: { activePage?: string }) {
   const router = useRouter();
   const { wallet, connectWallet, disconnectWallet } = useApp();
   const currentPath = activePage || router.pathname;
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setMoreOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    return () => document.removeEventListener("mousedown", onPointerDown);
+  }, [moreOpen]);
+
+  const moreActive = MORE_NAV_LINKS.some((link) => currentPath === link.href);
 
   return (
     <nav className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl">
@@ -436,7 +457,7 @@ export function TopNav({ activePage }: { activePage?: string }) {
             NoblePay
           </Link>
           <div className="hidden md:flex items-center gap-1">
-            {NAV_LINKS.map((link) => {
+            {PRIMARY_NAV_LINKS.map((link) => {
               const isActive =
                 currentPath === link.href ||
                 currentPath === link.label.toLowerCase();
@@ -454,6 +475,48 @@ export function TopNav({ activePage }: { activePage?: string }) {
                 </Link>
               );
             })}
+            <div className="relative" ref={moreRef}>
+              <button
+                onClick={() => setMoreOpen((v) => !v)}
+                aria-expanded={moreOpen}
+                aria-haspopup="menu"
+                className={`inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+                  moreActive || moreOpen
+                    ? "bg-slate-800 text-white"
+                    : "text-slate-400 hover:text-white hover:bg-slate-800/50"
+                }`}
+              >
+                More
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${moreOpen ? "rotate-180" : ""}`}
+                />
+              </button>
+              {moreOpen && (
+                <div
+                  role="menu"
+                  className="absolute left-0 top-full mt-2 w-56 rounded-xl border border-slate-700/60 bg-slate-900 py-2 shadow-2xl"
+                >
+                  {MORE_NAV_LINKS.map((link) => {
+                    const isActive = currentPath === link.href;
+                    return (
+                      <Link
+                        key={link.href}
+                        href={link.href}
+                        role="menuitem"
+                        onClick={() => setMoreOpen(false)}
+                        className={`block px-4 py-2 text-sm transition-colors ${
+                          isActive
+                            ? "bg-slate-800 text-white"
+                            : "text-slate-300 hover:bg-slate-800/60 hover:text-white"
+                        }`}
+                      >
+                        {link.label}
+                      </Link>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-3">
