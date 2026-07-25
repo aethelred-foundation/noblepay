@@ -236,7 +236,7 @@ jobs:
           cache-dependency-path: package-lock.json
 
       - name: Install dependencies
-        run: npm ci --legacy-peer-deps
+        run: npm ci
 
       - name: Audit complete dependency graph
         run: npx --no-install audit-ci --config audit-ci.jsonc

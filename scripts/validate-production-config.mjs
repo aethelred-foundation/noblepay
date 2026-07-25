@@ -456,6 +456,11 @@ assert.match(
 );
 assert.match(frontendDockerfile, /EXPOSE 3008/u);
 assert.doesNotMatch(
+  `${frontendDockerfile}\n${ciWorkflow}`,
+  /legacy-peer-deps/u,
+  "Frontend clean installs must resolve and install the reviewed peer graph",
+);
+assert.doesNotMatch(
   `${frontendDockerfile}\n${backendDockerfile}`,
   /FROM node:(?:20|22)[.]/u,
   "Production Node images must not use an EOL or superseded runtime line",

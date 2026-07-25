@@ -56,7 +56,7 @@ Frontend:
 
 ```bash
 cp .env.example .env.local
-npm ci --legacy-peer-deps
+npm ci
 npm run dev
 ```
 
@@ -82,7 +82,7 @@ Do not use zero addresses or development secrets. The frontend and API must use 
 Frontend on port `3008`:
 
 ```bash
-npm ci --legacy-peer-deps
+npm ci
 npm run build
 NODE_ENV=production PORT=3008 npm run start
 ```

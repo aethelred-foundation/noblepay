@@ -2,7 +2,7 @@ FROM node:24.18.0-bookworm-slim AS dependencies
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps --ignore-scripts
+RUN npm ci --ignore-scripts
 
 FROM dependencies AS build
 ARG NEXT_PUBLIC_CHAIN_ENV
