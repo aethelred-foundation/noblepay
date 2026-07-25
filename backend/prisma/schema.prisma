@@ -310,8 +310,11 @@ model TravelRuleRecord {
 // Quarantined incident evidence retained by migration. @@ignore keeps this
 // untrusted legacy table out of the generated application client.
 model LegacyTEENodeUntrusted {
-  id               String              @id @default(uuid())
-  address          String              @unique
+  // PostgreSQL retains constraint/index names when a table is renamed. Keep
+  // Prisma aligned with the quarantining migration so drift checks do not
+  // propose renaming historical evidence indexes.
+  id               String              @id(map: "tee_nodes_pkey") @default(uuid())
+  address          String              @unique(map: "tee_nodes_address_key")
   status           LegacyTEENodeStatus @default(ACTIVE)
   lastHeartbeat    DateTime?           @map("last_heartbeat")
   attestationValid Boolean             @default(false) @map("attestation_valid")
