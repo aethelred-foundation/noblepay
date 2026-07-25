@@ -1,6 +1,7 @@
 import React from "react";
 import { render } from "@testing-library/react";
 import { SEOHead } from "@/components/SEOHead";
+import { PUBLIC_SITE_URL } from "@/config/site";
 
 // next/head is already mocked in jest.setup.js to render children as fragments
 
@@ -36,7 +37,7 @@ describe("SEOHead", () => {
     );
 
     const canonical = container.querySelector('link[rel="canonical"]');
-    expect(canonical).toHaveAttribute("href", "http://localhost:3008/payments");
+    expect(canonical).toHaveAttribute("href", `${PUBLIC_SITE_URL}/payments`);
   });
 
   it("renders canonical URL without path (defaults to root)", () => {
@@ -45,7 +46,7 @@ describe("SEOHead", () => {
     );
 
     const canonical = container.querySelector('link[rel="canonical"]');
-    expect(canonical).toHaveAttribute("href", "http://localhost:3008");
+    expect(canonical).toHaveAttribute("href", PUBLIC_SITE_URL);
   });
 
   it("renders OpenGraph title", () => {
@@ -86,7 +87,7 @@ describe("SEOHead", () => {
     const ogImage = container.querySelector('meta[property="og:image"]');
     expect(ogImage).toHaveAttribute(
       "content",
-      "http://localhost:3008/og-image.svg",
+      `${PUBLIC_SITE_URL}/og-image.svg`,
     );
   });
 
@@ -96,10 +97,7 @@ describe("SEOHead", () => {
     );
 
     const ogUrl = container.querySelector('meta[property="og:url"]');
-    expect(ogUrl).toHaveAttribute(
-      "content",
-      "http://localhost:3008/compliance",
-    );
+    expect(ogUrl).toHaveAttribute("content", `${PUBLIC_SITE_URL}/compliance`);
   });
 
   it("renders Twitter card meta tags", () => {
@@ -121,7 +119,7 @@ describe("SEOHead", () => {
     const twitterImage = container.querySelector('meta[name="twitter:image"]');
     expect(twitterImage).toHaveAttribute(
       "content",
-      "http://localhost:3008/og-image.svg",
+      `${PUBLIC_SITE_URL}/og-image.svg`,
     );
   });
 });

@@ -37,6 +37,9 @@ export function collectProductionEnvErrors(
   const errors: string[] = [];
   if (!secretIsStrong(env.JWT_SECRET))
     errors.push("JWT_SECRET must be at least 32 bytes");
+  if (!secretIsStrong(env.API_KEY_HASH_SECRET)) {
+    errors.push("API_KEY_HASH_SECRET must be at least 32 bytes");
+  }
   if (!secretIsStrong(env.COMPLIANCE_API_KEY)) {
     errors.push("COMPLIANCE_API_KEY must be at least 32 bytes");
   }

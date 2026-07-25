@@ -1,7 +1,6 @@
 package handlers
 
 import (
-	"crypto/sha256"
 	"crypto/subtle"
 	"net"
 	"net/http"
@@ -42,12 +41,12 @@ func (sw *statusWriter) WriteHeader(code int) {
 // APIKeyAuth is a middleware that requires a valid API key header. An empty
 // configured key never grants access, including in tests.
 func APIKeyAuth(apiKey string) func(http.Handler) http.Handler {
-	expected := sha256.Sum256([]byte(apiKey))
+	expected := []byte(apiKey)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get("X-API-Key")
-			actual := sha256.Sum256([]byte(key))
-			if apiKey == "" || key == "" || subtle.ConstantTimeCompare(actual[:], expected[:]) != 1 {
+			actual := []byte(key)
+			if apiKey == "" || key == "" || len(actual) != len(expected) || subtle.ConstantTimeCompare(actual, expected) != 1 {
 				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 				return
 			}

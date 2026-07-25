@@ -4,7 +4,7 @@
 -- are introduced.
 
 ALTER TABLE "wallet_challenges"
-ADD COLUMN "travel_rule_payment_id" UUID,
+ADD COLUMN "travel_rule_payment_id" TEXT,
 ADD COLUMN "travel_rule_commitment" TEXT;
 
 CREATE INDEX "wallet_challenges_travel_rule_payment_id_idx"
@@ -27,8 +27,8 @@ ADD COLUMN "authentication_tag" BYTEA NOT NULL,
 ADD COLUMN "encryption_key_id" TEXT NOT NULL,
 ADD COLUMN "authorized_by" TEXT NOT NULL,
 ADD COLUMN "authorization_signature" TEXT NOT NULL,
-ADD COLUMN "challenge_id" UUID NOT NULL,
-ADD COLUMN "outbound_request_id" UUID,
+ADD COLUMN "challenge_id" TEXT NOT NULL,
+ADD COLUMN "outbound_request_id" TEXT,
 ADD COLUMN "outbound_destination" TEXT,
 ADD COLUMN "outbound_attempt_count" INTEGER NOT NULL DEFAULT 0,
 ADD COLUMN "first_outbound_attempt_at" TIMESTAMP(3),
@@ -122,7 +122,7 @@ ADD CONSTRAINT "travel_rule_records_sharing_evidence_check" CHECK (
 );
 
 ALTER TABLE "compliance_submission_intents"
-ADD COLUMN "travel_rule_record_id" UUID,
+ADD COLUMN "travel_rule_record_id" TEXT,
 ADD COLUMN "travel_rule_payload_commitment" TEXT;
 
 ALTER TABLE "compliance_submission_intents"

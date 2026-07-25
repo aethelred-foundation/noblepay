@@ -56,7 +56,7 @@ jest.mock("../../services/audit", () => ({
 
 import express from "express";
 import request from "supertest";
-import { generateJWT } from "../../middleware/auth";
+import { generateJWT, hashAPIKey } from "../../middleware/auth";
 import treasuryRouter from "../../routes/treasury";
 
 const app = express();
@@ -67,10 +67,7 @@ const apiKeys = new Map<string, any>();
 
 function walletForBusiness(businessId: string): string {
   return getAddress(
-    `0x${Buffer.from(businessId)
-      .toString("hex")
-      .slice(0, 40)
-      .padEnd(40, "0")}`,
+    `0x${Buffer.from(businessId).toString("hex").slice(0, 40).padEnd(40, "0")}`,
   );
 }
 
@@ -85,11 +82,8 @@ function token(businessId: string, role: string, signer: string): string {
 }
 
 function apiKeyToken(businessId: string, keyId: string): string {
-  const rawKey = `npk_${crypto
-    .createHash("sha256")
-    .update(`${businessId}:${keyId}`)
-    .digest("hex")}`;
-  apiKeys.set(crypto.createHash("sha256").update(rawKey).digest("hex"), {
+  const rawKey = `npk_${crypto.randomBytes(32).toString("hex")}`;
+  apiKeys.set(hashAPIKey(rawKey), {
     id: keyId,
     businessId,
     status: "ACTIVE",

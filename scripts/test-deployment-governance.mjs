@@ -371,6 +371,11 @@ for (const check of Object.keys(releaseChecks)) {
 }
 
 assert.match(deploymentSource, /configureBusinessRegistry/u);
+assert.ok(
+  deploymentSource.indexOf('process.argv.includes("--verify-artifacts")') <
+    deploymentSource.indexOf('await import("viem")'),
+  "artifact-only verification must exit before loading deployment dependencies",
+);
 for (const source of coreRoleSources) {
   assert.match(
     source,

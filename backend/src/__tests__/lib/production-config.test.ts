@@ -11,6 +11,7 @@ import { collectProductionEnvErrors } from "../../lib/env-validation";
 
 const VALID_ENV: NodeJS.ProcessEnv = {
   JWT_SECRET: "j".repeat(32),
+  API_KEY_HASH_SECRET: "a".repeat(32),
   COMPLIANCE_API_KEY: "c".repeat(32),
   DATABASE_URL: "postgresql://noblepay:secret@db:5432/noblepay",
   AETHELRED_RPC_URL: "https://rpc.testnet.aethelred.network",
@@ -65,11 +66,13 @@ describe("production configuration", () => {
     const errors = collectProductionEnvErrors({
       ...VALID_ENV,
       JWT_SECRET: "short",
+      API_KEY_HASH_SECRET: "short",
       COMPLIANCE_API_KEY: "short",
       NOBLEPAY_CONTRACT_ADDRESS: "0x0000000000000000000000000000000000000000",
       BUSINESS_VERIFIER_ADDRESS: "0x0000000000000000000000000000000000000000",
     });
     expect(errors.join(" ")).toMatch(/JWT_SECRET/);
+    expect(errors.join(" ")).toMatch(/API_KEY_HASH_SECRET/);
     expect(errors.join(" ")).toMatch(/COMPLIANCE_API_KEY/);
     expect(errors.join(" ")).toMatch(/zero address/);
   });

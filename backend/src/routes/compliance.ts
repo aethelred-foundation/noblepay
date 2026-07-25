@@ -347,13 +347,11 @@ function publishTenantEvent(
   payload: Record<string, unknown>,
   businessId: string,
 ): void {
-  const reportFailure = (error: unknown) => {
+  const reportFailure = (_error: unknown) => {
     // The service transaction has committed. Live delivery is best-effort;
     // persisted screening and review records remain the source of truth.
     logger.warn("Compliance WebSocket notification failed", {
       channel,
-      businessId,
-      error: (error as Error).message,
     });
   };
 
@@ -377,10 +375,7 @@ function handleError(error: unknown, res: Response): void {
     return;
   }
 
-  logger.error("Unhandled compliance error", {
-    error: (error as Error).message,
-    stack: (error as Error).stack,
-  });
+  logger.error("Unhandled compliance error");
 
   res.status(500).json({
     error: "INTERNAL_ERROR",

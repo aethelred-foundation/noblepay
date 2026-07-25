@@ -14,6 +14,25 @@ function jwtSecret(): string {
   throw new Error("JWT_SECRET is not configured");
 }
 
+function apiKeyHashSecret(): string {
+  const configured = process.env.API_KEY_HASH_SECRET;
+  if (configured && Buffer.byteLength(configured, "utf8") >= 32) {
+    return configured;
+  }
+  if (process.env.NODE_ENV === "test") {
+    return "noblepay-test-api-key-hash-secret-not-for-production";
+  }
+  throw new Error("API_KEY_HASH_SECRET is not configured");
+}
+
+/** One-way, deployment-specific API-key lookup value for durable storage. */
+export function hashAPIKey(rawKey: string): string {
+  return crypto
+    .createHmac("sha256", apiKeyHashSecret())
+    .update(rawKey, "utf8")
+    .digest("hex");
+}
+
 export const SESSION_COOKIE_NAME = "noblepay_session";
 export const CSRF_COOKIE_NAME = "noblepay_csrf";
 export const SESSION_TTL_SECONDS = 15 * 60;
@@ -333,7 +352,7 @@ export async function authenticateAPIKey(
       return;
     }
 
-    const keyHash = crypto.createHash("sha256").update(token).digest("hex");
+    const keyHash = hashAPIKey(token);
     const apiKey = await prisma.aPIKey.findUnique({
       where: { keyHash },
       include: { business: true },
@@ -370,10 +389,10 @@ export async function authenticateAPIKey(
         where: { id: apiKey.id },
         data: { lastUsed: new Date() },
       })
-      .catch((error: Error) => {
-        logger.error("Failed to update API key last used", {
-          error: error.message,
-        });
+      .catch(() => {
+        // Database errors can contain the lookup digest. Keep the log static so
+        // credentials and credential-derived values never reach log storage.
+        logger.error("Failed to update API key last used");
       });
 
     req.businessId = apiKey.businessId;
@@ -393,10 +412,8 @@ export async function authenticateAPIKey(
     };
 
     next();
-  } catch (error) {
-    logger.error("Authentication service error", {
-      error: (error as Error).message,
-    });
+  } catch {
+    logger.error("Authentication service error");
     res.status(503).json({
       error: "AUTHENTICATION_UNAVAILABLE",
       message: "Authentication service unavailable",
@@ -473,11 +490,8 @@ export function createTierRateLimit(
       if (!req.rateLimitScopes) req.rateLimitScopes = new Set<string>();
       req.rateLimitScopes.add(scope);
       next();
-    } catch (error) {
-      logger.error("Rate limit store unavailable", {
-        businessId,
-        error: (error as Error).message,
-      });
+    } catch {
+      logger.error("Rate limit store unavailable");
       res.status(503).json({
         error: "RATE_LIMIT_UNAVAILABLE",
         message: "Request throttling service unavailable",
@@ -539,10 +553,9 @@ export function createPublicRateLimit(options: {
         return;
       }
       next();
-    } catch (error) {
+    } catch {
       logger.error("Public rate limit store unavailable", {
         scope: options.scope,
-        error: (error as Error).message,
       });
       res.status(503).json({
         error: "RATE_LIMIT_UNAVAILABLE",
@@ -575,7 +588,7 @@ export function generateJWT(
 
 export function generateAPIKey(): { rawKey: string; keyHash: string } {
   const rawKey = `npk_${crypto.randomBytes(32).toString("hex")}`;
-  const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+  const keyHash = hashAPIKey(rawKey);
   return { rawKey, keyHash };
 }
 

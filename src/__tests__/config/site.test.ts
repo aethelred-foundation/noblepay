@@ -5,18 +5,14 @@ const { resolvePublicSiteUrl } =
 
 describe("public site configuration", () => {
   it("uses the local frontend outside production", () => {
-    expect(resolvePublicSiteUrl(undefined, "test")).toBe(
-      "http://localhost:3008",
-    );
+    expect(resolvePublicSiteUrl("", "test")).toBe("http://localhost:3008");
   });
 
   it("requires an explicit HTTPS origin in production", () => {
     expect(
       resolvePublicSiteUrl("https://pay.operator.example/", "production"),
     ).toBe("https://pay.operator.example");
-    expect(() => resolvePublicSiteUrl(undefined, "production")).toThrow(
-      /required/,
-    );
+    expect(() => resolvePublicSiteUrl("", "production")).toThrow(/required/);
     expect(() =>
       resolvePublicSiteUrl("http://pay.operator.example", "production"),
     ).toThrow(/https/);

@@ -427,6 +427,7 @@ jobs:
 
       - name: Validate production routing and fail-closed configuration
         env:
+          API_KEY_HASH_SECRET: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
           COMPLIANCE_API_URL: https://compliance.vendor.com
           COMPLIANCE_MAX_DATASET_AGE_HOURS: "24"
           TRAVEL_RULE_THRESHOLD_USD: "3000"

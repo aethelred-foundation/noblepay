@@ -19,6 +19,9 @@ const gatewayIndexer = read("services/gateway/internal/services/indexer.go");
 const gatewayServer = read("services/gateway/internal/server/server.go");
 const ciWorkflow = read(".github/workflows/ci.yml");
 const nodeAuditPolicy = JSON.parse(read("audit-ci.jsonc"));
+const travelRuleAuthorizationMigration = read(
+  "backend/prisma/migrations/20260722150000_travel_rule_encrypted_authorization/migration.sql",
+);
 const deploymentScript = read("scripts/deploy-devnet-core.mjs");
 const deploymentGovernance = read("scripts/lib/deployment-governance.mjs");
 const nodePackages = [
@@ -773,6 +776,7 @@ assert.match(
   "Contract CI must test governance handoff invariants",
 );
 for (const requiredValidatorEnv of [
+  "API_KEY_HASH_SECRET",
   "TRAVEL_RULE_THRESHOLD_USD",
   "TRAVEL_RULE_ACTIVE_KEY_ID",
   "TRAVEL_RULE_ENCRYPTION_KEYS",
@@ -821,6 +825,23 @@ assert.equal(
     .length,
   3,
   "Frontend, backend, and contract runtime graphs must be audited separately",
+);
+for (const textIdColumn of [
+  "travel_rule_payment_id",
+  "challenge_id",
+  "outbound_request_id",
+  "travel_rule_record_id",
+]) {
+  assert.match(
+    travelRuleAuthorizationMigration,
+    new RegExp(`"${textIdColumn}" TEXT`, "u"),
+    `${textIdColumn} must use the repository's canonical text ID representation`,
+  );
+}
+assert.doesNotMatch(
+  travelRuleAuthorizationMigration,
+  /"(?:travel_rule_payment_id|challenge_id|outbound_request_id|travel_rule_record_id)" UUID/u,
+  "Travel Rule foreign and correlation IDs must not drift from their text-backed Prisma models",
 );
 assert.equal(
   nodeAuditPolicy.allowlist?.length,

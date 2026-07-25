@@ -39,6 +39,7 @@ import {
   tierRateLimit,
   generateJWT,
   generateAPIKey,
+  hashAPIKey,
 } from "../../middleware/auth";
 
 beforeEach(() => {
@@ -429,7 +430,6 @@ describe("Auth Middleware", () => {
 
       expect(mockLogger.error).toHaveBeenCalledWith(
         "Failed to update API key last used",
-        expect.objectContaining({ error: "Update failed" }),
       );
     });
   });
@@ -621,13 +621,40 @@ describe("Auth Middleware", () => {
     });
 
     it("should produce consistent hash for same key", () => {
-      const crypto = require("crypto");
       const { rawKey, keyHash } = generateAPIKey();
-      const recomputed = crypto
-        .createHash("sha256")
-        .update(rawKey)
-        .digest("hex");
-      expect(keyHash).toBe(recomputed);
+      expect(keyHash).toBe(hashAPIKey(rawKey));
+    });
+
+    it("should bind lookup hashes to the deployment-specific pepper", () => {
+      const originalSecret = process.env.API_KEY_HASH_SECRET;
+      try {
+        process.env.API_KEY_HASH_SECRET = "a".repeat(32);
+        const first = hashAPIKey("npk_test_key");
+        process.env.API_KEY_HASH_SECRET = "b".repeat(32);
+        expect(hashAPIKey("npk_test_key")).not.toBe(first);
+      } finally {
+        if (originalSecret === undefined)
+          delete process.env.API_KEY_HASH_SECRET;
+        else process.env.API_KEY_HASH_SECRET = originalSecret;
+      }
+    });
+
+    it("should fail closed without the API-key pepper outside tests", () => {
+      const originalEnv = process.env.NODE_ENV;
+      const originalSecret = process.env.API_KEY_HASH_SECRET;
+      try {
+        process.env.NODE_ENV = "production";
+        delete process.env.API_KEY_HASH_SECRET;
+        expect(() => hashAPIKey("npk_test_key")).toThrow(
+          "API_KEY_HASH_SECRET is not configured",
+        );
+      } finally {
+        if (originalEnv === undefined) delete process.env.NODE_ENV;
+        else process.env.NODE_ENV = originalEnv;
+        if (originalSecret === undefined)
+          delete process.env.API_KEY_HASH_SECRET;
+        else process.env.API_KEY_HASH_SECRET = originalSecret;
+      }
     });
   });
 

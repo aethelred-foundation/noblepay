@@ -236,6 +236,7 @@ describe("Production Readiness", () => {
     const savedEnv: Record<string, string | undefined> = {};
     const productionKeys = [
       "JWT_SECRET",
+      "API_KEY_HASH_SECRET",
       "COMPLIANCE_API_KEY",
       "DATABASE_URL",
       "AETHELRED_RPC_URL",
@@ -314,6 +315,7 @@ describe("Production Readiness", () => {
 
     it("passes when all production env vars are properly set", () => {
       process.env.JWT_SECRET = "j".repeat(32);
+      process.env.API_KEY_HASH_SECRET = "a".repeat(32);
       process.env.COMPLIANCE_API_KEY = "c".repeat(32);
       process.env.DATABASE_URL = "postgresql://localhost/noblepay";
       process.env.AETHELRED_RPC_URL = "https://rpc.aethelred.network";

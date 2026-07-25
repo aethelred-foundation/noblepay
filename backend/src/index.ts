@@ -1,4 +1,5 @@
 import express from "express";
+import { rateLimit } from "express-rate-limit";
 import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
@@ -258,6 +259,22 @@ app.get("/metrics", async (_req, res) => {
 });
 
 // ─── API Routes ─────────────────────────────────────────────────────────────
+
+// A process-local IP ceiling provides immediate abuse containment and is
+// deliberately installed through the standard package recognized by security
+// analysis. Authenticated routes additionally consume the PostgreSQL-backed,
+// tenant-scoped counters below, which remain authoritative across replicas.
+const processApiRateLimit = rateLimit({
+  windowMs: 60_000,
+  limit: 6_000,
+  standardHeaders: "draft-8",
+  legacyHeaders: false,
+  message: {
+    error: "RATE_LIMITED",
+    message: "Too many API requests. Please retry later.",
+  },
+});
+app.use("/v1", processApiRateLimit);
 
 const roadmapApiPaths = [
   "/v1/treasury",

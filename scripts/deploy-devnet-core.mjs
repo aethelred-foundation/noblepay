@@ -16,19 +16,6 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  createPublicClient,
-  createWalletClient,
-  defineChain,
-  encodeDeployData,
-  getAddress,
-  http,
-  isAddress,
-  keccak256,
-  stringToHex,
-} from "viem";
-import { privateKeyToAccount } from "viem/accounts";
-
-import {
   CORE_CONTRACT_KEYS,
   TEE_NODE_ACCOUNT_TYPE,
   ZERO_ADDRESS,
@@ -221,6 +208,19 @@ if (process.argv.includes("--verify-artifacts")) {
   );
   process.exit(0);
 }
+
+const {
+  createPublicClient,
+  createWalletClient,
+  defineChain,
+  encodeDeployData,
+  getAddress,
+  http,
+  isAddress,
+  keccak256,
+  stringToHex,
+} = await import("viem");
+const { privateKeyToAccount } = await import("viem/accounts");
 
 const DEPLOYMENT_MODE = deploymentMode(process.argv);
 

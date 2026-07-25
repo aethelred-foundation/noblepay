@@ -8,7 +8,7 @@ const HASH = `0x${"ab".repeat(32)}` as `0x${string}`;
 
 describe("immutable Aethelred network anchor", () => {
   it("requires both values for production and normalizes the hash", () => {
-    expect(resolveNetworkAnchor(undefined, undefined, "test")).toBeNull();
+    expect(resolveNetworkAnchor("", "", "test")).toBeNull();
     expect(
       resolveNetworkAnchor(
         "1",
@@ -19,7 +19,7 @@ describe("immutable Aethelred network anchor", () => {
       blockNumber: 1n,
       blockHash: HASH,
     });
-    expect(() => resolveNetworkAnchor(undefined, HASH, "production")).toThrow(
+    expect(() => resolveNetworkAnchor("", HASH, "production")).toThrow(
       /ANCHOR_BLOCK/u,
     );
     expect(() => resolveNetworkAnchor("1", "0x1234", "production")).toThrow(

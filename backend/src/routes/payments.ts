@@ -298,13 +298,10 @@ function publishPaymentUpdate(
 ): void {
   void wsService
     .broadcast("payments", "payment_update", payload, businessId)
-    .catch((error) => {
+    .catch(() => {
       // Reconciliation is already durable; a transient live-channel failure
       // must not change the authoritative HTTP result.
-      logger.warn("Payment WebSocket notification failed", {
-        businessId,
-        error: (error as Error).message,
-      });
+      logger.warn("Payment WebSocket notification failed");
     });
 }
 
@@ -319,10 +316,7 @@ function handleError(error: unknown, res: Response): void {
     return;
   }
 
-  logger.error("Unhandled payment error", {
-    error: (error as Error).message,
-    stack: (error as Error).stack,
-  });
+  logger.error("Unhandled payment error");
 
   res.status(500).json({
     error: "INTERNAL_ERROR",

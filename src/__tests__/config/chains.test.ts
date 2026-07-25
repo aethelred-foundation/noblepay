@@ -87,7 +87,7 @@ describe("Aethelred chain configuration", () => {
   it("requires an explicit positive safe chain id in production", () => {
     expect(resolveChainId(undefined, "test")).toBe(7332);
     expect(resolveChainId("12345", "production")).toBe(12345);
-    expect(() => resolveChainId(undefined, "production")).toThrow(/required/);
+    expect(() => resolveChainId("", "production")).toThrow(/required/);
     for (const value of ["0", "-1", "1.5", "9007199254740992"]) {
       expect(() => resolveChainId(value, "production")).toThrow(
         /positive (?:safe )?integer/,

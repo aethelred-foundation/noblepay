@@ -268,7 +268,6 @@ export function requirePermission(...required: Permission[]) {
 
     if (missing.length > 0) {
       logger.warn("RBAC: Permission denied", {
-        userId: req.userId,
         role,
         required,
         missing,
@@ -305,7 +304,6 @@ export function requireRole(...roles: Role[]) {
 
     if (!hasAccess) {
       logger.warn("RBAC: Role denied", {
-        userId: req.userId,
         userRole,
         requiredRoles: roles,
         path: req.path,
@@ -419,10 +417,8 @@ async function checkCurrentPlatformAdmin(
       return;
     }
     next();
-  } catch (error) {
-    logger.error("Platform administrator role check unavailable", {
-      error: (error as Error).message,
-    });
+  } catch {
+    logger.error("Platform administrator role check unavailable");
     res.status(503).json({
       error: "AUTHORIZATION_UNAVAILABLE",
       message: "Unable to verify the current platform administrator role",
