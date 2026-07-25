@@ -29,7 +29,4 @@ coverage/
 # Debug
 npm-debug.log*
 
-# Vercel
-.vercel/
-
 .DS_Store

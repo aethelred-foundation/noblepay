@@ -5,7 +5,7 @@
  */
 
 import React, { Component, ErrorInfo, ReactNode } from "react";
-import * as Sentry from "@sentry/nextjs";
+import * as Sentry from "@sentry/react";
 import { AlertTriangle, RefreshCw, Home, MessageCircle } from "lucide-react";
 import { BRAND } from "@/lib/constants";
 

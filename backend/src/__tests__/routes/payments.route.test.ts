@@ -18,8 +18,6 @@ const mockPaymentService = {
   createPayment: jest.fn(),
   getPayment: jest.fn(),
   listPayments: jest.fn(),
-  cancelPayment: jest.fn(),
-  refundPayment: jest.fn(),
   validateBusinessLimits: jest.fn(),
   calculateFees: jest.fn(),
   batchProcessPayments: jest.fn(),

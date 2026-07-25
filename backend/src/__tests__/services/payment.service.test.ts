@@ -1,9 +1,6 @@
 import {
   createMockPrisma,
   resetAllMocks,
-  mockCounter,
-  mockHistogram,
-  mockLogger,
 } from "../setup";
 import { PaymentService, PaymentError } from "../../services/payment";
 import { AuditService } from "../../services/audit";
@@ -219,82 +216,6 @@ describe("PaymentService", () => {
 
       // The sortBy branch should be exercised (line 157)
       expect(prisma.payment.findMany).toHaveBeenCalled();
-    });
-  });
-
-  // ─── cancelPayment ─────────────────────────────────────────────────────────
-
-  describe("cancelPayment", () => {
-    it("requires a verified on-chain cancellation for a pending payment", async () => {
-      await expect(
-        paymentService.cancelPayment("uuid-1", "actor-1"),
-      ).rejects.toMatchObject({
-        code: "ON_CHAIN_CANCELLATION_REQUIRED",
-        statusCode: 501,
-      });
-    });
-
-    it("does not mutate screening payments in the database-only path", async () => {
-      await expect(
-        paymentService.cancelPayment("uuid-1", "actor-1"),
-      ).rejects.toMatchObject({ code: "ON_CHAIN_CANCELLATION_REQUIRED" });
-      expect(prisma.payment.update).not.toHaveBeenCalled();
-    });
-
-    it("fails closed before using resource existence as an oracle", async () => {
-      await expect(
-        paymentService.cancelPayment("nonexistent", "actor"),
-      ).rejects.toMatchObject({
-        code: "ON_CHAIN_CANCELLATION_REQUIRED",
-        statusCode: 501,
-      });
-    });
-
-    it("never performs a database-only cancellation for settled payments", async () => {
-      await expect(
-        paymentService.cancelPayment("1", "actor"),
-      ).rejects.toMatchObject({
-        code: "ON_CHAIN_CANCELLATION_REQUIRED",
-        statusCode: 501,
-      });
-    });
-
-    it("never performs a database-only cancellation for approved payments", async () => {
-      await expect(
-        paymentService.cancelPayment("1", "actor"),
-      ).rejects.toMatchObject({ code: "ON_CHAIN_CANCELLATION_REQUIRED" });
-    });
-  });
-
-  // ─── refundPayment ─────────────────────────────────────────────────────────
-
-  describe("refundPayment", () => {
-    it("requires a verified NoblePay refund transaction", async () => {
-      await expect(
-        paymentService.refundPayment("uuid-1", "actor-1"),
-      ).rejects.toMatchObject({
-        code: "ON_CHAIN_REFUND_REQUIRED",
-        statusCode: 501,
-      });
-    });
-
-    it("fails closed before revealing resource existence", async () => {
-      await expect(
-        paymentService.refundPayment("nonexistent", "actor"),
-      ).rejects.toMatchObject({
-        code: "ON_CHAIN_REFUND_REQUIRED",
-        statusCode: 501,
-      });
-    });
-
-    it("does not mutate pending payments in the database-only path", async () => {
-      await expect(
-        paymentService.refundPayment("1", "actor"),
-      ).rejects.toMatchObject({
-        code: "ON_CHAIN_REFUND_REQUIRED",
-        statusCode: 501,
-      });
-      expect(prisma.payment.update).not.toHaveBeenCalled();
     });
   });
 

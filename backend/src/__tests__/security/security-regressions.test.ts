@@ -3,7 +3,6 @@ import jwt from "jsonwebtoken";
 import { Prisma } from "@prisma/client";
 import {
   createMockNext,
-  createMockPrisma,
   createMockRequest,
   createMockResponse,
 } from "../setup";
@@ -48,7 +47,6 @@ import {
 import { BatchPaymentSchema } from "../../middleware/validation";
 import { TreasuryService } from "../../services/treasury";
 import { CrossChainService } from "../../services/crosschain";
-import { PaymentService } from "../../services/payment";
 import { InvoiceService } from "../../services/invoice";
 import { AIComplianceService } from "../../services/ai-compliance";
 import { validateSanctionsMetadata } from "../../services/compliance";
@@ -481,24 +479,6 @@ describe("NP-12: shared batch validation cannot bypass payment validation", () =
 });
 
 describe("mutation adapters remain fail-closed", () => {
-  it("blocks database-only payment lifecycle changes", async () => {
-    const prisma = createMockPrisma();
-    const service = new PaymentService(prisma, {} as any);
-    await expect(
-      service.cancelPayment("payment-1", BUSINESS_A),
-    ).rejects.toMatchObject({
-      code: "ON_CHAIN_CANCELLATION_REQUIRED",
-      statusCode: 501,
-    });
-    await expect(
-      service.refundPayment("payment-1", BUSINESS_A),
-    ).rejects.toMatchObject({
-      code: "ON_CHAIN_REFUND_REQUIRED",
-      statusCode: 501,
-    });
-    expect(prisma.payment.update).not.toHaveBeenCalled();
-  });
-
   it("blocks invoice financing without a verified gateway", async () => {
     const prisma: any = {
       invoice: { findFirst: jest.fn() },

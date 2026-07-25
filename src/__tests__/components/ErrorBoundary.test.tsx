@@ -4,9 +4,9 @@ import {
   ErrorBoundary,
   SectionErrorBoundary,
 } from "@/components/ErrorBoundary";
-import * as Sentry from "@sentry/nextjs";
+import * as Sentry from "@sentry/react";
 
-jest.mock("@sentry/nextjs", () => ({
+jest.mock("@sentry/react", () => ({
   captureException: jest.fn(),
 }));
 

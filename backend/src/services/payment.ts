@@ -205,34 +205,6 @@ export class PaymentService {
   }
 
   /**
-   * Cancel a pending payment.
-   * The actor parameter is the businessId of the requesting business.
-   */
-  async cancelPayment(id: string, actor: string): Promise<Payment> {
-    void id;
-    void actor;
-    throw new PaymentError(
-      "ON_CHAIN_CANCELLATION_REQUIRED",
-      "Database-only cancellation is disabled until a verified on-chain cancellation flow is available",
-      501,
-    );
-  }
-
-  /**
-   * Refund a settled payment.
-   * The actor parameter is the businessId of the requesting business.
-   */
-  async refundPayment(id: string, actor: string): Promise<Payment> {
-    void id;
-    void actor;
-    throw new PaymentError(
-      "ON_CHAIN_REFUND_REQUIRED",
-      "Database-only refund is disabled until a verified NoblePay refund transaction is supplied",
-      501,
-    );
-  }
-
-  /**
    * Validate that a business hasn't exceeded its daily/monthly limits.
    */
   async validateBusinessLimits(
