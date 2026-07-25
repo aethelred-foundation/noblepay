@@ -14,6 +14,7 @@ const nginx = read("deploy/nginx/noblepay.conf");
 const frontendDockerfile = read("deploy/docker/frontend.Dockerfile");
 const backendDockerfile = read("deploy/docker/backend.Dockerfile");
 const gatewayDockerfile = read("deploy/docker/gateway.Dockerfile");
+const gatewayHealthcheck = read("services/gateway/cmd/healthcheck/main.go");
 const gatewayConfig = read("services/gateway/internal/config/config.go");
 const gatewayIndexer = read("services/gateway/internal/services/indexer.go");
 const gatewayServer = read("services/gateway/internal/server/server.go");
@@ -471,8 +472,13 @@ assert.doesNotMatch(
 assert.equal(
   (frontendDockerfile.match(/FROM node:24[.]18[.]0-bookworm-slim/gu) ?? [])
     .length,
-  2,
-  "Frontend build and runtime stages must use Node 24.18.0",
+  1,
+  "Frontend build stage must use Node 24.18.0",
+);
+assert.match(
+  frontendDockerfile,
+  /^FROM gcr[.]io\/distroless\/nodejs24-debian13@sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212 AS runtime$/mu,
+  "Frontend runtime must use the reviewed digest-pinned distroless Node 24 image",
 );
 assert.match(
   frontendDockerfile,
@@ -480,8 +486,9 @@ assert.match(
   "Frontend runtime must use the Next.js standalone output",
 );
 assert.doesNotMatch(
-  frontendDockerfile.split("FROM node:24.18.0-bookworm-slim AS runtime")[1] ??
-    "",
+  frontendDockerfile.split(
+    "FROM gcr.io/distroless/nodejs24-debian13@sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212 AS runtime",
+  )[1] ?? "",
   /COPY[^\n]*node_modules/u,
   "Frontend runtime must not copy the build-stage dependency tree",
 );
@@ -494,8 +501,13 @@ assert.match(backendDockerfile, /EXPOSE 4008/u);
 assert.equal(
   (backendDockerfile.match(/FROM node:24[.]18[.]0-bookworm-slim/gu) ?? [])
     .length,
-  3,
-  "Backend build, dependency, and runtime stages must use Node 24.18.0",
+  2,
+  "Backend build and production-dependency stages must use Node 24.18.0",
+);
+assert.match(
+  backendDockerfile,
+  /^FROM gcr[.]io\/distroless\/nodejs24-debian13@sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212 AS runtime$/mu,
+  "Backend runtime must use the reviewed digest-pinned distroless Node 24 image",
 );
 assert.match(
   backendDockerfile,
@@ -524,14 +536,24 @@ assert.match(
 );
 assert.match(
   gatewayDockerfile,
-  /^FROM debian:13[.]6-slim AS runtime$/mu,
-  "Gateway runtime must use the current Debian stable patch image",
+  /^FROM gcr[.]io\/distroless\/static-debian13@sha256:f7f8f729987ad0fdf6b05eeeae94b26e6a0f613bdf46feea7fc40f7bd72953e6 AS runtime$/mu,
+  "Gateway runtime must use the reviewed digest-pinned distroless static image",
 );
 assert.match(gatewayDockerfile, /EXPOSE 4018/u);
 assert.match(
   gatewayDockerfile,
   /USER 65532:65532/u,
   "Gateway runtime must remain unprivileged",
+);
+assert.match(
+  gatewayDockerfile,
+  /COPY --from=build --chown=65532:65532 \/out\/state\/ \/var\/lib\/noblepay-gateway\//u,
+  "Gateway runtime must pre-create the durable store directory for the nonroot user",
+);
+assert.match(
+  gatewayDockerfile,
+  /HEALTHCHECK[\s\S]*?CMD \["\/usr\/local\/bin\/noblepay-healthcheck"\]/u,
+  "Gateway runtime must use the native distroless healthcheck",
 );
 assert.match(
   compose,
@@ -546,16 +568,20 @@ assert.match(
 for (const healthTarget of [
   "http://127.0.0.1:3008/",
   "http://127.0.0.1:4008/readyz",
-  "http://127.0.0.1:4018/readyz",
   "http://127.0.0.1:8080/",
 ]) {
   assert.ok(
-    `${compose}\n${frontendDockerfile}\n${backendDockerfile}\n${gatewayDockerfile}`.includes(
+    `${compose}\n${frontendDockerfile}\n${backendDockerfile}\n${gatewayDockerfile}\n${gatewayHealthcheck}`.includes(
       healthTarget,
     ),
     `Production health checks must cover ${healthTarget}`,
   );
 }
+assert.match(
+  gatewayHealthcheck,
+  /return "http:\/\/127[.]0[.]0[.]1:" \+ port \+ "\/readyz"/u,
+  "Production health checks must cover the configured gateway port's /readyz endpoint",
+);
 
 const nodeVersions = [...ciWorkflow.matchAll(/node-version: "([^"]+)"/gu)].map(
   (match) => match[1],
