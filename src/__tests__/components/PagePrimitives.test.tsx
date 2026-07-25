@@ -388,7 +388,7 @@ describe("CurrencyDisplay", () => {
 
   it("applies tabular-nums class", () => {
     const { container } = render(
-      <CurrencyDisplay amount={100} currency="AET" />,
+      <CurrencyDisplay amount={100} currency="AETHEL" />,
     );
     expect(container.firstChild).toHaveClass("tabular-nums");
   });
