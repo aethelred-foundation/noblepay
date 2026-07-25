@@ -482,6 +482,70 @@ jobs:
       - name: Build gateway image
         run: docker build --pull --file deploy/docker/gateway.Dockerfile --tag noblepay-gateway:ci .
 
+      - name: Smoke final distroless runtimes
+        run: |
+          set -euo pipefail
+          frontend_container="noblepay-frontend-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gateway_container="noblepay-gateway-smoke-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          gateway_volume="noblepay-gateway-smoke-state-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+
+          cleanup() {
+            docker rm --force "$frontend_container" "$gateway_container" >/dev/null 2>&1 || true
+            docker volume rm --force "$gateway_volume" >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+
+          wait_for_healthy() {
+            container="$1"
+            for _ in $(seq 1 90); do
+              status="$(docker inspect --format '{{.State.Health.Status}}' "$container")"
+              case "$status" in
+                healthy)
+                  return 0
+                  ;;
+                unhealthy)
+                  docker logs "$container"
+                  return 1
+                  ;;
+              esac
+              sleep 1
+            done
+            docker logs "$container"
+            echo "::error::$container did not become healthy"
+            return 1
+          }
+
+          for image in noblepay-backend:ci noblepay-frontend:ci noblepay-gateway:ci; do
+            runtime_user="$(docker image inspect --format '{{.Config.User}}' "$image")"
+            if [ "$runtime_user" != "65532" ] && [ "$runtime_user" != "65532:65532" ]; then
+              echo "::error::$image runs as unexpected user $runtime_user"
+              exit 1
+            fi
+            docker image inspect --format '{{json .Config.Healthcheck.Test}}' "$image" |
+              jq -e 'type == "array" and length > 1' >/dev/null
+          done
+
+          docker run --rm noblepay-backend:ci --version | grep -Eq '^v24\.'
+          docker volume create "$gateway_volume" >/dev/null
+          docker run --detach \
+            --name "$frontend_container" \
+            --read-only \
+            --tmpfs /tmp \
+            --tmpfs /app/.next/cache \
+            noblepay-frontend:ci >/dev/null
+          docker run --detach \
+            --name "$gateway_container" \
+            --read-only \
+            --tmpfs /tmp \
+            --mount "type=volume,source=$gateway_volume,target=/var/lib/noblepay-gateway" \
+            --env APP_ENV=test \
+            --env GATEWAY_PORT=4018 \
+            --env STORE_PATH=/var/lib/noblepay-gateway/store.json \
+            noblepay-gateway:ci >/dev/null
+
+          wait_for_healthy "$frontend_container"
+          wait_for_healthy "$gateway_container"
+
       - name: Create container security evidence directory
         run: mkdir -p security-results
 

@@ -47,17 +47,17 @@ COPY public ./public
 COPY src ./src
 RUN npm run build
 
-FROM node:24.18.0-bookworm-slim AS runtime
+FROM gcr.io/distroless/nodejs24-debian13@sha256:af85d11ce7ef10172855a6e3649e3e8125b1b9e3ca41849ec2918036f05cb212 AS runtime
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     PORT=3008 \
     HOSTNAME=0.0.0.0
-COPY --from=build --chown=node:node /app/.next/standalone ./
-COPY --from=build --chown=node:node /app/.next/static ./.next/static
-COPY --from=build --chown=node:node /app/public ./public
-USER node
+COPY --from=build --chown=65532:65532 /app/.next/standalone ./
+COPY --from=build --chown=65532:65532 /app/.next/static ./.next/static
+COPY --from=build --chown=65532:65532 /app/public ./public
+USER 65532:65532
 EXPOSE 3008
 HEALTHCHECK --interval=20s --timeout=5s --start-period=30s --retries=5 \
-  CMD ["node", "-e", "fetch('http://127.0.0.1:3008/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
-CMD ["node", "server.js"]
+  CMD ["/nodejs/bin/node", "-e", "fetch('http://127.0.0.1:3008/').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+CMD ["server.js"]
