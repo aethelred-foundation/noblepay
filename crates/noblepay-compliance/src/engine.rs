@@ -34,6 +34,9 @@ const FLAG_THRESHOLD: u8 = 40;
 /// AML risk score threshold above which a payment is blocked.
 const BLOCK_THRESHOLD: u8 = 75;
 
+/// Maximum number of payments accepted by any batch entry point.
+const MAX_BATCH_SIZE: usize = 100;
+
 // ---------------------------------------------------------------------------
 // Metrics
 // ---------------------------------------------------------------------------
@@ -362,7 +365,18 @@ impl ComplianceEngine {
     /// Each payment is screened independently; a failure in one does not affect
     /// the others.
     pub async fn screen_batch(&self, requests: Vec<ScreeningRequest>) -> BatchScreeningResponse {
-        let mut handles = Vec::with_capacity(requests.len());
+        if requests.len() > MAX_BATCH_SIZE {
+            return BatchScreeningResponse {
+                results: Vec::new(),
+                total: requests.len(),
+                passed: 0,
+                flagged: 0,
+                blocked: 0,
+                error: Some(format!("batch size exceeds maximum of {MAX_BATCH_SIZE}")),
+            };
+        }
+
+        let mut handles = Vec::with_capacity(MAX_BATCH_SIZE);
 
         for req in &requests {
             let engine = self.clone();
@@ -435,6 +449,7 @@ impl ComplianceEngine {
             passed,
             flagged,
             blocked,
+            error: None,
         }
     }
 
@@ -575,6 +590,27 @@ mod tests {
         assert!(batch.results.iter().all(|r| r.success));
         // At least one should be blocked (the sanctioned one).
         assert!(batch.blocked >= 1);
+    }
+
+    #[tokio::test]
+    async fn oversized_batch_is_rejected_before_spawning_tasks() {
+        let engine = ComplianceEngine::new().await;
+        let requests = (0..=MAX_BATCH_SIZE)
+            .map(|_| ScreeningRequest {
+                payment: clean_payment(),
+                travel_rule_data: None,
+                timeout_ms: None,
+            })
+            .collect();
+
+        let batch = engine.screen_batch(requests).await;
+
+        assert_eq!(batch.total, MAX_BATCH_SIZE + 1);
+        assert!(batch.results.is_empty());
+        assert_eq!(
+            batch.error.as_deref(),
+            Some("batch size exceeds maximum of 100")
+        );
     }
 
     #[tokio::test]

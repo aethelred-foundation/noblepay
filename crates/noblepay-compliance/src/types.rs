@@ -347,6 +347,8 @@ pub struct BatchScreeningResponse {
     pub passed: usize,
     pub flagged: usize,
     pub blocked: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -600,12 +600,7 @@ export class PaymentReconciliationService {
       paymentTotal.inc({ status: "PENDING", currency: tokenConfig.currency });
       paymentAmount.observe({ currency: tokenConfig.currency }, Number(amount));
     }
-    logger.info("On-chain payment reconciled", {
-      paymentId: event.paymentId,
-      businessId,
-      chainId: config.chainId.toString(),
-      replayed: result.replayed,
-    });
+    logger.info("On-chain payment reconciled");
 
     return {
       ...result,

@@ -437,12 +437,7 @@ export class WebSocketService {
     }
 
     if (sent > 0) {
-      logger.debug("WebSocket broadcast", {
-        channel,
-        type,
-        recipients: sent,
-        targetBusinessId,
-      });
+      logger.debug("WebSocket broadcast");
     }
   }
 

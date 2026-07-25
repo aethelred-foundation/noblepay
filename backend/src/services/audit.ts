@@ -108,11 +108,7 @@ export class AuditService {
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
     ).then((entry) => {
-      logger.debug("Audit entry created", {
-        eventId: entry.eventId,
-        eventType: input.eventType,
-        businessId: input.businessId,
-      });
+      logger.debug("Audit entry created");
       return entry;
     });
   }
@@ -465,12 +461,7 @@ export class AuditService {
     }
     const data = chunks.join("");
 
-    logger.info("Audit export generated", {
-      businessId: options.businessId || "__unauthenticated__",
-      format: options.format,
-      entries: entryCount,
-      bytes,
-    });
+    logger.info("Audit export generated");
     return {
       format: options.format,
       entries: entryCount,

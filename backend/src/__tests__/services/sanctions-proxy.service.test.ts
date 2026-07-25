@@ -18,9 +18,9 @@ function metadata(timestamp = new Date().toISOString()) {
   };
 }
 
-function jsonResponse(body: unknown): Response {
+function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
-    status: 200,
+    status,
     headers: { "Content-Type": "application/json" },
   });
 }
@@ -103,4 +103,87 @@ describe("ComplianceService sanctions proxy", () => {
       }),
     );
   });
+
+  it("uses the unauthenticated actor marker when a refresh has no actor context", async () => {
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ success: true }))
+      .mockResolvedValueOnce(
+        jsonResponse({ status: "healthy", sanctions_lists: metadata() }),
+      ) as any;
+    const audit = { createAuditEntry: jest.fn().mockResolvedValue({}) };
+    const service = new ComplianceService({} as any, audit as any);
+
+    await expect(service.updateSanctionsList()).resolves.toMatchObject({
+      status: "updated",
+      totalEntries: 19_002,
+    });
+    expect(audit.createAuditEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ actor: "__unauthenticated__" }),
+    );
+  });
+
+  it.each([
+    {
+      label: "operator error",
+      response: jsonResponse({ success: false, error: "feed rejected" }),
+    },
+    {
+      label: "HTTP failure without an operator error",
+      response: jsonResponse({ success: false }, 503),
+    },
+  ])("fails a sanctions refresh closed for $label", async ({ response }) => {
+    global.fetch = jest.fn().mockResolvedValue(response) as any;
+    const audit = { createAuditEntry: jest.fn() };
+    const service = new ComplianceService({} as any, audit as any);
+
+    await expect(
+      service.updateSanctionsList("wallet:admin"),
+    ).rejects.toMatchObject({
+      code: "SANCTIONS_SERVICE_UNAVAILABLE",
+      statusCode: 503,
+    });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    expect(audit.createAuditEntry).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "an unhealthy response",
+      response: jsonResponse({ status: "degraded" }),
+    },
+    {
+      label: "an HTTP error",
+      response: jsonResponse({ status: "healthy" }, 503),
+    },
+  ])("fails sanctions health closed for $label", async ({ response }) => {
+    global.fetch = jest.fn().mockResolvedValue(response) as any;
+    const service = new ComplianceService({} as any, {} as any);
+
+    await expect(service.getSanctionsStatus()).rejects.toMatchObject({
+      code: "SANCTIONS_SERVICE_UNAVAILABLE",
+      statusCode: 503,
+    });
+  });
+
+  it.each([
+    ["missing", null],
+    ["non-object", "not-metadata"],
+    ["array", []],
+  ])(
+    "rejects %s sanctions dataset metadata",
+    async (_label, sanctionsLists) => {
+      global.fetch = jest
+        .fn()
+        .mockResolvedValue(
+          jsonResponse({ status: "healthy", sanctions_lists: sanctionsLists }),
+        ) as any;
+      const service = new ComplianceService({} as any, {} as any);
+
+      await expect(service.getSanctionsStatus()).rejects.toMatchObject({
+        code: "SANCTIONS_DATASET_INVALID",
+        statusCode: 503,
+      });
+    },
+  );
 });

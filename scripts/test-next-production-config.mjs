@@ -54,37 +54,52 @@ function run(overrides = {}, removed = []) {
   });
 }
 
+function connectSources(csp) {
+  const directive = csp
+    .split("; ")
+    .find((candidate) => candidate.startsWith("connect-src "));
+  assert.ok(directive, "CSP must include connect-src");
+  return new Set(directive.split(/\s+/u).slice(1));
+}
+
+function includesHostname(sources, hostname) {
+  return [...sources].some((source) => {
+    try {
+      return new URL(source).hostname === hostname;
+    } catch {
+      return false;
+    }
+  });
+}
+
 const valid = run();
 assert.equal(valid.status, 0, valid.stderr);
-const connectDirective = valid.stdout
-  .split("; ")
-  .find((directive) => directive.startsWith("connect-src "));
-assert.ok(connectDirective, "CSP must include connect-src");
-assert.ok(connectDirective.includes("https://noblepay-ci.example.com"));
-assert.ok(connectDirective.includes("wss://noblepay-ci.example.com"));
-assert.ok(connectDirective.includes("https://public-rpc.operator.example.com"));
-assert.ok(connectDirective.includes("wss://public-ws.operator.example.com"));
+const sources = connectSources(valid.stdout);
+assert.ok(sources.has("https://noblepay-ci.example.com"));
+assert.ok(sources.has("wss://noblepay-ci.example.com"));
+assert.ok(sources.has("https://public-rpc.operator.example.com"));
+assert.ok(sources.has("wss://public-ws.operator.example.com"));
 assert.ok(
-  !connectDirective.includes("private-rpc.example.com"),
+  !includesHostname(sources, "private-rpc.example.com"),
   "server-only RPC must not enter the browser CSP",
 );
-assert.ok(connectDirective.includes("wss://relay.walletconnect.org"));
-assert.ok(connectDirective.includes("https://api.web3modal.org"));
-assert.ok(connectDirective.includes("https://example.ingest.sentry.io"));
+assert.ok(sources.has("wss://relay.walletconnect.org"));
+assert.ok(sources.has("https://api.web3modal.org"));
+assert.ok(sources.has("https://example.ingest.sentry.io"));
 assert.ok(
-  !connectDirective.split(/\s+/u).includes("http:"),
+  !sources.has("http:"),
   "production CSP must not allow every HTTP endpoint",
 );
 assert.ok(
-  !connectDirective.split(/\s+/u).includes("https:"),
+  !sources.has("https:"),
   "production CSP must not allow every HTTPS endpoint",
 );
 assert.ok(
-  !connectDirective.split(/\s+/u).includes("ws:"),
+  !sources.has("ws:"),
   "production CSP must not allow every WS endpoint",
 );
 assert.ok(
-  !connectDirective.split(/\s+/u).includes("wss:"),
+  !sources.has("wss:"),
   "production CSP must not allow every WSS endpoint",
 );
 
@@ -171,7 +186,9 @@ const validDevnet = run({
 });
 assert.equal(validDevnet.status, 0, validDevnet.stderr);
 assert.ok(
-  validDevnet.stdout.includes("https://public-rpc.operator.example.com"),
+  connectSources(validDevnet.stdout).has(
+    "https://public-rpc.operator.example.com",
+  ),
 );
 
 console.log("Next.js production environment and CSP assertions passed");

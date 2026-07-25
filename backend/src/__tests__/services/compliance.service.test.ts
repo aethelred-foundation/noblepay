@@ -146,6 +146,40 @@ describe("ComplianceService", () => {
         submissionBlockNumber: "90",
         confirmations: 4,
       });
+
+      prisma.complianceSubmissionIntent.findUnique.mockResolvedValue({
+        paymentId: "11111111-1111-4111-8111-111111111111",
+        requestId: "11111111-1111-4111-8111-111111111111",
+        state: "COMPLETED",
+        submissionTxHash: `0x${"c".repeat(64)}`,
+        confirmations: 7,
+      });
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "normal",
+          },
+          "biz-1",
+        ),
+      ).resolves.toMatchObject({ confirmations: 0 });
+
+      prisma.complianceSubmissionIntent.findUnique.mockResolvedValue({
+        paymentId: "11111111-1111-4111-8111-111111111111",
+        requestId: "11111111-1111-4111-8111-111111111111",
+        state: "COMPLETED",
+        submissionTxHash: TX_HASH,
+        confirmations: null,
+      });
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "normal",
+          },
+          "biz-1",
+        ),
+      ).resolves.toMatchObject({ confirmations: 0 });
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
 
@@ -163,6 +197,31 @@ describe("ComplianceService", () => {
       ).rejects.toMatchObject({
         code: "COMPLIANCE_SUBMISSION_NOT_CONFIGURED",
         statusCode: 501,
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a durable intent whose request identity does not match the payment", async () => {
+      process.env.COMPLIANCE_API_URL = "https://compliance.aethelred.network";
+      process.env.COMPLIANCE_API_KEY = "k".repeat(32);
+      prisma.payment.findFirst.mockResolvedValue(payment());
+      prisma.complianceSubmissionIntent.upsert.mockResolvedValue({
+        paymentId: "11111111-1111-4111-8111-111111111111",
+        requestId: "22222222-2222-4222-8222-222222222222",
+        state: "PENDING",
+      });
+
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "urgent",
+          },
+          "biz-1",
+        ),
+      ).rejects.toMatchObject({
+        code: "COMPLIANCE_INTENT_CORRUPT",
+        statusCode: 503,
       });
       expect(prisma.$transaction).not.toHaveBeenCalled();
     });
@@ -187,6 +246,20 @@ describe("ComplianceService", () => {
     ).rejects.toMatchObject({
       code: "SCREENING_NOT_FOUND",
       statusCode: 404,
+    });
+  });
+
+  it("defaults screening history to the unauthenticated tenant scope", async () => {
+    prisma.complianceScreening.findMany.mockResolvedValue([{ id: "screen-1" }]);
+
+    await service.getScreeningResult(PAYMENT_ID);
+
+    expect(prisma.complianceScreening.findMany).toHaveBeenCalledWith({
+      where: {
+        paymentId: PAYMENT_ID,
+        payment: { businessId: "__unauthenticated__" },
+      },
+      orderBy: { createdAt: "desc" },
     });
   });
 
@@ -272,6 +345,22 @@ describe("ComplianceService", () => {
     );
   });
 
+  it("uses safe flagged-queue defaults when pagination and tenant are omitted", async () => {
+    prisma.payment.findMany.mockResolvedValue([]);
+    prisma.payment.count.mockResolvedValue(0);
+
+    await expect(service.getFlaggedPayments()).resolves.toMatchObject({
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 },
+    });
+    expect(prisma.payment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { businessId: "__unauthenticated__", status: "FLAGGED" },
+        skip: 0,
+        take: 20,
+      }),
+    );
+  });
+
   it("rejects review when the tenant payment is not flagged", async () => {
     prisma.payment.findFirst.mockResolvedValue(payment({ status: "PENDING" }));
     await expect(
@@ -340,6 +429,30 @@ describe("ComplianceService", () => {
       decision: "escalate",
       newStatus: "FLAGGED",
     });
+  });
+
+  it("defaults flagged review to the unauthenticated tenant scope", async () => {
+    prisma.payment.findFirst.mockResolvedValue(payment({ status: "FLAGGED" }));
+    prisma.complianceScreening.findFirst.mockResolvedValue({ id: "screen-1" });
+    prisma.complianceScreening.update.mockResolvedValue({ id: "screen-1" });
+
+    await service.reviewFlaggedPayment(
+      "11111111-1111-4111-8111-111111111111",
+      "escalate",
+      "manual resolution needed",
+      "reviewer",
+    );
+
+    expect(prisma.payment.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "11111111-1111-4111-8111-111111111111",
+        businessId: "__unauthenticated__",
+      },
+    });
+    expect(audit.createAuditEntryInTransaction).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ businessId: "__unauthenticated__" }),
+    );
   });
 
   it("fails sanctions health closed when the external service is not configured", async () => {

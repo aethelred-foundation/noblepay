@@ -193,8 +193,9 @@ mod tests {
     #[test]
     fn mock_round_trip_and_tamper_detection() {
         let generator = AttestationGenerator::new();
+        let nonce = Uuid::new_v4().to_string();
         let report = generator
-            .generate_attestation(b"screening", "nonce")
+            .generate_attestation(b"screening", &nonce)
             .unwrap();
         assert_eq!(report.platform, TeePlatform::Mock);
         assert!(generator.verify_attestation(&report, b"screening").unwrap());
@@ -209,12 +210,13 @@ mod tests {
 
     #[test]
     fn no_platform_fails_closed() {
+        let nonce = Uuid::new_v4().to_string();
         let generator = AttestationGenerator {
             enclave_measurement: String::new(),
             platform: TeePlatform::None,
         };
         assert!(generator
-            .generate_attestation(b"screening", "nonce")
+            .generate_attestation(b"screening", &nonce)
             .is_err());
         let report = AttestationReport {
             id: Uuid::new_v4(),
@@ -222,7 +224,7 @@ mod tests {
             measurement: String::new(),
             user_data_hash: sha3_hex(b"screening"),
             timestamp: Utc::now(),
-            nonce: "nonce".into(),
+            nonce,
             attestation_doc: String::new(),
             certificate_chain: Vec::new(),
         };
@@ -231,8 +233,9 @@ mod tests {
 
     #[test]
     fn raw_bytes_decode_is_bounded_by_valid_hex() {
+        let nonce = Uuid::new_v4().to_string();
         let mut report = AttestationGenerator::new()
-            .generate_attestation(b"screening", "nonce")
+            .generate_attestation(b"screening", &nonce)
             .unwrap();
         assert!(!AttestationGenerator::attestation_to_bytes(&report).is_empty());
         report.attestation_doc = "not-hex".into();

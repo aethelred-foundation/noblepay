@@ -442,11 +442,7 @@ export class InvoiceService {
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    logger.info("Invoice issued", {
-      invoiceId,
-      businessId,
-      currency: input.currency,
-    });
+    logger.info("Invoice issued");
     return this.toInvoice(created);
   }
 
@@ -644,11 +640,7 @@ export class InvoiceService {
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    logger.info("Invoice financing receipt persisted", {
-      invoiceId,
-      businessId,
-      status: receipt.status,
-    });
+    logger.info("Invoice financing receipt persisted");
     return this.toFinancingRequest(persisted);
   }
 

@@ -690,12 +690,7 @@ export class ReportingService {
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    logger.info("Regulatory report generated", {
-      reportId,
-      businessId,
-      type: template.type,
-      totalTransactions: summary.totalTransactions,
-    });
+    logger.info("Regulatory report generated");
     return this.toReport(created);
   }
 
@@ -796,11 +791,7 @@ export class ReportingService {
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    logger.info("Regulatory report submitted", {
-      reportId,
-      businessId,
-      status: receipt.status,
-    });
+    logger.info("Regulatory report submitted");
     return this.toReport(updated);
   }
 

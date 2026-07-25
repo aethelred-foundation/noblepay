@@ -774,11 +774,7 @@ export class ComplianceService {
       { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
     );
 
-    logger.info("Flagged payment reviewed", {
-      paymentId: payment.paymentId,
-      decision,
-      reviewer: reviewerAddress,
-    });
+    logger.info("Flagged payment reviewed");
 
     return {
       paymentId: payment.paymentId,
@@ -1145,9 +1141,11 @@ export class ComplianceService {
     }
 
     if (
-      verified.txHash.toLowerCase() !== evidence.verified.txHash.toLowerCase() ||
+      verified.txHash.toLowerCase() !==
+        evidence.verified.txHash.toLowerCase() ||
       verified.blockNumber !== evidence.verified.blockNumber ||
-      verified.signer.toLowerCase() !== evidence.verified.signer.toLowerCase() ||
+      verified.signer.toLowerCase() !==
+        evidence.verified.signer.toLowerCase() ||
       verified.disposition !== evidence.verified.disposition
     ) {
       throw new ComplianceError(

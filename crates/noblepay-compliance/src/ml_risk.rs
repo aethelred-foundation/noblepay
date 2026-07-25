@@ -221,6 +221,9 @@ pub struct RiskForest {
     pub trained_at: DateTime<Utc>,
 }
 
+/// Upper bound for work and response allocation during one prediction.
+const MAX_PREDICTION_TREES: usize = 1_024;
+
 impl RiskForest {
     /// Create the deterministic local/test forest fixture.
     #[cfg(any(test, feature = "mock-tee"))]
@@ -266,13 +269,17 @@ impl RiskForest {
     /// Predict risk score (0.0–1.0) with feature importances.
     pub fn predict(&self, features: &FeatureVector) -> MLPrediction {
         let arr = features.to_array();
-        let mut scores: Vec<f64> = Vec::with_capacity(self.trees.len());
+        let mut scores: Vec<f64> = Vec::with_capacity(MAX_PREDICTION_TREES);
 
-        for tree in &self.trees {
+        for tree in self.trees.iter().take(MAX_PREDICTION_TREES) {
             scores.push(tree.predict(&arr));
         }
 
-        let avg_score = scores.iter().sum::<f64>() / scores.len() as f64;
+        let avg_score = if scores.is_empty() {
+            0.0
+        } else {
+            scores.iter().sum::<f64>() / scores.len() as f64
+        };
         let calibrated = Self::calibrate(avg_score);
 
         // Calculate feature importances via perturbation
@@ -315,10 +322,17 @@ impl RiskForest {
             let mut perturbed = arr;
             perturbed[i] = 0.0; // Zero out feature
 
-            let perturbed_scores: Vec<f64> =
-                self.trees.iter().map(|t| t.predict(&perturbed)).collect();
-            let perturbed_avg =
-                perturbed_scores.iter().sum::<f64>() / perturbed_scores.len() as f64;
+            let mut perturbed_total = 0.0;
+            let mut perturbed_count = 0usize;
+            for tree in self.trees.iter().take(MAX_PREDICTION_TREES) {
+                perturbed_total += tree.predict(&perturbed);
+                perturbed_count += 1;
+            }
+            let perturbed_avg = if perturbed_count == 0 {
+                0.0
+            } else {
+                perturbed_total / perturbed_count as f64
+            };
             let perturbed_calibrated = Self::calibrate(perturbed_avg);
 
             let impact = (base_score - perturbed_calibrated).abs();
@@ -912,5 +926,23 @@ mod tests {
         let fv = FeatureVector::from_payment(&payment, None);
         let prediction = forest.predict(&fv);
         assert_eq!(prediction.tree_scores.len(), 5);
+    }
+
+    #[test]
+    fn prediction_bounds_untrusted_forest_work_and_output() {
+        let mut forest = RiskForest::default_model();
+        forest.trees = vec![
+            TreeNode::Leaf {
+                score: 0.5,
+                samples: 1,
+            };
+            MAX_PREDICTION_TREES + 1
+        ];
+        let payment = Payment::test_payment("a", "b", 1000, "USD");
+        let fv = FeatureVector::from_payment(&payment, None);
+
+        let prediction = forest.predict(&fv);
+
+        assert_eq!(prediction.tree_scores.len(), MAX_PREDICTION_TREES);
     }
 }
