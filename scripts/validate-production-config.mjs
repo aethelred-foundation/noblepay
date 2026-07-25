@@ -18,6 +18,7 @@ const gatewayConfig = read("services/gateway/internal/config/config.go");
 const gatewayIndexer = read("services/gateway/internal/services/indexer.go");
 const gatewayServer = read("services/gateway/internal/server/server.go");
 const ciWorkflow = read(".github/workflows/ci.yml");
+const nodeAuditPolicy = JSON.parse(read("audit-ci.jsonc"));
 const deploymentScript = read("scripts/deploy-devnet-core.mjs");
 const deploymentGovernance = read("scripts/lib/deployment-governance.mjs");
 const nodePackages = [
@@ -788,6 +789,11 @@ for (const nodePackage of nodePackages) {
     ">=24.18.0",
     `${nodePackage.name} must declare the supported Node runtime floor`,
   );
+  assert.equal(
+    nodePackage.devDependencies?.["audit-ci"],
+    "7.1.0",
+    `${nodePackage.name} must pin the reviewed audit-ci release`,
+  );
 }
 for (const lockRoot of nestedNodeLockRoots) {
   assert.equal(
@@ -797,15 +803,39 @@ for (const lockRoot of nestedNodeLockRoots) {
   );
 }
 assert.equal(
-  (ciWorkflow.match(/run: npm audit --audit-level=moderate/gu) ?? []).length,
+  (
+    ciWorkflow.match(
+      /run: npx --no-install audit-ci --config (?:[.][.]\/)?audit-ci[.]jsonc/gu,
+    ) ?? []
+  ).length,
   3,
-  "Frontend, backend, and contract tooling graphs must be audited",
+  "Frontend, backend, and contract tooling graphs must use the bounded audit policy",
 );
 assert.equal(
   (ciWorkflow.match(/run: npm audit --omit=dev --audit-level=moderate/gu) ?? [])
     .length,
   3,
   "Frontend, backend, and contract runtime graphs must be audited separately",
+);
+assert.equal(
+  nodeAuditPolicy.allowlist?.length,
+  1,
+  "The Node tooling audit policy must contain exactly one advisory exception",
+);
+assert.deepEqual(
+  Object.keys(nodeAuditPolicy.allowlist[0] ?? {}),
+  ["GHSA-mh99-v99m-4gvg"],
+  "The Node tooling audit policy may exempt only the reviewed brace-expansion advisory",
+);
+assert.equal(
+  nodeAuditPolicy.allowlist[0]?.["GHSA-mh99-v99m-4gvg"]?.expiry,
+  "2026-08-01T00:00:00Z",
+  "The brace-expansion tooling exception must remain short-lived",
+);
+assert.match(
+  nodeAuditPolicy.allowlist[0]?.["GHSA-mh99-v99m-4gvg"]?.notes ?? "",
+  /dev\/test/u,
+  "The tooling exception must document that production dependencies remain covered",
 );
 assert.equal(
   (ciWorkflow.match(/^\s+timeout-minutes: [1-9][0-9]*$/gmu) ?? []).length,

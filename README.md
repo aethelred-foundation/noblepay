@@ -158,6 +158,13 @@ npm run validate:dependencies
 (cd services/gateway && GOTOOLCHAIN=go1.25.12 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...)
 ```
 
+The tooling audit has one advisory-specific, expiring exception for
+`GHSA-mh99-v99m-4gvg` through legacy `brace-expansion` 1.x/2.x consumers.
+Those paths are development/test-only, no compatible patched 1.x/2.x release
+exists, and forcing 5.x into them changes the CommonJS API and breaks the test
+toolchain. The exception expires on 2026-08-01; production graphs remain hard
+gates with no exception.
+
 Runtime-only Node dependency audits remain available separately:
 
 ```bash

@@ -1,0 +1,16 @@
+{
+  "moderate": true,
+  "package-manager": "npm",
+  "report-type": "full",
+  "show-found": true,
+  "show-not-found": false,
+  "allowlist": [
+    {
+      "GHSA-mh99-v99m-4gvg": {
+        "active": true,
+        "expiry": "2026-08-01T00:00:00Z",
+        "notes": "Legacy brace-expansion 1.x/2.x only in dev/test glob toolchains; production 5.x is pinned to patched 5.0.8. Remove when compatible upstream backports land."
+      }
+    }
+  ]
+}

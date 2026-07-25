@@ -81,7 +81,7 @@ jobs:
         run: npm ci
 
       - name: Audit complete dependency graph
-        run: npm audit --audit-level=moderate
+        run: npx --no-install audit-ci --config ../audit-ci.jsonc
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
@@ -239,7 +239,7 @@ jobs:
         run: npm ci --legacy-peer-deps
 
       - name: Audit complete dependency graph
-        run: npm audit --audit-level=moderate
+        run: npx --no-install audit-ci --config audit-ci.jsonc
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
@@ -288,7 +288,7 @@ jobs:
         run: npm ci
 
       - name: Audit complete dependency graph
-        run: npm audit --audit-level=moderate
+        run: npx --no-install audit-ci --config ../audit-ci.jsonc
 
       - name: Audit production dependencies
         run: npm audit --omit=dev --audit-level=moderate
