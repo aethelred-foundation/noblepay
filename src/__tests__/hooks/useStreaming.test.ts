@@ -1,279 +1,131 @@
-import { renderHook, act } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { useStreaming } from "@/hooks/useStreaming";
+
+const mockRefetch = jest.fn().mockResolvedValue(undefined);
+const mockApiRequest = jest.fn();
+const mockQueryOptions: Record<string, any> = {};
+const mockQueryStates: Record<string, any> = {};
+
+jest.mock("@tanstack/react-query", () => ({
+  useQuery: (options: any) => {
+    const key = options.queryKey.join(":");
+    mockQueryOptions[key] = options;
+    return {
+      data: mockQueryStates[key]?.data,
+      isLoading: mockQueryStates[key]?.isLoading ?? false,
+      error: mockQueryStates[key]?.error ?? null,
+      refetch: mockRefetch,
+    };
+  },
+}));
+jest.mock("@/lib/api", () => ({
+  ...jest.requireActual("@/lib/api"),
+  apiRequest: (...args: unknown[]) => mockApiRequest(...args),
+}));
+
+const wallet = "0x1111111111111111111111111111111111111111";
 
 describe("useStreaming", () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    jest.clearAllMocks();
+    Object.keys(mockQueryStates).forEach((key) => delete mockQueryStates[key]);
+    mockQueryStates[`streams:list:${wallet}`] = {
+      data: [
+        {
+          id: "stream-1",
+          streamId: "stream-1",
+          sender: wallet,
+          recipient: "0x2222222222222222222222222222222222222222",
+          totalAmount: "100",
+          streamedAmount: "60",
+          withdrawnAmount: "5",
+          currency: "USDC",
+          ratePerSecond: "1",
+          startTime: "2026-07-21T10:00:00.000Z",
+          endTime: "2026-07-21T11:00:00.000Z",
+          status: "ACTIVE",
+          lastWithdrawAt: null,
+        },
+      ],
+    };
+    mockQueryStates["streams:balances:stream-1"] = {
+      data: [
+        {
+          streamId: "stream-1",
+          withdrawable: "55",
+          streamed: "60",
+          remaining: "40",
+          calculatedAt: "2026-07-21T10:30:00.000Z",
+        },
+      ],
+    };
+    mockQueryStates["streams:analytics"] = {
+      data: { totalActiveStreams: 1, totalStreamedVolume: "60" },
+    };
   });
 
-  afterEach(() => {
-    jest.useRealTimers();
+  it("maps durable stream terms, balances, and tenant analytics", () => {
+    const { result } = renderHook(() => useStreaming(wallet));
+
+    expect(result.current.streams[0]).toEqual(
+      expect.objectContaining({
+        id: "stream-1",
+        status: "Active",
+        cancelable: false,
+        lastWithdrawal: null,
+      }),
+    );
+    expect(result.current.balances.get("stream-1")).toEqual(
+      expect.objectContaining({
+        withdrawable: 55,
+        remaining: 40,
+        withdrawn: 5,
+      }),
+    );
+    expect(result.current.analytics).toEqual(
+      expect.objectContaining({
+        totalActiveStreams: 1,
+        outgoingStreams: 1,
+        incomingStreams: 0,
+      }),
+    );
   });
 
-  it("returns loading state initially", () => {
-    const { result } = renderHook(() => useStreaming());
+  it("uses list, per-stream balance, and analytics API endpoints", async () => {
+    renderHook(() => useStreaming(wallet));
+    const signal = new AbortController().signal;
 
-    expect(result.current.isLoading).toBe(true);
+    await mockQueryOptions[`streams:list:${wallet}`].queryFn({ signal });
+    await mockQueryOptions["streams:balances:stream-1"].queryFn({ signal });
+    await mockQueryOptions["streams:analytics"].queryFn({ signal });
+
+    expect(mockApiRequest.mock.calls.map(([path]) => path)).toEqual([
+      "/v1/streams",
+      "/v1/streams/stream-1/balance",
+      "/v1/streams/analytics",
+    ]);
+  });
+
+  it("does not expose pretend stream writes", async () => {
+    const { result } = renderHook(() => useStreaming(wallet));
+
+    expect(result.current.mutationsEnabled).toBe(false);
+    await expect(result.current.createStream()).rejects.toMatchObject({
+      status: 501,
+      code: "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+    });
+    await expect(result.current.cancelStream()).rejects.toMatchObject({
+      status: 501,
+    });
+  });
+
+  it("surfaces authoritative query failures without fallback records", () => {
+    mockQueryStates[`streams:list:${wallet}`] = {
+      error: new Error("backend unavailable"),
+    };
+    const { result } = renderHook(() => useStreaming(wallet));
+
     expect(result.current.streams).toEqual([]);
-    expect(result.current.balances.size).toBe(0);
-    expect(result.current.analytics).toBeNull();
-  });
-
-  it("loads mock data after timeout", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.streams.length).toBe(4);
-  });
-
-  it("computes analytics after loading", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    // Allow useEffect for analytics to run
-    act(() => {
-      jest.advanceTimersByTime(0);
-    });
-
-    expect(result.current.analytics).not.toBeNull();
-    const analytics = result.current.analytics!;
-    expect(analytics.totalActiveStreams).toBe(2); // 2 Active streams
-    expect(analytics.totalStreamedValue).toBeGreaterThan(0);
-    expect(analytics.totalRemainingValue).toBeGreaterThan(0);
-  });
-
-  it("analytics computes incoming/outgoing streams correctly", () => {
-    const { result } = renderHook(() =>
-      useStreaming("0x1234567890abcdef1234567890abcdef12345678"),
-    );
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    act(() => {
-      jest.advanceTimersByTime(0);
-    });
-
-    const analytics = result.current.analytics!;
-    // Streams where user is sender: stream001 and stream003
-    expect(analytics.outgoingStreams).toBe(2);
-    // Streams where user is recipient: stream002 and stream004
-    expect(analytics.incomingStreams).toBe(2);
-  });
-
-  it("streams have correct structure", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    const stream = result.current.streams[0];
-    expect(stream).toHaveProperty("id");
-    expect(stream).toHaveProperty("sender");
-    expect(stream).toHaveProperty("recipient");
-    expect(stream).toHaveProperty("tokenSymbol");
-    expect(stream).toHaveProperty("totalAmount");
-    expect(stream).toHaveProperty("streamedAmount");
-    expect(stream).toHaveProperty("ratePerSecond");
-    expect(stream).toHaveProperty("startTime");
-    expect(stream).toHaveProperty("endTime");
-    expect(stream).toHaveProperty("status");
-    expect(stream).toHaveProperty("cancelable");
-    expect(stream).toHaveProperty("lastWithdrawal");
-  });
-
-  it("includes streams of various statuses", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    const statuses = result.current.streams.map((s) => s.status);
-    expect(statuses).toContain("Active");
-    expect(statuses).toContain("Completed");
-    expect(statuses).toContain("Paused");
-  });
-
-  it("computes balances for active streams", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    // After loading, balances should be computed for active streams
-    act(() => {
-      jest.advanceTimersByTime(1100);
-    });
-
-    // Active streams should have balances
-    const activeStreams = result.current.streams.filter(
-      (s) => s.status === "Active",
-    );
-    for (const stream of activeStreams) {
-      const balance = result.current.balances.get(stream.id);
-      expect(balance).toBeDefined();
-      expect(balance).toHaveProperty("streamId");
-      expect(balance).toHaveProperty("withdrawable");
-      expect(balance).toHaveProperty("remaining");
-      expect(balance).toHaveProperty("deposited");
-      expect(balance).toHaveProperty("withdrawn");
-      expect(balance).toHaveProperty("snapshotAt");
-    }
-  });
-
-  it("createStream adds a new active stream", () => {
-    const { result } = renderHook(() =>
-      useStreaming("0x1234567890abcdef1234567890abcdef12345678"),
-    );
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    const initialCount = result.current.streams.length;
-
-    act(() => {
-      result.current.createStream({
-        recipient: "0xrecipient",
-        tokenSymbol: "USDC",
-        totalAmount: 10_000,
-        durationDays: 30,
-      });
-    });
-
-    expect(result.current.streams.length).toBe(initialCount + 1);
-    const newStream = result.current.streams[0]; // prepended
-    expect(newStream.status).toBe("Active");
-    expect(newStream.cancelable).toBe(true);
-    expect(newStream.totalAmount).toBe(10_000);
-    expect(newStream.tokenSymbol).toBe("USDC");
-    expect(newStream.streamedAmount).toBe(0);
-    expect(newStream.sender).toBe("0x1234567890abcdef1234567890abcdef12345678");
-    expect(newStream.recipient).toBe("0xrecipient");
-    expect(newStream.ratePerSecond).toBeCloseTo(10_000 / (30 * 86_400), 4);
-  });
-
-  it("createStream uses default address when no userAddress", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    act(() => {
-      result.current.createStream({
-        recipient: "0xrecipient",
-        tokenSymbol: "USDC",
-        totalAmount: 5_000,
-        durationDays: 10,
-      });
-    });
-
-    const newStream = result.current.streams[0];
-    expect(newStream.sender).toBe("0x1234567890abcdef1234567890abcdef12345678");
-  });
-
-  it("cancelStream sets stream status to Cancelled", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    act(() => {
-      result.current.cancelStream("0xstream001");
-    });
-
-    const cancelled = result.current.streams.find(
-      (s) => s.id === "0xstream001",
-    );
-    expect(cancelled?.status).toBe("Cancelled");
-  });
-
-  it("cancelStream does not affect other streams", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    act(() => {
-      result.current.cancelStream("0xstream001");
-    });
-
-    const stream2 = result.current.streams.find((s) => s.id === "0xstream002");
-    expect(stream2?.status).toBe("Active");
-  });
-
-  it("pauseStream sets stream status to Paused", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    act(() => {
-      result.current.pauseStream("0xstream001");
-    });
-
-    const paused = result.current.streams.find((s) => s.id === "0xstream001");
-    expect(paused?.status).toBe("Paused");
-  });
-
-  it("resumeStream sets paused stream to Active", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    // stream004 is Paused
-    act(() => {
-      result.current.resumeStream("0xstream004");
-    });
-
-    const resumed = result.current.streams.find((s) => s.id === "0xstream004");
-    expect(resumed?.status).toBe("Active");
-  });
-
-  it("resumeStream only resumes paused streams", () => {
-    const { result } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    // stream003 is Completed, should not resume
-    act(() => {
-      result.current.resumeStream("0xstream003");
-    });
-
-    const stream = result.current.streams.find((s) => s.id === "0xstream003");
-    expect(stream?.status).toBe("Completed");
-  });
-
-  it("cleans up timers on unmount", () => {
-    const clearTimeoutSpy = jest.spyOn(global, "clearTimeout");
-    const { unmount } = renderHook(() => useStreaming());
-
-    act(() => {
-      jest.advanceTimersByTime(500);
-    });
-
-    unmount();
-
-    expect(clearTimeoutSpy).toHaveBeenCalled();
-    clearTimeoutSpy.mockRestore();
+    expect(result.current.error).toEqual(new Error("backend unavailable"));
   });
 });

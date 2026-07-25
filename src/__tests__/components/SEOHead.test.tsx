@@ -36,10 +36,7 @@ describe("SEOHead", () => {
     );
 
     const canonical = container.querySelector('link[rel="canonical"]');
-    expect(canonical).toHaveAttribute(
-      "href",
-      "https://noblepay.aethelred.network/payments",
-    );
+    expect(canonical).toHaveAttribute("href", "http://localhost:3008/payments");
   });
 
   it("renders canonical URL without path (defaults to root)", () => {
@@ -48,10 +45,7 @@ describe("SEOHead", () => {
     );
 
     const canonical = container.querySelector('link[rel="canonical"]');
-    expect(canonical).toHaveAttribute(
-      "href",
-      "https://noblepay.aethelred.network",
-    );
+    expect(canonical).toHaveAttribute("href", "http://localhost:3008");
   });
 
   it("renders OpenGraph title", () => {
@@ -92,7 +86,7 @@ describe("SEOHead", () => {
     const ogImage = container.querySelector('meta[property="og:image"]');
     expect(ogImage).toHaveAttribute(
       "content",
-      "https://noblepay.aethelred.network/og-image.svg",
+      "http://localhost:3008/og-image.svg",
     );
   });
 
@@ -104,7 +98,7 @@ describe("SEOHead", () => {
     const ogUrl = container.querySelector('meta[property="og:url"]');
     expect(ogUrl).toHaveAttribute(
       "content",
-      "https://noblepay.aethelred.network/compliance",
+      "http://localhost:3008/compliance",
     );
   });
 
@@ -127,7 +121,7 @@ describe("SEOHead", () => {
     const twitterImage = container.querySelector('meta[name="twitter:image"]');
     expect(twitterImage).toHaveAttribute(
       "content",
-      "https://noblepay.aethelred.network/og-image.svg",
+      "http://localhost:3008/og-image.svg",
     );
   });
 });

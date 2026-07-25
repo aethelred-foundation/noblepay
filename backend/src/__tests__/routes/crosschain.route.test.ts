@@ -1,13 +1,3 @@
-import {
-  createMockPrisma,
-  resetAllMocks,
-} from "../setup";
-
-const mockPrisma = createMockPrisma();
-jest.mock("@prisma/client", () => ({
-  PrismaClient: jest.fn(() => mockPrisma),
-}));
-
 const mockCrossChainService = {
   getChains: jest.fn(),
   getRoutes: jest.fn(),
@@ -18,246 +8,252 @@ const mockCrossChainService = {
   getRelayNodes: jest.fn(),
   getAnalytics: jest.fn(),
 };
+let authenticated = true;
 
-const mockAuditService = { createAuditEntry: jest.fn() };
-
-jest.mock("../../services/crosschain", () => ({
-  CrossChainService: jest.fn(() => mockCrossChainService),
-  CrossChainError: class CrossChainError extends Error {
-    code: string;
-    statusCode: number;
-    constructor(code: string, message: string, statusCode: number) {
+jest.mock("../../lib/db", () => ({ prisma: {} }));
+jest.mock("../../services/audit", () => ({ AuditService: jest.fn() }));
+jest.mock("../../services/crosschain", () => {
+  class CrossChainError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode = 400,
+    ) {
       super(message);
-      this.code = code;
-      this.statusCode = statusCode;
-      this.name = "CrossChainError";
     }
+  }
+  return {
+    CrossChainService: jest.fn(() => mockCrossChainService),
+    CrossChainError,
+  };
+});
+jest.mock("../../middleware/auth", () => ({
+  authenticateAPIKey: (
+    req: { businessId?: string },
+    _res: unknown,
+    next: () => void,
+  ) => {
+    if (authenticated) req.businessId = "business-1";
+    next();
   },
 }));
-
-jest.mock("../../services/audit", () => ({
-  AuditService: jest.fn(() => mockAuditService),
-}));
-
-jest.mock("../../middleware/auth", () => ({
-  authenticateAPIKey: jest.fn((_req: any, _res: any, next: any) => next()),
-}));
-
 jest.mock("../../middleware/rbac", () => ({
-  extractRole: jest.fn((_req: any, _res: any, next: any) => next()),
-  requireRole: jest.fn(() => (_req: any, _res: any, next: any) => next()),
-  requirePermission: jest.fn(() => (_req: any, _res: any, next: any) => next()),
+  extractRole: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireRole: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requirePermission: () => (_req: unknown, _res: unknown, next: () => void) =>
+    next(),
 }));
 
 import express from "express";
 import request from "supertest";
-import crosschainRouter from "../../routes/crosschain";
+import router from "../../routes/crosschain";
 import { CrossChainError } from "../../services/crosschain";
 
 const app = express();
 app.use(express.json());
-app.use("/v1/crosschain", crosschainRouter);
+app.use("/v1/crosschain", router);
 
-beforeEach(() => {
-  resetAllMocks();
-});
+const transfer = {
+  sourceChain: "aethelred",
+  destinationChain: "ethereum",
+  token: "USDC",
+  amount: "100",
+  recipient: "0x2222222222222222222222222222222222222222",
+};
 
-describe("CrossChain Routes", () => {
-  describe("GET /v1/crosschain/chains", () => {
-    it("should return supported chains", async () => {
-      mockCrossChainService.getChains.mockReturnValue([
-        { id: "ethereum", name: "Ethereum", status: "ACTIVE" },
-        { id: "noble", name: "Noble", status: "ACTIVE" },
-      ]);
+describe("cross-chain routes", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authenticated = true;
+  });
 
-      const res = await request(app).get("/v1/crosschain/chains");
+  it("returns verified chain health from the service", async () => {
+    mockCrossChainService.getChains.mockResolvedValue([
+      { id: "aethelred", status: "ONLINE" },
+    ]);
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(2);
-    });
+    const response = await request(app).get("/v1/crosschain/chains");
 
-    it("should handle CrossChainError", async () => {
-      mockCrossChainService.getChains.mockImplementation(() => {
-        throw new CrossChainError("SERVICE_DOWN", "Chain service down", 503);
-      });
-
-      const res = await request(app).get("/v1/crosschain/chains");
-
-      expect(res.status).toBe(503);
-      expect(res.body.error).toBe("SERVICE_DOWN");
-    });
-
-    it("should return 500 on unexpected error", async () => {
-      mockCrossChainService.getChains.mockImplementation(() => {
-        throw new Error("crash");
-      });
-
-      const res = await request(app).get("/v1/crosschain/chains");
-
-      expect(res.status).toBe(500);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      success: true,
+      data: [{ id: "aethelred", status: "ONLINE" }],
     });
   });
 
-  describe("GET /v1/crosschain/routes", () => {
-    it("should return routing options", async () => {
-      mockCrossChainService.getRoutes.mockReturnValue([
-        { protocol: "IBC", estimatedTime: "5m", fee: "0.1" },
-      ]);
+  it("rejects query injection on chain health and route discovery", async () => {
+    const chains = await request(app).get("/v1/crosschain/chains?fake=true");
+    const sameChain = await request(app).get(
+      "/v1/crosschain/routes?source=aethelred&destination=aethelred&token=USDC&amount=1",
+    );
 
-      const res = await request(app).get(
-        "/v1/crosschain/routes?source=ethereum&destination=noble&token=USDC&amount=1000",
-      );
+    expect(chains.status).toBe(400);
+    expect(sameChain.status).toBe(400);
+    expect(mockCrossChainService.getChains).not.toHaveBeenCalled();
+    expect(mockCrossChainService.getRoutes).not.toHaveBeenCalled();
+  });
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
+  it("passes a strict quote request and preserves its 503 fail-closed result", async () => {
+    mockCrossChainService.getRoutes.mockRejectedValue(
+      new CrossChainError(
+        "ROUTE_QUOTE_UNAVAILABLE",
+        "No signed quote provider",
+        503,
+      ),
+    );
 
-    it("should return 500 on error", async () => {
-      mockCrossChainService.getRoutes.mockImplementation(() => { throw new Error("crash"); });
+    const response = await request(app).get(
+      "/v1/crosschain/routes?source=aethelred&destination=ethereum&token=USDC&amount=100",
+    );
 
-      const res = await request(app).get("/v1/crosschain/routes?source=x&destination=y&token=USDC&amount=1000");
+    expect(response.status).toBe(503);
+    expect(mockCrossChainService.getRoutes).toHaveBeenCalledWith(
+      "aethelred",
+      "ethereum",
+      "USDC",
+      "100",
+    );
+  });
 
-      expect(res.status).toBe(500);
+  it("validates a transfer before surfacing the execution-unavailable status", async () => {
+    mockCrossChainService.initiateTransfer.mockRejectedValue(
+      new CrossChainError(
+        "BRIDGE_EXECUTION_UNAVAILABLE",
+        "No receipt verifier",
+        501,
+      ),
+    );
+
+    const invalid = await request(app)
+      .post("/v1/crosschain/transfers")
+      .send({ ...transfer, recipient: "not-an-address", extra: true });
+    const valid = await request(app)
+      .post("/v1/crosschain/transfers")
+      .send(transfer);
+
+    expect(invalid.status).toBe(400);
+    expect(valid.status).toBe(501);
+    expect(mockCrossChainService.initiateTransfer).toHaveBeenCalledWith(
+      transfer,
+      "business-1",
+      "business-1",
+    );
+  });
+
+  it("passes bounded transfer filters with authenticated tenant identity", async () => {
+    mockCrossChainService.listTransfers.mockResolvedValue([]);
+
+    const response = await request(app).get(
+      "/v1/crosschain/transfers?status=CONFIRMING&page=2&limit=5",
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockCrossChainService.listTransfers).toHaveBeenCalledWith({
+      status: "CONFIRMING",
+      page: 2,
+      limit: 5,
+      businessId: "business-1",
     });
   });
 
-  describe("POST /v1/crosschain/transfers", () => {
-    it("should initiate a cross-chain transfer", async () => {
-      mockCrossChainService.initiateTransfer.mockResolvedValue({
-        id: "xfer-1",
-        sourceChain: "ethereum",
-        destChain: "noble",
-        status: "PENDING",
-      });
+  it("reads one transfer only through the authenticated tenant", async () => {
+    mockCrossChainService.getTransfer.mockResolvedValue({ id: "transfer-1" });
 
-      const res = await request(app)
-        .post("/v1/crosschain/transfers")
-        .send({ sourceChain: "ethereum", destChain: "noble", token: "USDC", amount: "1000" });
+    const response = await request(app).get(
+      "/v1/crosschain/transfers/transfer-1",
+    );
 
-      expect(res.status).toBe(201);
-      expect(res.body.data.id).toBe("xfer-1");
-    });
+    expect(response.status).toBe(200);
+    expect(mockCrossChainService.getTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      "business-1",
+    );
+  });
 
-    it("should return 500 on error", async () => {
-      mockCrossChainService.initiateTransfer.mockRejectedValue(new Error("crash"));
+  it("preserves the explicit fail-closed recovery status", async () => {
+    mockCrossChainService.recoverTransfer.mockRejectedValue(
+      new CrossChainError(
+        "RECOVERY_EXECUTION_UNAVAILABLE",
+        "No receipt verifier",
+        501,
+      ),
+    );
 
-      const res = await request(app)
-        .post("/v1/crosschain/transfers")
-        .send({ sourceChain: "ethereum", destChain: "noble", token: "USDC", amount: "1000" });
+    const response = await request(app)
+      .post("/v1/crosschain/recover")
+      .send({ transferId: "transfer-1" });
 
-      expect(res.status).toBe(500);
+    expect(response.status).toBe(501);
+    expect(response.body.error).toBe("RECOVERY_EXECUTION_UNAVAILABLE");
+    expect(mockCrossChainService.recoverTransfer).toHaveBeenCalledWith(
+      "transfer-1",
+      "business-1",
+      "business-1",
+    );
+  });
+
+  it("bounds relay registry reads", async () => {
+    mockCrossChainService.getRelayNodes.mockResolvedValue([]);
+
+    const response = await request(app).get(
+      "/v1/crosschain/relays?page=4&limit=10",
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockCrossChainService.getRelayNodes).toHaveBeenCalledWith({
+      page: 4,
+      limit: 10,
     });
   });
 
-  describe("GET /v1/crosschain/transfers", () => {
-    it("should list transfers", async () => {
-      mockCrossChainService.listTransfers.mockReturnValue([
-        { id: "xfer-1", status: "COMPLETED" },
-      ]);
+  it("returns tenant-scoped bridge analytics", async () => {
+    mockCrossChainService.getAnalytics.mockResolvedValue({ totalTransfers: 3 });
 
-      const res = await request(app).get("/v1/crosschain/transfers");
+    const response = await request(app).get("/v1/crosschain/analytics");
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
-
-    it("should return 500 on error", async () => {
-      mockCrossChainService.listTransfers.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/crosschain/transfers");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(200);
+    expect(mockCrossChainService.getAnalytics).toHaveBeenCalledWith(
+      "business-1",
+    );
   });
 
-  describe("GET /v1/crosschain/transfers/:id", () => {
-    it("should return a specific transfer", async () => {
-      mockCrossChainService.getTransfer.mockReturnValue({
-        id: "xfer-1",
-        status: "COMPLETED",
-      });
+  it.each([
+    ["initiation", "post", "/v1/crosschain/transfers", transfer],
+    ["list", "get", "/v1/crosschain/transfers", undefined],
+    ["record", "get", "/v1/crosschain/transfers/transfer-1", undefined],
+    [
+      "recovery",
+      "post",
+      "/v1/crosschain/recover",
+      { transferId: "transfer-1" },
+    ],
+    ["analytics", "get", "/v1/crosschain/analytics", undefined],
+  ])(
+    "rejects %s without tenant identity",
+    async (_name, method, path, body) => {
+      authenticated = false;
+      const operation = request(app)[method as "get" | "post"](path);
+      if (body) operation.send(body);
 
-      const res = await request(app).get("/v1/crosschain/transfers/xfer-1");
+      const response = await operation;
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.id).toBe("xfer-1");
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe("UNAUTHORIZED");
+    },
+  );
+
+  it("does not leak unexpected chain service failures", async () => {
+    mockCrossChainService.getChains.mockRejectedValue(
+      new Error("RPC credential secret-value"),
+    );
+
+    const response = await request(app).get("/v1/crosschain/chains");
+
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({
+      error: "INTERNAL_ERROR",
+      message: "An internal error occurred",
     });
-
-    it("should return 500 on error", async () => {
-      mockCrossChainService.getTransfer.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/crosschain/transfers/xfer-1");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  describe("POST /v1/crosschain/recover", () => {
-    it("should recover a stuck transfer", async () => {
-      mockCrossChainService.recoverTransfer.mockResolvedValue({
-        id: "xfer-1",
-        status: "RECOVERED",
-      });
-
-      const res = await request(app)
-        .post("/v1/crosschain/recover")
-        .send({ transferId: "xfer-1" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.status).toBe("RECOVERED");
-    });
-
-    it("should return 500 on error", async () => {
-      mockCrossChainService.recoverTransfer.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app)
-        .post("/v1/crosschain/recover")
-        .send({ transferId: "xfer-1" });
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  describe("GET /v1/crosschain/relays", () => {
-    it("should return relay nodes", async () => {
-      mockCrossChainService.getRelayNodes.mockReturnValue([
-        { id: "relay-1", status: "ACTIVE" },
-      ]);
-
-      const res = await request(app).get("/v1/crosschain/relays");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
-
-    it("should return 500 on error", async () => {
-      mockCrossChainService.getRelayNodes.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/crosschain/relays");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  describe("GET /v1/crosschain/analytics", () => {
-    it("should return cross-chain analytics", async () => {
-      mockCrossChainService.getAnalytics.mockReturnValue({
-        totalTransfers: 100,
-        totalVolume: "5000000",
-      });
-
-      const res = await request(app).get("/v1/crosschain/analytics");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.totalTransfers).toBe(100);
-    });
-
-    it("should return 500 on error", async () => {
-      mockCrossChainService.getAnalytics.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/crosschain/analytics");
-
-      expect(res.status).toBe(500);
-    });
+    expect(JSON.stringify(response.body)).not.toContain("secret-value");
   });
 });

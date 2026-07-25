@@ -7,8 +7,15 @@ import {
   useFlaggedPayments,
   useReviewFlaggedPayment,
   useUpdateSanctionsList,
-  useRiskThresholds,
+  useSubmitScreening,
+  useAuthorizeTravelRule,
 } from "@/hooks/useCompliance";
+
+const mockSignMessageAsync = jest.fn();
+
+jest.mock("wagmi", () => ({
+  useSignMessage: () => ({ signMessageAsync: mockSignMessageAsync }),
+}));
 
 const captured = {
   queryFns: {} as Record<string, Function>,
@@ -31,17 +38,28 @@ jest.mock("@tanstack/react-query", () => ({
       captured.mutationFns.push(opts.mutationFn);
       captured.mutationOpts.push(opts);
     }
-    return { mutate: jest.fn(), isPending: false };
+    return {
+      mutate: jest.fn(),
+      mutateAsync: jest.fn(),
+      isPending: false,
+      isSuccess: false,
+      data: undefined,
+      error: null,
+      reset: jest.fn(),
+    };
   },
   useQueryClient: () => ({ invalidateQueries: jest.fn() }),
 }));
 
 const mockFetchResponse = (data: any, ok = true, status = 200) => {
+  document.cookie = "noblepay_csrf=test-csrf; path=/";
   (global.fetch as jest.Mock) = jest.fn().mockResolvedValue({
     ok,
     status,
     statusText: ok ? "OK" : "Bad Request",
+    headers: new Headers({ "content-type": "application/json" }),
     json: () => Promise.resolve(data),
+    text: () => Promise.resolve(JSON.stringify(data)),
   });
 };
 
@@ -131,15 +149,6 @@ describe("useUpdateSanctionsList", () => {
   });
 });
 
-describe("useRiskThresholds", () => {
-  it("returns undefined when contract data is not available", () => {
-    const { result } = renderHook(() => useRiskThresholds());
-
-    // useReadContract mock returns { data: undefined }
-    expect(result.current).toBeUndefined();
-  });
-});
-
 // ---------------------------------------------------------------------------
 // fetchJson and queryFn/mutationFn execution tests
 // ---------------------------------------------------------------------------
@@ -152,7 +161,12 @@ describe("compliance queryFns", () => {
   });
 
   it("complianceStatus queryFn calls correct endpoint", async () => {
-    const mockData = { operational: true, teeNodesOnline: 5 };
+    const mockData = {
+      engineStatus: "healthy",
+      checkedAt: "2026-07-22T00:00:00.000Z",
+      settlementEvidence: "verified_per_submission",
+      sanctions: { status: "fresh" },
+    };
     mockFetchResponse(mockData);
 
     renderHook(() => useComplianceStatus());
@@ -173,7 +187,7 @@ describe("compliance queryFns", () => {
     renderHook(() => useComplianceStatus());
 
     const fn = captured.queryFns["complianceStatus"];
-    await expect(fn()).rejects.toThrow("API 500");
+    await expect(fn()).rejects.toThrow("Request failed with status 500");
   });
 
   it("screening queryFn calls correct endpoint", async () => {
@@ -217,15 +231,18 @@ describe("compliance queryFns", () => {
   });
 
   it("flaggedPayments queryFn calls correct endpoint", async () => {
-    const mockData = { payments: [], total: 0 };
-    mockFetchResponse(mockData);
+    mockFetchResponse({
+      success: true,
+      data: [],
+      pagination: { total: 0 },
+    });
 
     renderHook(() => useFlaggedPayments());
 
     const fn = captured.queryFns["flaggedPayments"];
     expect(fn).toBeDefined();
     const result = await fn();
-    expect(result).toEqual(mockData);
+    expect(result).toEqual({ payments: [], total: 0 });
   });
 });
 
@@ -243,16 +260,16 @@ describe("compliance mutationFns", () => {
     expect(captured.mutationFns.length).toBeGreaterThan(0);
     await captured.mutationFns[0]({
       paymentId: "pay-001",
-      decision: "clear",
-      notes: "Reviewed and cleared",
+      decision: "escalate",
+      reason: "Requires governed resolution",
     });
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining("/v1/compliance/flagged/pay-001/review"),
       expect.objectContaining({
         method: "POST",
         body: JSON.stringify({
-          decision: "clear",
-          notes: "Reviewed and cleared",
+          decision: "escalate",
+          reason: "Requires governed resolution",
         }),
       }),
     );
@@ -273,12 +290,12 @@ describe("compliance mutationFns", () => {
     renderHook(() => useUpdateSanctionsList());
 
     expect(captured.mutationFns.length).toBeGreaterThan(0);
-    await captured.mutationFns[0]("OFAC");
+    await captured.mutationFns[0]();
     expect(global.fetch).toHaveBeenCalledWith(
       expect.stringContaining("/v1/compliance/sanctions/update"),
       expect.objectContaining({
         method: "POST",
-        body: JSON.stringify({ list: "OFAC" }),
+        body: undefined,
       }),
     );
   });
@@ -289,5 +306,91 @@ describe("compliance mutationFns", () => {
     expect(captured.mutationOpts.length).toBeGreaterThan(0);
     expect(typeof captured.mutationOpts[0].onSuccess).toBe("function");
     captured.mutationOpts[0].onSuccess();
+  });
+
+  it("useSubmitScreening sends the database record id and priority", async () => {
+    mockFetchResponse({ success: true, data: { status: "PASSED" } });
+
+    renderHook(() => useSubmitScreening());
+
+    await captured.mutationFns[0]({
+      paymentId: "record-uuid",
+      priority: "high",
+    });
+    expect(global.fetch).toHaveBeenCalledWith(
+      expect.stringContaining("/v1/compliance/screen"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ paymentId: "record-uuid", priority: "high" }),
+      }),
+    );
+  });
+
+  it("wallet-signs the exact Travel Rule challenge before authorization", async () => {
+    const data = {
+      originatorName: "Acme Trading LLC",
+      originatorAccount: "AE-001",
+      originatorAddress: "Dubai, AE",
+      beneficiaryName: "Beneficiary Ltd",
+      beneficiaryAccount: "GB-002",
+    };
+    const challengeId = "11111111-1111-4111-8111-111111111111";
+    mockSignMessageAsync.mockResolvedValue(`0x${"ab".repeat(65)}`);
+    document.cookie = "noblepay_csrf=test-csrf; path=/";
+    (global.fetch as jest.Mock) = jest
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: {
+              challengeId,
+              message: "tenant-bound Travel Rule challenge",
+              payloadCommitment: `0x${"cd".repeat(32)}`,
+              expiresAt: "2026-07-22T00:05:00.000Z",
+            },
+          }),
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 201,
+        headers: new Headers({ "content-type": "application/json" }),
+        json: () =>
+          Promise.resolve({
+            success: true,
+            data: { payloadCommitment: `0x${"cd".repeat(32)}` },
+          }),
+      });
+
+    renderHook(() => useAuthorizeTravelRule());
+    await captured.mutationFns[0]({ paymentId: "record-uuid", data });
+
+    expect(mockSignMessageAsync).toHaveBeenCalledWith({
+      message: "tenant-bound Travel Rule challenge",
+    });
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining("/v1/compliance/travel-rule/challenge"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ paymentId: "record-uuid", data }),
+      }),
+    );
+    expect(global.fetch).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining("/v1/compliance/travel-rule/authorize"),
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          paymentId: "record-uuid",
+          challengeId,
+          signature: `0x${"ab".repeat(65)}`,
+          data,
+        }),
+      }),
+    );
   });
 });

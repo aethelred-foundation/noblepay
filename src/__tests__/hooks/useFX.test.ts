@@ -1,281 +1,129 @@
-import { renderHook, act } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { useFX } from "@/hooks/useFX";
+
+const mockRefetch = jest.fn().mockResolvedValue(undefined);
+const mockApiRequest = jest.fn();
+const mockQueryOptions: Record<string, any> = {};
+const mockQueryStates: Record<string, any> = {};
+
+jest.mock("@tanstack/react-query", () => ({
+  useQuery: (options: any) => {
+    const key = options.queryKey.join(":");
+    mockQueryOptions[key] = options;
+    return {
+      data: mockQueryStates[key]?.data,
+      isLoading: mockQueryStates[key]?.isLoading ?? false,
+      error: mockQueryStates[key]?.error ?? null,
+      refetch: mockRefetch,
+    };
+  },
+}));
+jest.mock("@/lib/api", () => ({
+  ...jest.requireActual("@/lib/api"),
+  apiRequest: (...args: unknown[]) => mockApiRequest(...args),
+}));
 
 describe("useFX", () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    jest.clearAllMocks();
+    Object.keys(mockQueryStates).forEach((key) => delete mockQueryStates[key]);
+    mockQueryStates["fx:rates"] = {
+      data: [
+        {
+          pair: "USDC/AED",
+          bid: 3.66,
+          ask: 3.68,
+          mid: 3.67,
+          timestamp: "2026-07-21T10:00:00.000Z",
+          change24h: null,
+        },
+      ],
+    };
+    mockQueryStates["fx:hedges"] = {
+      data: [
+        {
+          id: "hedge-1",
+          pair: "USDC/AED",
+          notionalAmount: "1000",
+          entryRate: 3.66,
+          strikeRate: 3.7,
+          currentRate: 3.66,
+          expiryDate: "2026-08-21T10:00:00.000Z",
+          status: "OPEN",
+          marginDeposit: null,
+          unrealizedPnL: null,
+          createdAt: "2026-07-21T10:00:00.000Z",
+        },
+      ],
+    };
+    mockQueryStates["fx:exposure"] = {
+      data: {
+        totalExposure: "1000",
+        byCurrency: {
+          USDC: {
+            exposure: "1000",
+            hedged: "1000",
+            unhedged: null,
+            hedgeRatio: null,
+          },
+        },
+        netExposure: null,
+        valueAtRisk: null,
+        calculatedAt: "2026-07-21T10:00:00.000Z",
+      },
+    };
   });
 
-  afterEach(() => {
-    jest.useRealTimers();
-  });
-
-  it("returns loading state initially", () => {
+  it("maps verified oracle rates and durable hedge snapshots honestly", () => {
     const { result } = renderHook(() => useFX());
 
-    expect(result.current.isLoading).toBe(true);
-    expect(result.current.rates).toEqual([]);
-    expect(result.current.hedges).toEqual([]);
-    expect(result.current.exposure).toBeNull();
+    expect(result.current.rates[0]).toEqual(
+      expect.objectContaining({ pair: "USDC/AED", change24h: null }),
+    );
+    expect(result.current.hedges[0]).toEqual(
+      expect.objectContaining({
+        status: "Active",
+        collateral: null,
+        unrealizedPnl: null,
+      }),
+    );
+    expect(result.current.exposure).toEqual(
+      expect.objectContaining({
+        totalExposure: 1000,
+        hedgedPercentage: 100,
+        unhedgedExposure: null,
+        valueAtRisk: null,
+      }),
+    );
   });
 
-  it("loads mock data after timeout", () => {
+  it("isolates oracle failure from durable hedge history", () => {
+    const oracleError = new Error("oracle unavailable");
+    mockQueryStates["fx:rates"] = { error: oracleError };
     const { result } = renderHook(() => useFX());
 
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.rates.length).toBe(7);
-    expect(result.current.hedges.length).toBe(3);
-    expect(result.current.exposure).not.toBeNull();
+    expect(result.current.oracleError).toBe(oracleError);
+    expect(result.current.error).toBeNull();
+    expect(result.current.hedges).toHaveLength(1);
   });
 
-  it("rates have correct structure", () => {
+  it("uses the FX read endpoints and exposes no pretend execution", async () => {
     const { result } = renderHook(() => useFX());
+    const signal = new AbortController().signal;
 
-    act(() => {
-      jest.advanceTimersByTime(600);
+    await mockQueryOptions["fx:rates"].queryFn({ signal });
+    await mockQueryOptions["fx:hedges"].queryFn({ signal });
+    await mockQueryOptions["fx:exposure"].queryFn({ signal });
+
+    expect(mockApiRequest.mock.calls.map(([path]) => path)).toEqual([
+      "/v1/fx/rates",
+      "/v1/fx/hedges",
+      "/v1/fx/exposure",
+    ]);
+    expect(result.current.mutationsEnabled).toBe(false);
+    await expect(result.current.createHedge()).rejects.toMatchObject({
+      status: 501,
+      code: "FX_EXECUTION_UNAVAILABLE",
     });
-
-    const rate = result.current.rates[0];
-    expect(rate).toHaveProperty("pair");
-    expect(rate).toHaveProperty("rate");
-    expect(rate).toHaveProperty("change24h");
-    expect(rate).toHaveProperty("bid");
-    expect(rate).toHaveProperty("ask");
-    expect(rate).toHaveProperty("updatedAt");
-  });
-
-  it("includes USD/AED rate", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const aedRate = result.current.rates.find((r) => r.pair === "USD/AED");
-    expect(aedRate).toBeDefined();
-    expect(aedRate?.rate).toBeCloseTo(3.6725, 2);
-  });
-
-  it("includes AETHEL/USD rate", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const aetRate = result.current.rates.find((r) => r.pair === "AETHEL/USD");
-    expect(aetRate).toBeDefined();
-    expect(aetRate?.rate).toBeCloseTo(1.5, 1);
-  });
-
-  it("hedges have correct structure", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const hedge = result.current.hedges[0];
-    expect(hedge).toHaveProperty("id");
-    expect(hedge).toHaveProperty("fromCurrency");
-    expect(hedge).toHaveProperty("toCurrency");
-    expect(hedge).toHaveProperty("notionalAmount");
-    expect(hedge).toHaveProperty("lockedRate");
-    expect(hedge).toHaveProperty("currentRate");
-    expect(hedge).toHaveProperty("unrealizedPnl");
-    expect(hedge).toHaveProperty("status");
-    expect(hedge).toHaveProperty("expiryAt");
-    expect(hedge).toHaveProperty("collateral");
-  });
-
-  it("exposure report has correct structure", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const exp = result.current.exposure!;
-    expect(exp.totalExposure).toBe(5_500_000);
-    expect(exp.hedgedPercentage).toBeCloseTo(63.6, 1);
-    expect(exp.unhedgedExposure).toBe(2_000_000);
-    expect(exp.byPair.length).toBe(3);
-    expect(exp.valueAtRisk).toBe(82_500);
-    expect(exp.byPair[0]).toHaveProperty("pair");
-    expect(exp.byPair[0]).toHaveProperty("exposure");
-    expect(exp.byPair[0]).toHaveProperty("hedged");
-    expect(exp.byPair[0]).toHaveProperty("unhedged");
-  });
-
-  it("createHedge adds a new hedge", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialCount = result.current.hedges.length;
-
-    act(() => {
-      result.current.createHedge({
-        fromCurrency: "USD",
-        toCurrency: "AED",
-        notionalAmount: 100_000,
-        collateral: 10_000,
-        durationDays: 30,
-      });
-    });
-
-    expect(result.current.hedges.length).toBe(initialCount + 1);
-    const newHedge = result.current.hedges[0]; // prepended
-    expect(newHedge.fromCurrency).toBe("USD");
-    expect(newHedge.toCurrency).toBe("AED");
-    expect(newHedge.notionalAmount).toBe(100_000);
-    expect(newHedge.collateral).toBe(10_000);
-    expect(newHedge.status).toBe("Active");
-    expect(newHedge.unrealizedPnl).toBe(0);
-  });
-
-  it("createHedge uses rate 1 for unknown pair", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    act(() => {
-      result.current.createHedge({
-        fromCurrency: "FOO",
-        toCurrency: "BAR",
-        notionalAmount: 50_000,
-        collateral: 5_000,
-        durationDays: 15,
-      });
-    });
-
-    const newHedge = result.current.hedges[0];
-    expect(newHedge.lockedRate).toBe(1);
-    expect(newHedge.currentRate).toBe(1);
-  });
-
-  it("closeHedge marks a hedge as settled", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    expect(result.current.hedges[0].status).toBe("Active");
-
-    act(() => {
-      result.current.closeHedge("hedge-001");
-    });
-
-    const closed = result.current.hedges.find((h) => h.id === "hedge-001");
-    expect(closed?.status).toBe("Settled");
-  });
-
-  it("closeHedge does not affect other hedges", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    act(() => {
-      result.current.closeHedge("hedge-001");
-    });
-
-    const hedge2 = result.current.hedges.find((h) => h.id === "hedge-002");
-    expect(hedge2?.status).toBe("Active");
-  });
-
-  it("cleans up timers on unmount", () => {
-    const clearTimeoutSpy = jest.spyOn(global, "clearTimeout");
-    const { unmount } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    unmount();
-
-    expect(clearTimeoutSpy).toHaveBeenCalled();
-    clearTimeoutSpy.mockRestore();
-  });
-
-  it("simulated rate updates run on interval", () => {
-    const { result } = renderHook(() => useFX());
-
-    // Load initial data
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialRate = result.current.rates[0].rate;
-
-    // Trigger the 3-second interval update
-    act(() => {
-      jest.advanceTimersByTime(3100);
-    });
-
-    // Rate should have changed slightly due to random walk
-    // We can't predict the exact value, but the updatedAt should be newer
-    expect(result.current.rates[0].updatedAt).toBeGreaterThan(0);
-    expect(result.current.rates[0]).toHaveProperty("bid");
-    expect(result.current.rates[0]).toHaveProperty("ask");
-    expect(result.current.rates[0]).toHaveProperty("change24h");
-  });
-
-  it("rate updates keep bid/ask spread", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    act(() => {
-      jest.advanceTimersByTime(3100);
-    });
-
-    const rate = result.current.rates[0];
-    expect(rate.ask).toBeGreaterThanOrEqual(rate.bid);
-  });
-
-  it("hedge PnL updates when rates change", () => {
-    const { result } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialPnl = result.current.hedges[0].unrealizedPnl;
-
-    // After rate update, PnL should recalculate
-    act(() => {
-      jest.advanceTimersByTime(3100);
-    });
-
-    // PnL may or may not change depending on random walk direction
-    // But the recalculation should have run
-    expect(typeof result.current.hedges[0].unrealizedPnl).toBe("number");
-  });
-
-  it("interval cleanup works on unmount", () => {
-    const clearIntervalSpy = jest.spyOn(global, "clearInterval");
-    const { unmount } = renderHook(() => useFX());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    unmount();
-
-    expect(clearIntervalSpy).toHaveBeenCalled();
-    clearIntervalSpy.mockRestore();
   });
 });

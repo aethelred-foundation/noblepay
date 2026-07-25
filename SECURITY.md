@@ -3,7 +3,7 @@
 ## Supported Versions
 
 | Version | Supported |
-|---------|-----------|
+| ------- | --------- |
 | Latest  | Yes       |
 
 ## Reporting a Vulnerability
@@ -32,6 +32,7 @@ The Aethelred Foundation takes security seriously. If you discover a security vu
 ### Scope
 
 This policy applies to:
+
 - The NoblePay frontend application
 - The backend API and payment gateway
 - Smart contracts

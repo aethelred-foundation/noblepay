@@ -2,6 +2,7 @@ package tests
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -20,7 +21,7 @@ func setupPaymentHandler(t *testing.T) (*handlers.PaymentHandler, *services.Paym
 	t.Helper()
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 	h := handlers.NewPaymentHandler(svc)
 	return h, svc
@@ -113,7 +114,7 @@ func TestGetPaymentByID(t *testing.T) {
 	h, svc := setupPaymentHandler(t)
 
 	// Create a payment first.
-	payment, err := svc.Submit(nil, &models.SubmitPaymentRequest{
+	payment, err := svc.Submit(context.Background(), &models.SubmitPaymentRequest{
 		SenderAddress:   "noble1abc",
 		ReceiverAddress: "noble1xyz",
 		Amount:          "500",
@@ -162,7 +163,7 @@ func TestListPayments(t *testing.T) {
 
 	// Create 3 payments.
 	for i := 0; i < 3; i++ {
-		svc.Submit(nil, &models.SubmitPaymentRequest{
+		svc.Submit(context.Background(), &models.SubmitPaymentRequest{
 			SenderAddress:   "noble1abc",
 			ReceiverAddress: "noble1xyz",
 			Amount:          "100",
@@ -188,7 +189,7 @@ func TestListPayments(t *testing.T) {
 func TestCancelPayment(t *testing.T) {
 	h, svc := setupPaymentHandler(t)
 
-	payment, _ := svc.Submit(nil, &models.SubmitPaymentRequest{
+	payment, _ := svc.Submit(context.Background(), &models.SubmitPaymentRequest{
 		SenderAddress:   "noble1abc",
 		ReceiverAddress: "noble1xyz",
 		Amount:          "200",
@@ -248,7 +249,7 @@ func TestAPIKeyAuthMiddleware(t *testing.T) {
 	}
 }
 
-func TestAPIKeyAuthEmptyKeyUsesTestKey(t *testing.T) {
+func TestAPIKeyAuthEmptyKeyRejectsEveryKey(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -263,13 +264,66 @@ func TestAPIKeyAuthEmptyKeyUsesTestKey(t *testing.T) {
 		t.Errorf("expected 401 when no key provided and apiKey is empty, got %d", rr.Code)
 	}
 
-	// With the fallback test key -> 200
+	// No hard-coded fallback credential is accepted.
 	req = httptest.NewRequest(http.MethodGet, "/", nil)
 	req.Header.Set("X-API-Key", "test-api-key")
 	rr = httptest.NewRecorder()
 	authed.ServeHTTP(rr, req)
-	if rr.Code != http.StatusOK {
-		t.Errorf("expected 200 with test-api-key, got %d", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Errorf("expected 401 with test-api-key and empty configuration, got %d", rr.Code)
+	}
+}
+
+func TestRateLimiterNormalizesRemotePort(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	limited := handlers.NewRateLimiter(1).Middleware(handler)
+
+	first := httptest.NewRequest(http.MethodGet, "/", nil)
+	first.RemoteAddr = "203.0.113.20:10001"
+	limited.ServeHTTP(httptest.NewRecorder(), first)
+
+	second := httptest.NewRequest(http.MethodGet, "/", nil)
+	second.RemoteAddr = "203.0.113.20:10002"
+	recorder := httptest.NewRecorder()
+	limited.ServeHTTP(recorder, second)
+	if recorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected a shared IP bucket across source ports, got %d", recorder.Code)
+	}
+}
+
+func TestRateLimiterTrustsForwardingOnlyFromConfiguredProxy(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
+	limiter, err := handlers.NewRateLimiterWithTrustedProxies(1, []string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited := limiter.Middleware(handler)
+
+	for _, forwarded := range []string{"198.51.100.1", "198.51.100.2"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "203.0.113.30:443"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		recorder := httptest.NewRecorder()
+		limited.ServeHTTP(recorder, req)
+		if forwarded == "198.51.100.2" && recorder.Code != http.StatusTooManyRequests {
+			t.Fatalf("untrusted peer must not split buckets with spoofed X-Forwarded-For; got %d", recorder.Code)
+		}
+	}
+
+	trustedLimiter, err := handlers.NewRateLimiterWithTrustedProxies(1, []string{"10.0.0.0/8"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := trustedLimiter.Middleware(handler)
+	for _, forwarded := range []string{"198.51.100.1", "198.51.100.2"} {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.RemoteAddr = "10.0.0.8:443"
+		req.Header.Set("X-Forwarded-For", forwarded)
+		recorder := httptest.NewRecorder()
+		trusted.ServeHTTP(recorder, req)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("trusted proxy must preserve distinct client buckets; got %d", recorder.Code)
+		}
 	}
 }
 

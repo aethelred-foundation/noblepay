@@ -1,260 +1,371 @@
-/**
- * Invoice Hooks — Custom React hooks for NoblePay invoice financing.
- *
- * Provides typed hooks for invoice management, financing requests,
- * credit scoring, and invoice analytics.
- */
-
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError, apiRequest } from "@/lib/api";
 import type {
-  Invoice,
-  FinancingRequest,
   CreditScore,
+  FinancingRequest,
+  Invoice,
   InvoiceAnalytics,
+  InvoiceStatus,
 } from "@/types/invoice";
 
-// ---------------------------------------------------------------------------
-// Mock Data
-// ---------------------------------------------------------------------------
+interface ApiInvoice {
+  id: string;
+  invoiceNumber: string;
+  businessId: string;
+  issuer: string;
+  debtor: string;
+  debtorName: string;
+  description: string;
+  amount: string;
+  currency: string;
+  outstandingAmount: string;
+  financedAmount: string;
+  maturityDate: string;
+  status:
+    | "DRAFT"
+    | "ISSUED"
+    | "FINANCED"
+    | "PARTIALLY_FINANCED"
+    | "SETTLED"
+    | "OVERDUE"
+    | "DISPUTED"
+    | "CANCELLED"
+    | "WRITTEN_OFF";
+  discountRate: number | null;
+  creditScore: number | null;
+  createdAt: string;
+  settledAt: string | null;
+  settlementReference: string | null;
+}
 
-const MOCK_INVOICES: Invoice[] = [
-  {
-    id: "inv-001",
-    invoiceNumber: "NP-2026-0001",
-    issuer: "0x1234567890abcdef1234567890abcdef12345678",
-    issuerName: "Aethelred Trading LLC",
-    payer: "0xabcdef1234567890abcdef1234567890abcdef12",
-    payerName: "Gulf Logistics Corp",
-    amount: 250_000,
-    currency: "USDC",
-    status: "Issued",
-    issuedAt: Date.now() - 5 * 86_400_000,
-    dueAt: Date.now() + 25 * 86_400_000,
-    paidAt: 0,
-    daysUntilDue: 25,
-    description: "Q1 logistics software licensing and support services",
-    tokenized: true,
-    tokenId: "1001",
-    documentHash: "QmXyz123abc456def789",
-  },
-  {
-    id: "inv-002",
-    invoiceNumber: "NP-2026-0002",
-    issuer: "0x1234567890abcdef1234567890abcdef12345678",
-    issuerName: "Aethelred Trading LLC",
-    payer: "0xbcdef1234567890abcdef1234567890abcdef1234",
-    payerName: "Emirates Digital Solutions",
-    amount: 180_000,
-    currency: "USDC",
-    status: "Financed",
-    issuedAt: Date.now() - 15 * 86_400_000,
-    dueAt: Date.now() + 15 * 86_400_000,
-    paidAt: 0,
-    daysUntilDue: 15,
-    description: "Blockchain integration consulting — Phase 2",
-    tokenized: true,
-    tokenId: "1002",
-    documentHash: "QmAbc789xyz456def123",
-  },
-  {
-    id: "inv-003",
-    invoiceNumber: "NP-2026-0003",
-    issuer: "0x2345678901abcdef2345678901abcdef23456789",
-    issuerName: "Singapore Fintech Partners",
-    payer: "0x1234567890abcdef1234567890abcdef12345678",
-    payerName: "Aethelred Trading LLC",
-    amount: 75_000,
-    currency: "USDT",
-    status: "Overdue",
-    issuedAt: Date.now() - 45 * 86_400_000,
-    dueAt: Date.now() - 5 * 86_400_000,
-    paidAt: 0,
-    daysUntilDue: -5,
-    description: "Payment gateway API integration services",
-    tokenized: false,
-  },
-  {
-    id: "inv-004",
-    invoiceNumber: "NP-2026-0004",
-    issuer: "0x1234567890abcdef1234567890abcdef12345678",
-    issuerName: "Aethelred Trading LLC",
-    payer: "0xcdef1234567890abcdef1234567890abcdef12345",
-    payerName: "Riyadh Capital Markets",
-    amount: 420_000,
-    currency: "USDC",
-    status: "Paid",
-    issuedAt: Date.now() - 60 * 86_400_000,
-    dueAt: Date.now() - 30 * 86_400_000,
-    paidAt: Date.now() - 32 * 86_400_000,
-    daysUntilDue: 0,
-    description: "Enterprise compliance module deployment",
-    paymentId: "0xpayment001",
-    tokenized: true,
-    tokenId: "1004",
-    documentHash: "QmDef456abc789xyz012",
-  },
-];
+interface ApiFinancingRequest {
+  id: string;
+  invoiceId: string;
+  amount: string;
+  discountRate: number | null;
+  netProceeds: string | null;
+  factor: string | null;
+  term: number;
+  status: FinancingRequest["status"];
+  externalReference: string | null;
+  createdAt: string;
+}
 
-const MOCK_FINANCING: FinancingRequest[] = [
-  {
-    id: "fin-001",
-    invoiceId: "inv-002",
-    invoiceNumber: "NP-2026-0002",
-    borrower: "0x1234567890abcdef1234567890abcdef12345678",
-    requestedAmount: 144_000,
-    approvedAmount: 144_000,
-    advanceRate: 80,
-    interestRate: 8.5,
-    fee: 720,
-    status: "Funded",
-    creditScore: 742,
-    requestedAt: Date.now() - 14 * 86_400_000,
-    fundedAt: Date.now() - 13 * 86_400_000,
-    repaymentDueAt: Date.now() + 16 * 86_400_000,
-    amountRepaid: 0,
-  },
-];
+interface ApiCreditScore extends Omit<CreditScore, "updatedAt"> {
+  lastUpdated: string;
+}
 
-const MOCK_CREDIT_SCORE: CreditScore = {
-  address: "0x1234567890abcdef1234567890abcdef12345678",
-  businessName: "Aethelred Trading LLC",
-  score: 742,
-  grade: "AA",
-  maxFinancingAmount: 2_000_000,
-  maxAdvanceRate: 85,
-  baseInterestRate: 7.5,
-  invoicesScored: 24,
-  onTimePaymentRate: 95.8,
-  avgDaysToPay: 22,
-  totalFinancingVolume: 3_200_000,
-  defaultCount: 0,
-  updatedAt: Date.now() - 2 * 86_400_000,
-};
+interface ApiAnalytics {
+  totalReceivables: string;
+  totalFinanced: string;
+  totalOutstanding: string;
+  avgDaysToPayment: number;
+  overdueAmount: string;
+  overdueCount: number;
+  financingUtilization: number;
+  agingBuckets: Array<{ range: string; amount: string; count: number }>;
+  byCurrency: Record<
+    string,
+    { total: string; financed: string; count: number }
+  >;
+}
 
-const MOCK_ANALYTICS: InvoiceAnalytics = {
-  totalIssued: 47,
-  totalOutstanding: 505_000,
-  totalOverdue: 75_000,
-  totalFinanced: 1_440_000,
-  avgDaysToPay: 22,
-  onTimeRate: 95.8,
-  defaultRate: 0,
-  monthlyVolume: [
-    { month: "Oct", issued: 320_000, paid: 280_000, financed: 150_000 },
-    { month: "Nov", issued: 410_000, paid: 350_000, financed: 200_000 },
-    { month: "Dec", issued: 280_000, paid: 320_000, financed: 100_000 },
-    { month: "Jan", issued: 520_000, paid: 410_000, financed: 300_000 },
-    { month: "Feb", issued: 380_000, paid: 450_000, financed: 180_000 },
-    { month: "Mar", issued: 250_000, paid: 180_000, financed: 144_000 },
-  ],
-  generatedAt: Date.now(),
-};
+export interface CreateInvoiceInput {
+  payerAddress: string;
+  payerName: string;
+  amount: number;
+  currency: string;
+  dueInDays: number;
+  description: string;
+}
 
-// ---------------------------------------------------------------------------
-// useInvoices — invoices, financing, credit scores, and analytics
-// ---------------------------------------------------------------------------
+function mapStatus(status: ApiInvoice["status"]): InvoiceStatus {
+  const statuses: Record<ApiInvoice["status"], InvoiceStatus> = {
+    DRAFT: "Draft",
+    ISSUED: "Issued",
+    FINANCED: "Financed",
+    PARTIALLY_FINANCED: "Financed",
+    SETTLED: "Paid",
+    OVERDUE: "Overdue",
+    DISPUTED: "Disputed",
+    CANCELLED: "Cancelled",
+    WRITTEN_OFF: "WrittenOff",
+  };
+  return statuses[status];
+}
 
-export function useInvoices() {
-  const [invoices, setInvoices] = useState<Invoice[]>([]);
-  const [financingRequests, setFinancingRequests] = useState<
-    FinancingRequest[]
-  >([]);
-  const [creditScore, setCreditScore] = useState<CreditScore | null>(null);
-  const [analytics, setAnalytics] = useState<InvoiceAnalytics | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+function mapInvoice(invoice: ApiInvoice): Invoice {
+  const dueAt = Date.parse(invoice.maturityDate);
+  return {
+    id: invoice.id,
+    invoiceNumber: invoice.invoiceNumber,
+    issuer: invoice.issuer,
+    payer: invoice.debtor,
+    payerName: invoice.debtorName,
+    amount: Number(invoice.amount),
+    outstandingAmount: Number(invoice.outstandingAmount),
+    financedAmount: Number(invoice.financedAmount),
+    currency: invoice.currency,
+    status: mapStatus(invoice.status),
+    issuedAt: Date.parse(invoice.createdAt),
+    dueAt,
+    paidAt: invoice.settledAt ? Date.parse(invoice.settledAt) : 0,
+    daysUntilDue: Math.ceil((dueAt - Date.now()) / 86_400_000),
+    description: invoice.description,
+    settlementReference: invoice.settlementReference,
+    discountRate: invoice.discountRate,
+    creditScore: invoice.creditScore,
+  };
+}
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setInvoices(MOCK_INVOICES);
-      setFinancingRequests(MOCK_FINANCING);
-      setCreditScore(MOCK_CREDIT_SCORE);
-      setAnalytics(MOCK_ANALYTICS);
-      setIsLoading(false);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, []);
+function mapFinancing(request: ApiFinancingRequest): FinancingRequest {
+  return {
+    id: request.id,
+    invoiceId: request.invoiceId,
+    amount: Number(request.amount),
+    discountRate: request.discountRate,
+    netProceeds:
+      request.netProceeds === null ? null : Number(request.netProceeds),
+    factor: request.factor,
+    termDays: request.term,
+    status: request.status,
+    externalReference: request.externalReference,
+    createdAt: Date.parse(request.createdAt),
+  };
+}
 
-  const createInvoice = useCallback(
-    (params: {
-      payerAddress: string;
-      payerName: string;
+function secureIdempotencyKey(): string {
+  const cryptoApi = globalThis.crypto;
+  if (typeof cryptoApi?.randomUUID === "function") {
+    return `invoice-finance-${cryptoApi.randomUUID()}`;
+  }
+  if (typeof cryptoApi?.getRandomValues === "function") {
+    const bytes = cryptoApi.getRandomValues(new Uint8Array(16));
+    return `invoice-finance-${Array.from(bytes, (byte) =>
+      byte.toString(16).padStart(2, "0"),
+    ).join("")}`;
+  }
+  throw new ApiError("Secure idempotency generation is unavailable", {
+    code: "SECURE_RANDOM_UNAVAILABLE",
+  });
+}
+
+export function useInvoices(businessId?: string) {
+  const queryClient = useQueryClient();
+  const invoicesQuery = useQuery({
+    queryKey: ["invoices", "list"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiInvoice[]>("/v1/invoices", { signal }),
+  });
+  const invoiceIds = (invoicesQuery.data || []).map((invoice) => invoice.id);
+  const financingQuery = useQuery({
+    queryKey: ["invoices", "financing", invoiceIds.join(",")],
+    enabled: invoiceIds.length > 0,
+    queryFn: async ({ signal }) =>
+      (
+        await Promise.all(
+          invoiceIds.map((invoiceId) =>
+            apiRequest<ApiFinancingRequest[]>(
+              `/v1/invoices/${encodeURIComponent(invoiceId)}/financing`,
+              { signal },
+            ),
+          ),
+        )
+      ).flat(),
+  });
+  const analyticsQuery = useQuery({
+    queryKey: ["invoices", "analytics"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiAnalytics>("/v1/invoices/analytics", { signal }),
+  });
+  const creditQuery = useQuery({
+    queryKey: ["invoices", "credit-score", businessId],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiCreditScore>(
+        `/v1/invoices/credit-score/${encodeURIComponent(businessId!)}`,
+        { signal },
+      ),
+    enabled: Boolean(businessId),
+  });
+
+  const invalidate = () =>
+    queryClient.invalidateQueries({ queryKey: ["invoices"] });
+  const createMutation = useMutation({
+    mutationFn: (params: CreateInvoiceInput) =>
+      apiRequest<ApiInvoice>("/v1/invoices", {
+        method: "POST",
+        json: {
+          debtor: params.payerAddress,
+          debtorName: params.payerName,
+          amount: String(params.amount),
+          currency: params.currency,
+          maturityDate: new Date(
+            Date.now() + params.dueInDays * 86_400_000,
+          ).toISOString(),
+          description: params.description,
+        },
+      }),
+    onSuccess: invalidate,
+  });
+  const financeMutation = useMutation({
+    mutationFn: ({
+      invoiceId,
+      amount,
+    }: {
+      invoiceId: string;
       amount: number;
-      currency: string;
-      dueInDays: number;
-      description: string;
-    }) => {
-      const now = Date.now();
-      const newInvoice: Invoice = {
-        id: `inv-${String(now).slice(-6)}`,
-        invoiceNumber: `NP-2026-${String(invoices.length + 1).padStart(4, "0")}`,
-        issuer: "0x1234567890abcdef1234567890abcdef12345678",
-        issuerName: "Aethelred Trading LLC",
-        payer: params.payerAddress,
-        payerName: params.payerName,
-        amount: params.amount,
-        currency: params.currency,
-        status: "Draft",
-        issuedAt: now,
-        dueAt: now + params.dueInDays * 86_400_000,
-        paidAt: 0,
-        daysUntilDue: params.dueInDays,
-        description: params.description,
-        tokenized: false,
-      };
-      setInvoices((prev) => [newInvoice, ...prev]);
-    },
-    [invoices.length],
+    }) =>
+      apiRequest<ApiFinancingRequest>(
+        `/v1/invoices/${encodeURIComponent(invoiceId)}/finance`,
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": secureIdempotencyKey() },
+          json: { amount: String(amount) },
+        },
+      ),
+    onSuccess: invalidate,
+  });
+  const settleMutation = useMutation({
+    mutationFn: ({
+      invoiceId,
+      settlementReference,
+    }: {
+      invoiceId: string;
+      settlementReference: string;
+    }) =>
+      apiRequest<ApiInvoice>(
+        `/v1/invoices/${encodeURIComponent(invoiceId)}/settle`,
+        { method: "POST", json: { settlementReference } },
+      ),
+    onSuccess: invalidate,
+  });
+  const disputeMutation = useMutation({
+    mutationFn: ({
+      invoiceId,
+      reason,
+    }: {
+      invoiceId: string;
+      reason: string;
+    }) =>
+      apiRequest(`/v1/invoices/${encodeURIComponent(invoiceId)}/dispute`, {
+        method: "POST",
+        json: { reason },
+      }),
+    onSuccess: invalidate,
+  });
+
+  const invoices = useMemo(
+    () => (invoicesQuery.data || []).map(mapInvoice),
+    [invoicesQuery.data],
   );
+  const financingRequests = useMemo(
+    () => (financingQuery.data || []).map(mapFinancing),
+    [financingQuery.data],
+  );
+  const analytics: InvoiceAnalytics | null = analyticsQuery.data
+    ? {
+        totalReceivables: Number(analyticsQuery.data.totalReceivables),
+        totalOutstanding: Number(analyticsQuery.data.totalOutstanding),
+        overdueAmount: Number(analyticsQuery.data.overdueAmount),
+        overdueCount: analyticsQuery.data.overdueCount,
+        totalFinanced: Number(analyticsQuery.data.totalFinanced),
+        avgDaysToPay: analyticsQuery.data.avgDaysToPayment,
+        financingUtilization: analyticsQuery.data.financingUtilization,
+        agingBuckets: analyticsQuery.data.agingBuckets.map((bucket) => ({
+          ...bucket,
+          amount: Number(bucket.amount),
+        })),
+        byCurrency: Object.fromEntries(
+          Object.entries(analyticsQuery.data.byCurrency).map(
+            ([currency, value]) => [
+              currency,
+              {
+                total: Number(value.total),
+                financed: Number(value.financed),
+                count: value.count,
+              },
+            ],
+          ),
+        ),
+      }
+    : null;
+  const creditScore: CreditScore | null = creditQuery.data
+    ? {
+        ...creditQuery.data,
+        updatedAt: Date.parse(creditQuery.data.lastUpdated),
+      }
+    : null;
 
   const requestFinancing = useCallback(
-    (invoiceId: string, amount: number) => {
-      const invoice = invoices.find((i) => i.id === invoiceId);
-      if (!invoice || !creditScore) return;
-
-      const newRequest: FinancingRequest = {
-        id: `fin-${String(Date.now()).slice(-6)}`,
-        invoiceId,
-        invoiceNumber: invoice.invoiceNumber,
-        borrower: invoice.issuer,
-        requestedAmount: amount,
-        approvedAmount: 0,
-        advanceRate: creditScore.maxAdvanceRate,
-        interestRate: creditScore.baseInterestRate,
-        fee: amount * 0.005,
-        status: "Pending",
-        creditScore: creditScore.score,
-        requestedAt: Date.now(),
-        fundedAt: 0,
-        repaymentDueAt: invoice.dueAt,
-        amountRepaid: 0,
-      };
-      setFinancingRequests((prev) => [newRequest, ...prev]);
-    },
-    [invoices, creditScore],
+    (invoiceId: string, amount: number) =>
+      financeMutation.mutateAsync({ invoiceId, amount }),
+    [financeMutation],
   );
-
-  const tokenizeInvoice = useCallback((invoiceId: string) => {
-    setInvoices((prev) =>
-      prev.map((i) =>
-        i.id === invoiceId
-          ? {
-              ...i,
-              tokenized: true,
-              tokenId: String(1000 + Math.floor(Math.random() * 9000)),
-            }
-          : i,
-      ),
-    );
-  }, []);
+  const settleInvoice = useCallback(
+    (invoiceId: string, settlementReference: string) =>
+      settleMutation.mutateAsync({ invoiceId, settlementReference }),
+    [settleMutation],
+  );
+  const disputeInvoice = useCallback(
+    (invoiceId: string, reason: string) =>
+      disputeMutation.mutateAsync({ invoiceId, reason }),
+    [disputeMutation],
+  );
+  const refetch = useCallback(async () => {
+    createMutation.reset();
+    financeMutation.reset();
+    settleMutation.reset();
+    disputeMutation.reset();
+    await Promise.all([
+      invoicesQuery.refetch(),
+      financingQuery.refetch(),
+      analyticsQuery.refetch(),
+      ...(businessId ? [creditQuery.refetch()] : []),
+    ]);
+  }, [
+    analyticsQuery,
+    businessId,
+    createMutation,
+    creditQuery,
+    disputeMutation,
+    financeMutation,
+    financingQuery,
+    invoicesQuery,
+    settleMutation,
+  ]);
 
   return {
     invoices,
     financingRequests,
     creditScore,
     analytics,
-    isLoading,
-    createInvoice,
+    isLoading:
+      invoicesQuery.isLoading ||
+      analyticsQuery.isLoading ||
+      (invoiceIds.length > 0 && financingQuery.isLoading) ||
+      (businessId ? creditQuery.isLoading : false),
+    isMutating:
+      createMutation.isPending ||
+      financeMutation.isPending ||
+      settleMutation.isPending ||
+      disputeMutation.isPending,
+    error:
+      invoicesQuery.error ||
+      financingQuery.error ||
+      (businessId ? creditQuery.error : null) ||
+      null,
+    analyticsError: analyticsQuery.error || null,
+    actionError:
+      createMutation.error ||
+      financeMutation.error ||
+      settleMutation.error ||
+      disputeMutation.error ||
+      null,
+    refetch,
+    createInvoice: createMutation.mutateAsync,
     requestFinancing,
-    tokenizeInvoice,
+    settleInvoice,
+    disputeInvoice,
   };
 }

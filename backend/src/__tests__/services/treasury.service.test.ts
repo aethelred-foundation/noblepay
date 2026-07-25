@@ -1,752 +1,699 @@
-import { createMockPrisma, resetAllMocks } from "../setup";
-import { TreasuryService, TreasuryError } from "../../services/treasury";
-import { AuditService } from "../../services/audit";
+import { Prisma } from "@prisma/client";
+import { TreasuryError, TreasuryService } from "../../services/treasury";
+import type { AuditService } from "../../services/audit";
 
-let prisma: ReturnType<typeof createMockPrisma>;
-let auditService: AuditService;
-let treasuryService: TreasuryService;
+const now = new Date("2026-07-21T12:00:00.000Z");
+const signer = "0x1111111111111111111111111111111111111111";
 
-beforeEach(() => {
-  resetAllMocks();
-  prisma = createMockPrisma();
-  auditService = new AuditService(prisma);
-  jest.spyOn(auditService, "createAuditEntry").mockResolvedValue({} as any);
-  treasuryService = new TreasuryService(prisma, auditService);
+function proposal(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "proposal-1",
+    type: "TRANSFER",
+    title: "Infrastructure payment",
+    description: "Pay the infrastructure supplier",
+    amount: new Prisma.Decimal("500"),
+    currency: "USDC",
+    recipient: "0x2222222222222222222222222222222222222222",
+    status: "PENDING",
+    requiredSigs: 2,
+    currentSigs: 0,
+    signers: [],
+    approvedBy: [],
+    timelockUntil: null,
+    createdBy: signer,
+    businessId: "business-1",
+    expiresAt: new Date("2026-07-28T12:00:00.000Z"),
+    executedAt: null,
+    createdAt: now,
+    metadata: { category: "INFRASTRUCTURE" },
+    ...overrides,
+  };
+}
+
+function policy(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "policy-1",
+    category: "INFRASTRUCTURE",
+    dailyLimit: new Prisma.Decimal("1000"),
+    monthlyLimit: new Prisma.Decimal("10000"),
+    requiresMultiSig: true,
+    approvalThreshold: 2,
+    isActive: true,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function strategy(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "strategy-1",
+    protocol: "VerifiedProtocol",
+    name: "USDC reserve",
+    allocatedAmount: new Prisma.Decimal("1000"),
+    currency: "USDC",
+    apy: new Prisma.Decimal("2.5"),
+    riskLevel: "LOW",
+    isActive: true,
+    totalYieldEarned: new Prisma.Decimal("25"),
+    lastHarvestAt: null,
+    createdAt: now,
+    ...overrides,
+  };
+}
+
+function setup() {
+  const prisma = {
+    yieldStrategy: { findMany: jest.fn() },
+    treasuryProposal: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
+    spendingPolicy: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      update: jest.fn(),
+    },
+    $transaction: jest.fn(),
+  };
+  const auditService = {
+    createAuditEntry: jest.fn().mockResolvedValue({}),
+  };
+  const service = new TreasuryService(
+    prisma as never,
+    auditService as unknown as AuditService,
+  );
+  return { prisma, service, auditService };
+}
+
+describe("TreasuryService production behavior", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
+
+  it("builds an overview only from durable allocations and proposals", async () => {
+    const { prisma, service } = setup();
+    prisma.yieldStrategy.findMany.mockResolvedValue([strategy()]);
+    prisma.treasuryProposal.findMany.mockResolvedValue([
+      proposal(),
+      proposal({
+        id: "proposal-2",
+        status: "EXECUTED",
+        executedAt: now,
+        amount: new Prisma.Decimal("100"),
+        approvedBy: [signer],
+      }),
+    ]);
+
+    const overview = await service.getOverview("business-1");
+
+    expect(overview).toEqual(
+      expect.objectContaining({
+        allocations: { USDC: "1000" },
+        yieldEarned: "25",
+        pendingProposals: 1,
+        signerCount: 1,
+        valuationScope: "RECORDED_YIELD_ALLOCATIONS_ONLY",
+        dataSource: "DATABASE_LEDGER",
+      }),
+    );
+    expect(overview.monthlySpend.INFRASTRUCTURE).toBe("100");
+  });
+
+  it("tenant-scopes and paginates proposal history", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findMany.mockResolvedValue([proposal()]);
+
+    const records = await service.listProposals("business-1", "PENDING", {
+      page: 2,
+      limit: 20,
+    });
+
+    expect(records[0]).toEqual(
+      expect.objectContaining({
+        businessId: "business-1",
+        category: "INFRASTRUCTURE",
+        dataSource: "DATABASE_WORKFLOW",
+      }),
+    );
+    expect(prisma.treasuryProposal.findMany).toHaveBeenCalledWith({
+      where: { businessId: "business-1", status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      skip: 20,
+      take: 20,
+    });
+  });
+
+  it("persists a policy-backed proposal and emits an audit event", async () => {
+    const { prisma, service, auditService } = setup();
+    prisma.spendingPolicy.findFirst.mockResolvedValue(policy());
+    prisma.treasuryProposal.create.mockResolvedValue(proposal());
+
+    const record = await service.createProposal(
+      {
+        title: "Infrastructure payment",
+        description: "Pay the infrastructure supplier",
+        type: "TRANSFER",
+        amount: "500",
+        currency: "USDC",
+        recipient: "0x2222222222222222222222222222222222222222",
+        category: "INFRASTRUCTURE",
+      },
+      signer,
+      "business-1",
+    );
+
+    expect(record.id).toBe("proposal-1");
+    expect(prisma.treasuryProposal.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          businessId: "business-1",
+          requiredSigs: 2,
+          status: "PENDING",
+        }),
+      }),
+    );
+    expect(auditService.createAuditEntry).toHaveBeenCalledWith(
+      expect.objectContaining({ businessId: "business-1", actor: signer }),
+    );
+  });
+
+  it("refuses monetary proposals without an active durable policy", async () => {
+    const { prisma, service } = setup();
+    prisma.spendingPolicy.findFirst.mockResolvedValue(null);
+
+    await expect(
+      service.createProposal(
+        {
+          title: "Payment",
+          description: "A valid description",
+          type: "TRANSFER",
+          amount: "10",
+          currency: "USDC",
+          category: "OPERATIONS",
+        },
+        signer,
+        "business-1",
+      ),
+    ).rejects.toMatchObject({ code: "POLICY_NOT_FOUND", statusCode: 409 });
+    expect(prisma.treasuryProposal.create).not.toHaveBeenCalled();
+  });
+
+  it("approves a tenant proposal transactionally without duplicate local state", async () => {
+    const { prisma, service } = setup();
+    const pending = proposal();
+    const approved = proposal({
+      status: "APPROVED",
+      currentSigs: 2,
+      approvedBy: ["0x3333333333333333333333333333333333333333", signer],
+    });
+    prisma.treasuryProposal.findFirst.mockResolvedValue(pending);
+    prisma.treasuryProposal.update.mockResolvedValue(approved);
+    prisma.$transaction.mockImplementation(
+      async (callback: (transaction: unknown) => Promise<unknown>) =>
+        callback({ treasuryProposal: prisma.treasuryProposal }),
+    );
+
+    const result = await service.approveProposal(
+      "proposal-1",
+      signer,
+      "business-1",
+    );
+
+    expect(result).toEqual({
+      approved: true,
+      remainingApprovals: 0,
+      status: "APPROVED",
+    });
+    expect(prisma.treasuryProposal.findFirst).toHaveBeenCalledWith({
+      where: { id: "proposal-1", businessId: "business-1" },
+    });
+  });
+
+  it("fails treasury execution closed until a receipt verifier exists", async () => {
+    const { service } = setup();
+    await expect(
+      service.executeProposal("proposal-1", signer, "business-1"),
+    ).rejects.toMatchObject({
+      code: "TREASURY_EXECUTION_UNAVAILABLE",
+      statusCode: 501,
+    });
+  });
+
+  it("returns only persisted policies and yield strategies with pagination", async () => {
+    const { prisma, service } = setup();
+    prisma.spendingPolicy.findMany.mockResolvedValue([policy()]);
+    prisma.yieldStrategy.findMany.mockResolvedValue([strategy()]);
+
+    const [policies, strategies] = await Promise.all([
+      service.getSpendingPolicies({ page: 1, limit: 10 }),
+      service.getYieldStrategies({ page: 2, limit: 5 }),
+    ]);
+
+    expect(policies[0]).toEqual(
+      expect.objectContaining({ dataSource: "DATABASE_POLICY" }),
+    );
+    expect(strategies[0]).toEqual(
+      expect.objectContaining({
+        totalYieldEarned: "25",
+        dataSource: "DATABASE_STRATEGY",
+      }),
+    );
+    expect(prisma.yieldStrategy.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: 5, take: 5 }),
+    );
+  });
 });
 
-describe("TreasuryService", () => {
-  // ─── getOverview ─────────────────────────────────────────────────────────
+describe("TreasuryService fail-closed branches", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(now));
+  afterEach(() => jest.useRealTimers());
 
-  describe("getOverview", () => {
-    it("should return treasury overview with correct structure", async () => {
-      const overview = await treasuryService.getOverview("biz-1");
-
-      expect(overview.totalAUM).toBeDefined();
-      expect(parseFloat(overview.totalAUM)).toBeGreaterThan(0);
-      expect(overview.allocations).toHaveProperty("AET");
-      expect(overview.allocations).toHaveProperty("USDC");
-      expect(overview.activeStrategies).toBeGreaterThanOrEqual(0);
-      expect(overview.signerCount).toBe(5);
-      expect(overview.monthlySpend).toHaveProperty("PAYROLL");
+  it("maps nullable proposal data and supports an unpaginated tenant list", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findMany.mockResolvedValue([
+      proposal({
+        id: "proposal-nullable",
+        amount: null,
+        currency: null,
+        recipient: null,
+        metadata: null,
+      }),
+      proposal({ id: "proposal-array", metadata: [] }),
+      proposal({
+        id: "proposal-invalid-category",
+        metadata: { category: "NOT_ALLOWED" },
+      }),
+    ]);
+    const records = await service.listProposals("business-1");
+    expect(records).toHaveLength(3);
+    expect(records[0]).toMatchObject({
+      amount: null,
+      category: null,
+      metadata: {},
     });
-
-    it("should calculate yield from active strategies", async () => {
-      const overview = await treasuryService.getOverview("biz-1");
-      expect(parseFloat(overview.yieldEarned)).toBeGreaterThan(0);
-    });
+    expect(records[1]).toMatchObject({ category: null, metadata: {} });
+    expect(records[2].category).toBeNull();
+    expect(prisma.treasuryProposal.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skip: undefined,
+        take: undefined,
+      }),
+    );
   });
 
-  // ─── createProposal ────────────────────────────────────────────────────────
+  it("creates a non-monetary proposal without inventing a policy dependency", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.create.mockImplementation(({ data }: any) =>
+      proposal({
+        ...data,
+        amount: null,
+        currency: null,
+        recipient: null,
+        metadata: {},
+      }),
+    );
+    const record = await service.createProposal(
+      {
+        title: "  Rotate signers  ",
+        description: "  Update the signer policy  ",
+        type: "POLICY_CHANGE",
+      },
+      signer,
+      "business-1",
+    );
+    expect(record).toMatchObject({
+      amount: null,
+      requiredApprovals: 1,
+      category: null,
+    });
+    expect(prisma.spendingPolicy.findFirst).not.toHaveBeenCalled();
+    expect(prisma.treasuryProposal.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          title: "Rotate signers",
+          description: "Update the signer policy",
+          timelockUntil: null,
+        }),
+      }),
+    );
+  });
 
-  describe("createProposal", () => {
-    it("should create a proposal with correct approval threshold", async () => {
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Transfer to vendor",
-          description: "Monthly vendor payment",
-          type: "TRANSFER",
-          amount: "5000",
+  it("uses a single-signature policy, timelock, normalized currency, and caller metadata", async () => {
+    const { prisma, service } = setup();
+    prisma.spendingPolicy.findFirst.mockResolvedValue(
+      policy({ requiresMultiSig: false, approvalThreshold: 9 }),
+    );
+    prisma.treasuryProposal.create.mockImplementation(({ data }: any) =>
+      proposal({ ...data }),
+    );
+    await service.createProposal(
+      {
+        title: "Supplier payment",
+        description: "Pay a verified supplier",
+        type: "TRANSFER",
+        amount: "25",
+        currency: " usdc ",
+        recipient: " recipient ",
+        category: "OPERATIONS",
+        timelockHours: 12,
+        metadata: { ticket: "OPS-42" },
+      },
+      signer,
+      "business-1",
+    );
+    expect(prisma.treasuryProposal.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          requiredSigs: 1,
           currency: "USDC",
-        },
-        "0xproposer",
-        "biz-1",
-      );
+          recipient: "recipient",
+          timelockUntil: new Date(now.getTime() + 12 * 3_600_000),
+          metadata: { ticket: "OPS-42", category: "OPERATIONS" },
+        }),
+      }),
+    );
+  });
 
-      expect(proposal.id).toMatch(/^prop-/);
-      expect(proposal.title).toBe("Transfer to vendor");
-      expect(proposal.status).toBe("PENDING");
-      expect(proposal.requiredApprovals).toBe(2); // < 10000 threshold
-      expect(auditService.createAuditEntry).toHaveBeenCalled();
-    });
-
-    it("should require more approvals for larger amounts", async () => {
-      const proposal = await treasuryService.createProposal(
+  it("maps a proposal database failure without losing its cause", async () => {
+    const { prisma, service } = setup();
+    prisma.spendingPolicy.findFirst.mockResolvedValue(policy());
+    const cause = new Error("database unavailable");
+    prisma.treasuryProposal.create.mockRejectedValue(cause);
+    await expect(
+      service.createProposal(
         {
-          title: "Large transfer",
-          description: "Big payment",
+          title: "Payment",
+          description: "Pay supplier",
           type: "TRANSFER",
-          amount: "50000",
+          amount: "10",
+          currency: "USDC",
+          category: "OPERATIONS",
         },
-        "0xproposer",
-        "biz-1",
-      );
-
-      expect(proposal.requiredApprovals).toBe(3); // 10000-100000 threshold
-    });
-
-    it("should set timelock based on amount threshold", async () => {
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Huge transfer",
-          description: "Very large payment",
-          type: "TRANSFER",
-          amount: "500000",
-        },
-        "0xproposer",
-        "biz-1",
-      );
-
-      expect(proposal.timelockHours).toBe(24);
-      expect(proposal.executeAfter).toBeDefined();
-    });
-
-    it("should allow custom timelock override", async () => {
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Custom timelock",
-          description: "Custom",
-          type: "TRANSFER",
-          amount: "1000",
-          timelockHours: 12,
-        },
-        "0xproposer",
-        "biz-1",
-      );
-
-      expect(proposal.timelockHours).toBe(12);
-    });
-
-    it("should expire in 7 days", async () => {
-      const before = Date.now();
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Test",
-          description: "Test",
-          type: "TRANSFER",
-        },
-        "0xproposer",
-        "biz-1",
-      );
-
-      const expiresAt = (proposal.expiresAt as Date).getTime();
-      const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-      expect(expiresAt).toBeGreaterThanOrEqual(before + sevenDaysMs - 1000);
+        signer,
+        "business-1",
+      ),
+    ).rejects.toMatchObject({
+      code: "PERSISTENCE_FAILURE",
+      statusCode: 503,
+      cause,
     });
   });
 
-  // ─── approveProposal ───────────────────────────────────────────────────────
+  it.each([
+    [
+      { title: "", description: "description", type: "TRANSFER" },
+      "INVALID_PROPOSAL",
+    ],
+    [{ title: "title", description: "", type: "TRANSFER" }, "INVALID_PROPOSAL"],
+    [
+      { title: "title", description: "description", type: "UNKNOWN" },
+      "INVALID_PROPOSAL_TYPE",
+    ],
+    [
+      {
+        title: "title",
+        description: "description",
+        type: "TRANSFER",
+        category: "UNKNOWN",
+      },
+      "INVALID_SPENDING_CATEGORY",
+    ],
+    [
+      {
+        title: "title",
+        description: "description",
+        type: "TRANSFER",
+        amount: "invalid",
+        currency: "USDC",
+        category: "OPERATIONS",
+      },
+      "INVALID_AMOUNT",
+    ],
+    [
+      {
+        title: "title",
+        description: "description",
+        type: "TRANSFER",
+        amount: "0",
+        currency: "USDC",
+        category: "OPERATIONS",
+      },
+      "INVALID_MONETARY_PROPOSAL",
+    ],
+    [
+      {
+        title: "title",
+        description: "description",
+        type: "TRANSFER",
+        amount: "10",
+        category: "OPERATIONS",
+      },
+      "INVALID_MONETARY_PROPOSAL",
+    ],
+    [
+      {
+        title: "title",
+        description: "description",
+        type: "TRANSFER",
+        amount: "10",
+        currency: "USDC",
+      },
+      "INVALID_MONETARY_PROPOSAL",
+    ],
+  ])("rejects malformed proposal input %#", async (input, code) => {
+    const { service } = setup();
+    await expect(
+      service.createProposal(input as any, signer, "business-1"),
+    ).rejects.toMatchObject({ code });
+  });
 
-  describe("approveProposal", () => {
-    it("should throw PROPOSAL_NOT_FOUND for unknown proposal", async () => {
+  it.each([-1, 0.5, 721])(
+    "rejects the invalid timelock %s",
+    async (timelockHours) => {
+      const { service } = setup();
       await expect(
-        treasuryService.approveProposal("prop-nonexistent", "0xsigner"),
-      ).rejects.toMatchObject({
-        code: "PROPOSAL_NOT_FOUND",
-        statusCode: 404,
-      });
-    });
-
-    it("should return approval status for existing proposal", async () => {
-      // Create a proposal first
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Test proposal",
-          description: "Test",
-          type: "TRANSFER",
-          amount: "5000",
-        },
-        "0xproposer",
-        "biz-1",
-      );
-
-      const result = await treasuryService.approveProposal(
-        proposal.id as string,
-        "0xsigner1",
-      );
-
-      expect(result).toHaveProperty("approved");
-      expect(result).toHaveProperty("remainingApprovals");
-      expect(result).toHaveProperty("status");
-    });
-
-    it("should mark approved when reaching threshold", async () => {
-      // Create a proposal with amount < 10000 (requires 2 approvals)
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Small transfer",
-          description: "Test",
-          type: "TRANSFER",
-          amount: "5000",
-        },
-        "0xproposer",
-        "biz-1",
-      );
-
-      const result1 = await treasuryService.approveProposal(
-        proposal.id as string,
-        "0xsigner1",
-      );
-      expect(result1.approved).toBe(false);
-      expect(result1.remainingApprovals).toBe(1);
-
-      const result2 = await treasuryService.approveProposal(
-        proposal.id as string,
-        "0xsigner2",
-      );
-      expect(result2.approved).toBe(true);
-      expect(result2.remainingApprovals).toBe(0);
-      expect(result2.status).toBe("APPROVED");
-    });
-  });
-
-  // ─── executeProposal ───────────────────────────────────────────────────────
-
-  describe("executeProposal", () => {
-    it("should throw PROPOSAL_NOT_FOUND for unknown proposal", async () => {
-      await expect(
-        treasuryService.executeProposal("prop-nonexistent", "0xexecutor"),
-      ).rejects.toMatchObject({
-        code: "PROPOSAL_NOT_FOUND",
-        statusCode: 404,
-      });
-    });
-
-    it("should execute an approved proposal and return txHash", async () => {
-      // Create and fully approve a proposal (amount < 10000 = 2 approvals, no timelock)
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Execute test",
-          description: "Test",
-          type: "TRANSFER",
-          amount: "5000",
-        },
-        "0xproposer",
-        "biz-1",
-      );
-
-      await treasuryService.approveProposal(proposal.id as string, "0xsigner1");
-      await treasuryService.approveProposal(proposal.id as string, "0xsigner2");
-
-      const result = await treasuryService.executeProposal(
-        proposal.id as string,
-        "0xexecutor",
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.txHash).toMatch(/^0x[a-f0-9]{64}$/);
-      expect(auditService.createAuditEntry).toHaveBeenCalledWith(
-        expect.objectContaining({ severity: "HIGH" }),
-      );
-    });
-  });
-
-  // ─── validateSpendingPolicy ────────────────────────────────────────────────
-
-  describe("validateSpendingPolicy", () => {
-    it("should allow spending within limits", () => {
-      const result = treasuryService.validateSpendingPolicy(
-        "1000",
-        "OPERATIONS",
-        { daily: "0", weekly: "0", monthly: "0" },
-      );
-
-      expect(result.allowed).toBe(true);
-    });
-
-    it("should deny when daily limit is exceeded", () => {
-      const result = treasuryService.validateSpendingPolicy(
-        "10000",
-        "OPERATIONS",
-        { daily: "45000", weekly: "0", monthly: "0" },
-      );
-
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain("Daily");
-    });
-
-    it("should deny when weekly limit is exceeded", () => {
-      const result = treasuryService.validateSpendingPolicy(
-        "10000",
-        "OPERATIONS",
-        { daily: "0", weekly: "195000", monthly: "0" },
-      );
-
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain("Weekly");
-    });
-
-    it("should deny when monthly limit is exceeded", () => {
-      const result = treasuryService.validateSpendingPolicy(
-        "10000",
-        "OPERATIONS",
-        { daily: "0", weekly: "0", monthly: "495000" },
-      );
-
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain("Monthly");
-    });
-
-    it("should deny for unknown category", () => {
-      const result = treasuryService.validateSpendingPolicy(
-        "100",
-        "NONEXISTENT" as any,
-        { daily: "0", weekly: "0", monthly: "0" },
-      );
-
-      expect(result.allowed).toBe(false);
-      expect(result.reason).toContain("No spending policy");
-    });
-  });
-
-  // ─── getYieldStrategies ────────────────────────────────────────────────────
-
-  describe("getYieldStrategies", () => {
-    it("should return initialized strategies", () => {
-      const strategies = treasuryService.getYieldStrategies();
-      expect(strategies.length).toBeGreaterThan(0);
-      expect(strategies[0]).toHaveProperty("protocol");
-      expect(strategies[0]).toHaveProperty("currentAPY");
-    });
-  });
-
-  // ─── getSpendingPolicies ───────────────────────────────────────────────────
-
-  describe("getSpendingPolicies", () => {
-    it("should return all default policies", () => {
-      const policies = treasuryService.getSpendingPolicies();
-      expect(policies.length).toBe(7);
-      const categories = policies.map((p) => p.category);
-      expect(categories).toContain("OPERATIONS");
-      expect(categories).toContain("PAYROLL");
-    });
-  });
-
-  // ─── updateSpendingPolicy ──────────────────────────────────────────────────
-
-  describe("updateSpendingPolicy", () => {
-    it("should update an existing policy", () => {
-      const updated = treasuryService.updateSpendingPolicy("OPERATIONS", {
-        dailyLimit: "100000",
-      });
-
-      expect(updated.dailyLimit).toBe("100000");
-      expect(updated.category).toBe("OPERATIONS");
-    });
-
-    it("should throw for unknown category", () => {
-      expect(() =>
-        treasuryService.updateSpendingPolicy("NONEXISTENT" as any, {}),
-      ).toThrow(TreasuryError);
-    });
-  });
-
-  // ─── getAnalytics ──────────────────────────────────────────────────────────
-
-  describe("getAnalytics", () => {
-    it("should return analytics for each period type", async () => {
-      for (const period of ["day", "week", "month", "quarter"] as const) {
-        const analytics = await treasuryService.getAnalytics("biz-1", period);
-        expect(analytics.period).toBe(period);
-        expect(analytics.totalInflows).toBeDefined();
-        expect(analytics.runwayDays).toBeGreaterThan(0);
-      }
-    });
-  });
-
-  // ─── getApprovalThreshold (fallback) ──────────────────────────────────────
-
-  describe("getApprovalThreshold (fallback)", () => {
-    it("should use last threshold for very large amounts", async () => {
-      const proposal = await treasuryService.createProposal(
-        {
-          title: "Massive transfer",
-          description: "Huge",
-          type: "TRANSFER",
-          amount: "9999999999",
-        },
-        "0xproposer",
-        "biz-1",
-      );
-
-      // The fallback threshold is the last one: 5 approvals, 48h timelock
-      expect(proposal.requiredApprovals).toBe(5);
-      expect(proposal.timelockHours).toBe(48);
-    });
-  });
-
-  // ─── TreasuryError ─────────────────────────────────────────────────────────
-
-  describe("TreasuryError", () => {
-    it("should set properties correctly", () => {
-      const err = new TreasuryError("CODE", "msg", 404);
-      expect(err.code).toBe("CODE");
-      expect(err.statusCode).toBe(404);
-      expect(err.name).toBe("TreasuryError");
-    });
-
-    it("should default statusCode to 400", () => {
-      const err = new TreasuryError("CODE", "msg");
-      expect(err.statusCode).toBe(400);
-    });
-  });
-
-  // ─── Prisma Failure Paths (persist-first-mutate-second) ──────────────────
-
-  describe("Prisma failure paths", () => {
-    const originalNodeEnv = process.env.NODE_ENV;
-
-    beforeEach(() => {
-      // Force production code paths so Prisma errors are NOT silently swallowed
-      process.env.NODE_ENV = "production";
-    });
-
-    afterEach(() => {
-      process.env.NODE_ENV = originalNodeEnv;
-    });
-
-    // ── createProposal: Prisma create throws ──────────────────────────────
-
-    describe("createProposal — Prisma create failure", () => {
-      it("should propagate PERSISTENCE_FAILURE and NOT leave an in-memory entry", async () => {
-        prisma.treasuryProposal.create.mockRejectedValueOnce(
-          new Error("DB connection refused"),
-        );
-
-        await expect(
-          treasuryService.createProposal(
-            {
-              title: "Fail on persist",
-              description: "Should not survive",
-              type: "TRANSFER",
-              amount: "1000",
-            },
-            "0xproposer",
-            "biz-1",
-          ),
-        ).rejects.toMatchObject({
-          code: "PERSISTENCE_FAILURE",
-          statusCode: 503,
-        });
-
-        // The in-memory map should have been cleaned up (proposal deleted)
-        // Verify by trying to approve — should get PROPOSAL_NOT_FOUND, not succeed
-        // We need to switch back to test mode for the findUnique fallback to not also throw
-        process.env.NODE_ENV = "test";
-        prisma.treasuryProposal.findUnique.mockResolvedValueOnce(null);
-        await expect(
-          treasuryService.approveProposal("prop-does-not-exist", "0xsigner"),
-        ).rejects.toMatchObject({
-          code: "PROPOSAL_NOT_FOUND",
-        });
-      });
-
-      it("should NOT emit an audit entry when persistence fails", async () => {
-        prisma.treasuryProposal.create.mockRejectedValueOnce(
-          new Error("DB timeout"),
-        );
-
-        await expect(
-          treasuryService.createProposal(
-            {
-              title: "No audit on fail",
-              description: "Should not audit",
-              type: "TRANSFER",
-              amount: "500",
-            },
-            "0xproposer",
-            "biz-1",
-          ),
-        ).rejects.toThrow();
-
-        // The audit entry is called AFTER the persistence block, so on failure it
-        // should never be reached
-        expect(auditService.createAuditEntry).not.toHaveBeenCalled();
-      });
-    });
-
-    // ── approveProposal: Prisma findUnique throws during restore ──────────
-
-    describe("approveProposal — Prisma findUnique failure during restore", () => {
-      it("should throw PERSISTENCE_FAILURE, NOT PROPOSAL_NOT_FOUND", async () => {
-        // Proposal is not in memory, so it will try to restore from Prisma
-        prisma.treasuryProposal.findUnique.mockRejectedValueOnce(
-          new Error("DB read timeout"),
-        );
-
-        await expect(
-          treasuryService.approveProposal("prop-unknown", "0xsigner"),
-        ).rejects.toMatchObject({
-          code: "PERSISTENCE_FAILURE",
-          statusCode: 503,
-        });
-      });
-    });
-
-    // ── approveProposal: Prisma update throws ─────────────────────────────
-
-    describe("approveProposal — Prisma update failure", () => {
-      it("should throw PERSISTENCE_FAILURE (503) and NOT advance in-memory state", async () => {
-        // First, create a proposal successfully (need Prisma create to work)
-        process.env.NODE_ENV = "test";
-        const proposal = await treasuryService.createProposal(
+        service.createProposal(
           {
-            title: "Approve persist fail",
-            description: "Test",
-            type: "TRANSFER",
-            amount: "5000",
+            title: "Policy update",
+            description: "Update treasury policy",
+            type: "POLICY_CHANGE",
+            timelockHours,
           },
-          "0xproposer",
-          "biz-1",
-        );
-        const proposalId = proposal.id as string;
-        // Switch back to production mode for the failure test
-        process.env.NODE_ENV = "production";
+          signer,
+          "business-1",
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_TIMELOCK" });
+    },
+  );
 
-        // Make the Prisma update reject
-        prisma.treasuryProposal.update.mockRejectedValueOnce(
-          new Error("DB write failure"),
-        );
+  it.each([
+    [null, "PROPOSAL_NOT_FOUND"],
+    [proposal({ status: "APPROVED" }), "INVALID_STATE"],
+    [proposal({ approvedBy: [signer] }), "DUPLICATE_APPROVAL"],
+  ])("rejects an invalid approval target %#", async (stored, code) => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findFirst.mockResolvedValue(stored);
+    prisma.$transaction.mockImplementation(
+      async (callback: (transaction: unknown) => Promise<unknown>) =>
+        callback({ treasuryProposal: prisma.treasuryProposal }),
+    );
+    await expect(
+      service.approveProposal("proposal-1", signer, "business-1"),
+    ).rejects.toMatchObject({ code });
+  });
 
-        await expect(
-          treasuryService.approveProposal(proposalId, "0xsigner1"),
-        ).rejects.toMatchObject({
-          code: "PERSISTENCE_FAILURE",
-          statusCode: 503,
-        });
-
-        // Verify in-memory state was NOT mutated:
-        // Approve again in test mode — if state was not advanced, signer1 should
-        // NOT be a duplicate (the approval never went through)
-        process.env.NODE_ENV = "test";
-        const result = await treasuryService.approveProposal(proposalId, "0xsigner1");
-        expect(result.status).toBe("PENDING");
-        // signer1 now appears for the first time
-        expect(result.remainingApprovals).toBe(1);
-      });
-
-      it("should NOT emit an audit entry when persistence fails on approve", async () => {
-        process.env.NODE_ENV = "test";
-        const proposal = await treasuryService.createProposal(
-          {
-            title: "No audit approve fail",
-            description: "Test",
-            type: "TRANSFER",
-            amount: "5000",
-          },
-          "0xproposer",
-          "biz-1",
-        );
-        const proposalId = proposal.id as string;
-
-        // Reset mock call count after create (which triggers an audit entry)
-        (auditService.createAuditEntry as jest.Mock).mockClear();
-
-        process.env.NODE_ENV = "production";
-        prisma.treasuryProposal.update.mockRejectedValueOnce(
-          new Error("DB write failure"),
-        );
-
-        await expect(
-          treasuryService.approveProposal(proposalId, "0xsigner1"),
-        ).rejects.toThrow();
-
-        expect(auditService.createAuditEntry).not.toHaveBeenCalled();
-      });
+  it("expires an overdue proposal atomically", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findFirst.mockResolvedValue(
+      proposal({
+        expiresAt: new Date(now.getTime() - 1),
+      }),
+    );
+    prisma.treasuryProposal.update.mockResolvedValue(
+      proposal({ status: "EXPIRED" }),
+    );
+    prisma.$transaction.mockImplementation(
+      async (callback: (transaction: unknown) => Promise<unknown>) =>
+        callback({ treasuryProposal: prisma.treasuryProposal }),
+    );
+    await expect(
+      service.approveProposal("proposal-1", signer, "business-1"),
+    ).rejects.toMatchObject({ code: "PROPOSAL_EXPIRED" });
+    expect(prisma.treasuryProposal.update).toHaveBeenCalledWith({
+      where: { id: "proposal-1" },
+      data: { status: "EXPIRED" },
     });
+  });
 
-    // ── executeProposal: Prisma findUnique throws during restore ──────────
-
-    describe("executeProposal — Prisma findUnique failure during restore", () => {
-      it("should throw PERSISTENCE_FAILURE, NOT PROPOSAL_NOT_FOUND", async () => {
-        prisma.treasuryProposal.findUnique.mockRejectedValueOnce(
-          new Error("DB read timeout"),
-        );
-
-        await expect(
-          treasuryService.executeProposal("prop-unknown", "0xexecutor"),
-        ).rejects.toMatchObject({
-          code: "PERSISTENCE_FAILURE",
-          statusCode: 503,
-        });
-      });
+  it("records a partial approval with the remaining signature count", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findFirst.mockResolvedValue(
+      proposal({ requiredSigs: 3 }),
+    );
+    prisma.treasuryProposal.update.mockResolvedValue(
+      proposal({
+        requiredSigs: 3,
+        currentSigs: 1,
+        approvedBy: [signer],
+        status: "PENDING",
+      }),
+    );
+    prisma.$transaction.mockImplementation(
+      async (callback: (transaction: unknown) => Promise<unknown>) =>
+        callback({ treasuryProposal: prisma.treasuryProposal }),
+    );
+    await expect(
+      service.approveProposal("proposal-1", signer, "business-1"),
+    ).resolves.toEqual({
+      approved: false,
+      remainingApprovals: 2,
+      status: "PENDING",
     });
+  });
 
-    // ── executeProposal: Prisma update throws ─────────────────────────────
+  it("distinguishes serialization conflicts from generic approval persistence failures", async () => {
+    const serialization = setup();
+    serialization.prisma.$transaction.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError("serialization conflict", {
+        code: "P2034",
+        clientVersion: "5.8.1",
+      }),
+    );
+    await expect(
+      serialization.service.approveProposal("proposal-1", signer, "business-1"),
+    ).rejects.toMatchObject({ code: "APPROVAL_CONFLICT", statusCode: 409 });
 
-    describe("executeProposal — Prisma update failure", () => {
-      it("should throw PERSISTENCE_FAILURE (503) and NOT change in-memory status to EXECUTED", async () => {
-        // Create and fully approve a proposal in test mode
-        process.env.NODE_ENV = "test";
-        const proposal = await treasuryService.createProposal(
-          {
-            title: "Execute persist fail",
-            description: "Test",
-            type: "TRANSFER",
-            amount: "5000",
-          },
-          "0xproposer",
-          "biz-1",
-        );
-        const proposalId = proposal.id as string;
+    const failure = setup();
+    const cause = new Error("database unavailable");
+    failure.prisma.$transaction.mockRejectedValue(cause);
+    await expect(
+      failure.service.approveProposal("proposal-1", signer, "business-1"),
+    ).rejects.toMatchObject({ code: "PERSISTENCE_FAILURE", cause });
+  });
 
-        await treasuryService.approveProposal(proposalId, "0xsigner1");
-        await treasuryService.approveProposal(proposalId, "0xsigner2");
-
-        // Switch to production and make Prisma update fail
-        process.env.NODE_ENV = "production";
-        prisma.treasuryProposal.update.mockRejectedValueOnce(
-          new Error("DB write failure on execute"),
-        );
-
-        await expect(
-          treasuryService.executeProposal(proposalId, "0xexecutor"),
-        ).rejects.toMatchObject({
-          code: "PERSISTENCE_FAILURE",
-          statusCode: 503,
-        });
-
-        // Verify in-memory status was NOT changed to EXECUTED — retrying should
-        // still see APPROVED and attempt execution again
-        process.env.NODE_ENV = "test";
-        const retryResult = await treasuryService.executeProposal(proposalId, "0xexecutor");
-        expect(retryResult.success).toBe(true);
-        expect(retryResult.txHash).toMatch(/^0x[a-f0-9]{64}$/);
-      });
-
-      it("should NOT emit an audit entry when persistence fails on execute", async () => {
-        process.env.NODE_ENV = "test";
-        const proposal = await treasuryService.createProposal(
-          {
-            title: "No audit execute fail",
-            description: "Test",
-            type: "TRANSFER",
-            amount: "5000",
-          },
-          "0xproposer",
-          "biz-1",
-        );
-        const proposalId = proposal.id as string;
-
-        await treasuryService.approveProposal(proposalId, "0xsigner1");
-        await treasuryService.approveProposal(proposalId, "0xsigner2");
-
-        (auditService.createAuditEntry as jest.Mock).mockClear();
-
-        process.env.NODE_ENV = "production";
-        prisma.treasuryProposal.update.mockRejectedValueOnce(
-          new Error("DB write failure"),
-        );
-
-        await expect(
-          treasuryService.executeProposal(proposalId, "0xexecutor"),
-        ).rejects.toThrow();
-
-        expect(auditService.createAuditEntry).not.toHaveBeenCalled();
-      });
+  it("validates absent, daily, monthly, and allowed spending policies", async () => {
+    const { prisma, service } = setup();
+    prisma.spendingPolicy.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(policy())
+      .mockResolvedValueOnce(policy())
+      .mockResolvedValueOnce(policy());
+    await expect(
+      service.validateSpendingPolicy("10", "OPERATIONS", {
+        daily: "0",
+        monthly: "0",
+      }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining("No active"),
     });
-
-    // ── Retry succeeds after DB recovery ──────────────────────────────────
-
-    describe("retry after DB recovery", () => {
-      it("should succeed on retry after Prisma create fails once then recovers", async () => {
-        // First call fails
-        prisma.treasuryProposal.create.mockRejectedValueOnce(
-          new Error("Transient DB error"),
-        );
-
-        await expect(
-          treasuryService.createProposal(
-            {
-              title: "Retry test",
-              description: "Should work on second try",
-              type: "TRANSFER",
-              amount: "2000",
-            },
-            "0xproposer",
-            "biz-1",
-          ),
-        ).rejects.toMatchObject({
-          code: "PERSISTENCE_FAILURE",
-          statusCode: 503,
-        });
-
-        // Second call succeeds (mock returns resolved by default after the rejection is consumed)
-        prisma.treasuryProposal.create.mockResolvedValueOnce({});
-
-        const proposal = await treasuryService.createProposal(
-          {
-            title: "Retry test",
-            description: "Should work on second try",
-            type: "TRANSFER",
-            amount: "2000",
-          },
-          "0xproposer",
-          "biz-1",
-        );
-
-        expect(proposal.id).toMatch(/^prop-/);
-        expect(proposal.status).toBe("PENDING");
-        expect(auditService.createAuditEntry).toHaveBeenCalled();
-      });
-
-      it("should succeed on retry after Prisma update fails once during approve", async () => {
-        // Create successfully
-        process.env.NODE_ENV = "test";
-        const proposal = await treasuryService.createProposal(
-          {
-            title: "Approve retry",
-            description: "Test",
-            type: "TRANSFER",
-            amount: "5000",
-          },
-          "0xproposer",
-          "biz-1",
-        );
-        const proposalId = proposal.id as string;
-
-        // First approve attempt fails in production mode
-        process.env.NODE_ENV = "production";
-        prisma.treasuryProposal.update.mockRejectedValueOnce(
-          new Error("Transient DB error"),
-        );
-
-        await expect(
-          treasuryService.approveProposal(proposalId, "0xsigner1"),
-        ).rejects.toMatchObject({ code: "PERSISTENCE_FAILURE" });
-
-        // DB recovers — next call succeeds
-        prisma.treasuryProposal.update.mockResolvedValueOnce({});
-
-        const result = await treasuryService.approveProposal(proposalId, "0xsigner1");
-        expect(result.remainingApprovals).toBe(1);
-        expect(result.status).toBe("PENDING");
-      });
-
-      it("should succeed on retry after Prisma update fails once during execute", async () => {
-        // Create and approve in test mode
-        process.env.NODE_ENV = "test";
-        const proposal = await treasuryService.createProposal(
-          {
-            title: "Execute retry",
-            description: "Test",
-            type: "TRANSFER",
-            amount: "5000",
-          },
-          "0xproposer",
-          "biz-1",
-        );
-        const proposalId = proposal.id as string;
-
-        await treasuryService.approveProposal(proposalId, "0xsigner1");
-        await treasuryService.approveProposal(proposalId, "0xsigner2");
-
-        // First execute attempt fails
-        process.env.NODE_ENV = "production";
-        prisma.treasuryProposal.update.mockRejectedValueOnce(
-          new Error("Transient DB error"),
-        );
-
-        await expect(
-          treasuryService.executeProposal(proposalId, "0xexecutor"),
-        ).rejects.toMatchObject({ code: "PERSISTENCE_FAILURE" });
-
-        // DB recovers — retry succeeds
-        prisma.treasuryProposal.update.mockResolvedValueOnce({});
-
-        const result = await treasuryService.executeProposal(proposalId, "0xexecutor");
-        expect(result.success).toBe(true);
-        expect(result.txHash).toMatch(/^0x[a-f0-9]{64}$/);
-      });
+    await expect(
+      service.validateSpendingPolicy("100", "OPERATIONS", {
+        daily: "950",
+        monthly: "0",
+      }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining("Daily"),
     });
+    await expect(
+      service.validateSpendingPolicy("100", "OPERATIONS", {
+        daily: "0",
+        monthly: "9950",
+      }),
+    ).resolves.toMatchObject({
+      allowed: false,
+      reason: expect.stringContaining("Monthly"),
+    });
+    await expect(
+      service.validateSpendingPolicy("100", "OPERATIONS", {
+        daily: "0",
+        monthly: "0",
+      }),
+    ).resolves.toEqual({ allowed: true });
+  });
+
+  it("updates a durable spending policy and conceals a missing category", async () => {
+    const { prisma, service } = setup();
+    prisma.spendingPolicy.findFirst.mockResolvedValueOnce(null);
+    await expect(
+      service.updateSpendingPolicy("OPERATIONS", { active: false }),
+    ).rejects.toMatchObject({ code: "POLICY_NOT_FOUND", statusCode: 404 });
+
+    prisma.spendingPolicy.findFirst.mockResolvedValueOnce(policy());
+    prisma.spendingPolicy.update.mockResolvedValue(
+      policy({
+        dailyLimit: new Prisma.Decimal("2000"),
+        monthlyLimit: new Prisma.Decimal("20000"),
+        requiresMultiSig: false,
+        approvalThreshold: 1,
+        isActive: false,
+      }),
+    );
+    const updated = await service.updateSpendingPolicy("INFRASTRUCTURE", {
+      dailyLimit: "2000",
+      monthlyLimit: "20000",
+      requiresApproval: false,
+      minApprovals: 1,
+      active: false,
+    });
+    expect(updated).toMatchObject({
+      dailyLimit: "2000",
+      monthlyLimit: "20000",
+      active: false,
+    });
+  });
+
+  it.each(["day", "week", "month", "quarter"] as const)(
+    "derives %s analytics from executed proposals and recorded yield",
+    async (period) => {
+      const { prisma, service } = setup();
+      prisma.treasuryProposal.findMany.mockResolvedValue([
+        proposal({ id: "no-amount", status: "EXECUTED", amount: null }),
+        proposal({
+          id: "ops",
+          status: "EXECUTED",
+          amount: new Prisma.Decimal("300"),
+          metadata: { category: "OPERATIONS" },
+        }),
+        proposal({
+          id: "infra",
+          status: "EXECUTED",
+          amount: new Prisma.Decimal("200"),
+          metadata: { category: "INFRASTRUCTURE" },
+        }),
+        proposal({
+          id: "uncategorized",
+          status: "EXECUTED",
+          amount: new Prisma.Decimal("100"),
+          metadata: { category: "INVALID" },
+        }),
+      ]);
+      prisma.yieldStrategy.findMany.mockResolvedValue([
+        strategy({ totalYieldEarned: new Prisma.Decimal("25") }),
+        strategy({
+          id: "strategy-2",
+          totalYieldEarned: new Prisma.Decimal("5"),
+        }),
+      ]);
+      const analytics = await service.getAnalytics("business-1", period);
+      expect(analytics).toMatchObject({
+        period,
+        businessId: "business-1",
+        totalOutflows: "600",
+        yieldGenerated: "30",
+      });
+      expect(analytics.topCategories).toEqual([
+        { category: "OPERATIONS", amount: "300", percentage: 50 },
+        { category: "INFRASTRUCTURE", amount: "200", percentage: 100 / 3 },
+      ]);
+    },
+  );
+
+  it("preserves the default error status and optional cause behavior", () => {
+    const withoutCause = new TreasuryError("INVALID", "invalid");
+    expect(withoutCause).toMatchObject({ statusCode: 400 });
+    expect(withoutCause).not.toHaveProperty("cause");
   });
 });

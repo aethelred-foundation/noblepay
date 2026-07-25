@@ -1,406 +1,410 @@
-import React from "react";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import PaymentChannelsPage from "@/pages/payment-channels";
 
-// ---------------------------------------------------------------------------
-// Mocks
-// ---------------------------------------------------------------------------
+const mockUsePaymentChannels = jest.fn();
+const mockOpenChannel = jest.fn();
+const mockFundChannel = jest.fn();
+const mockCloseChannel = jest.fn();
+const mockCancelOpenChannel = jest.fn();
+const mockInitiateCurrentStateClose = jest.fn();
+const mockCounterDispute = jest.fn();
+const mockFinalizeClose = jest.fn();
+const mockBuildStateArtifact = jest.fn();
+const mockInspectStateArtifact = jest.fn();
+const mockSignStateArtifact = jest.fn();
+const mockRefetch = jest.fn();
+const mockReset = jest.fn();
+const mockNotify = jest.fn();
 
-jest.mock("recharts", () => {
-  const React = require("react");
-  const mock = (name: string) => {
-    const C = ({
-      children,
-      content,
-      tickFormatter,
-      formatter,
-      ...props
-    }: any) => {
-      const extra: any[] = [];
-      if (typeof tickFormatter === "function") {
-        try {
-          tickFormatter(2000000000);
-          tickFormatter(1000000);
-          tickFormatter(5000);
-          tickFormatter(50);
-        } catch (_e) {}
-      }
-      if (typeof formatter === "function") {
-        try {
-          formatter(2000000000);
-          formatter(1000000);
-          formatter(5000);
-          formatter(50);
-        } catch (_e) {}
-      }
-      if (typeof content === "function") {
-        try {
-          extra.push(
-            content({
-              active: true,
-              payload: [{ color: "#f00", name: "T", value: 1234 }],
-              label: "L",
-            }),
-          );
-          extra.push(content({ active: false, payload: [], label: "" }));
-          extra.push(
-            content({
-              active: true,
-              payload: [{ color: "#0f0", name: "V", value: "text-val" }],
-              label: "",
-            }),
-          );
-        } catch (_e) {}
-      }
-      if (React.isValidElement(content)) {
-        try {
-          extra.push(
-            React.cloneElement(content, {
-              active: true,
-              payload: [{ color: "#f00", name: "T", value: 1234 }],
-              label: "L",
-            }),
-          );
-          extra.push(
-            React.cloneElement(content, {
-              active: false,
-              payload: [],
-              label: "",
-            }),
-          );
-          extra.push(
-            React.cloneElement(content, {
-              active: true,
-              payload: [{ color: "#0f0", name: "V", value: "str" }],
-              label: "",
-            }),
-          );
-        } catch (_e) {}
-      }
-      return React.createElement(
-        "div",
-        { "data-testid": `mock-${name}` },
-        children,
-        ...extra,
-      );
-    };
-    C.displayName = name;
-    return C;
-  };
-  return {
-    ResponsiveContainer: mock("ResponsiveContainer"),
-    AreaChart: mock("AreaChart"),
-    Area: mock("Area"),
-    BarChart: mock("BarChart"),
-    Bar: mock("Bar"),
-    LineChart: mock("LineChart"),
-    Line: mock("Line"),
-    PieChart: mock("PieChart"),
-    Pie: mock("Pie"),
-    Cell: mock("Cell"),
-    XAxis: mock("XAxis"),
-    YAxis: mock("YAxis"),
-    CartesianGrid: mock("CartesianGrid"),
-    Tooltip: mock("Tooltip"),
-    Legend: mock("Legend"),
-    ReferenceLine: mock("ReferenceLine"),
-    ComposedChart: mock("ComposedChart"),
-    RadarChart: mock("RadarChart"),
-    Radar: mock("Radar"),
-    PolarGrid: mock("PolarGrid"),
-    PolarAngleAxis: mock("PolarAngleAxis"),
-    PolarRadiusAxis: mock("PolarRadiusAxis"),
-    ScatterChart: mock("ScatterChart"),
-    Scatter: mock("Scatter"),
-  };
-});
+const USDC = "0x0000000000000000000000000000000000000005";
+const COUNTERPARTY = "0x1111111111111111111111111111111111111111";
 
+function stateArtifact(stateType: "CLOSE" | "STATE") {
+  return JSON.stringify(
+    {
+      format: "noblepay-channel-state-v2",
+      chainId: "7332",
+      verifyingContract: "0x0000000000000000000000000000000000000008",
+      state: {
+        channelId:
+          "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        balanceA: "8000000",
+        balanceB: "7000000",
+        nonce: "4",
+        stateEpoch: "2",
+        stateType,
+      },
+      signatures: {
+        partyA: `0x${"aa".repeat(65)}`,
+        partyB: `0x${"bb".repeat(65)}`,
+      },
+    },
+    null,
+    2,
+  );
+}
+
+jest.mock("@/config/wagmi", () => ({
+  activeChain: {
+    blockExplorers: { default: { url: "https://explorer.test" } },
+  },
+}));
+jest.mock("@/config/chains", () => ({
+  CONTRACT_ADDRESSES: {
+    paymentChannels: "0x0000000000000000000000000000000000000008",
+    usdcToken: "0x0000000000000000000000000000000000000005",
+    usdtToken: "0x0000000000000000000000000000000000000006",
+  },
+}));
+jest.mock("@/hooks/usePaymentChannels", () => ({
+  usePaymentChannels: () => mockUsePaymentChannels(),
+}));
 jest.mock("@/contexts/AppContext", () => ({
-  useApp: () => ({
-    wallet: {
-      connected: true,
-      address: "0x1234567890abcdef1234567890abcdef12345678",
-      balance: 100,
-      usdcBalance: 5000,
-      usdtBalance: 3000,
-      isConnecting: false,
-      isWrongNetwork: false,
-      chainId: 1,
-    },
-    connectWallet: jest.fn(),
-    disconnectWallet: jest.fn(),
-    switchNetwork: jest.fn(),
-    realTime: {
-      blockHeight: 2847123,
-      tps: 450,
-      gasPrice: 0.001,
-      epoch: 2847,
-      networkLoad: 72,
-      aethelPrice: 1.24,
-      lastBlockTime: Date.now(),
-    },
-    payments: {
-      activePayments: 12,
-      pendingScreening: 3,
-      flaggedCount: 1,
-      dailyVolume: 2400000,
-    },
-    compliance: {
-      sanctionsListVersion: "v2024.03.14",
-      lastUpdated: Date.now(),
-      passRate: 97.8,
-      avgScreeningTime: 67,
-    },
-    notifications: [],
-    addNotification: jest.fn(),
-    removeNotification: jest.fn(),
-    searchOpen: false,
-    setSearchOpen: jest.fn(),
-  }),
+  useApp: () => ({ addNotification: mockNotify }),
 }));
-
-jest.mock("@/components/SEOHead", () => ({
-  SEOHead: ({ title }: { title: string }) => (
-    <div data-testid="seo-head">{title}</div>
-  ),
-}));
-
 jest.mock("@/components/SharedComponents", () => ({
-  TopNav: () => <nav data-testid="top-nav">TopNav</nav>,
-  Footer: () => <footer data-testid="footer">Footer</footer>,
-  Badge: ({ children }: { children: React.ReactNode }) => (
-    <span>{children}</span>
-  ),
-  Modal: ({ open, title, children, onClose }: any) =>
+  Badge: ({ children }: any) => <span>{children}</span>,
+  Modal: ({ open, title, children }: any) =>
     open ? (
-      <div data-testid="modal" aria-label={title}>
-        {title}
+      <div role="dialog" aria-label={title}>
+        <h2>{title}</h2>
         {children}
-        <button data-testid="modal-close" onClick={onClose}>
-          X
-        </button>
-      </div>
-    ) : null,
-  Tabs: ({ tabs, active, onChange }: any) => (
-    <div data-testid="tabs">
-      {tabs.map((t: any) => (
-        <button
-          key={t.id}
-          onClick={() => onChange(t.id)}
-          data-active={active === t.id}
-        >
-          {t.label}
-        </button>
-      ))}
-    </div>
-  ),
-  Drawer: ({ open, title, children, onClose }: any) =>
-    open ? (
-      <div data-testid="drawer">
-        {title}
-        {children}
-        <button data-testid="drawer-close" onClick={onClose}>
-          X
-        </button>
       </div>
     ) : null,
 }));
-
-jest.mock("@/components/PagePrimitives", () => ({
-  GlassCard: ({ children, className }: any) => (
-    <div className={className}>{children}</div>
+jest.mock("@/components/ProductionPage", () => ({
+  PageShell: ({ title, children }: any) => (
+    <main>
+      <h1>{title}</h1>
+      {children}
+    </main>
   ),
-  SectionHeader: ({ title, subtitle, action }: any) => (
+  SessionGate: ({ children }: any) => children,
+  MetricCard: ({ label, value }: any) => (
     <div>
-      <h2>{title}</h2>
-      {subtitle && <p>{subtitle}</p>}
-      {action}
+      {label}: {value}
     </div>
   ),
-  Sparkline: () => <svg data-testid="sparkline" />,
-  ChartTooltip: () => <div />,
-  StatusBadge: ({ status }: { status: string }) => <span>{status}</span>,
-  CopyButton: () => <button>Copy</button>,
+  Panel: ({ title, action, children }: any) => (
+    <section>
+      <h2>{title}</h2>
+      {action}
+      {children}
+    </section>
+  ),
+  LoadingState: ({ label }: any) => <div>{label}</div>,
+  ErrorState: ({ error, retry }: any) => (
+    <div role="alert">
+      {error.message}
+      {retry ? <button onClick={retry}>Retry</button> : null}
+    </div>
+  ),
+  EmptyState: ({ title, body }: any) => (
+    <div>
+      <h3>{title}</h3>
+      <p>{body}</p>
+    </div>
+  ),
 }));
 
-import PaymentChannelsPage from "../../pages/payment-channels";
+const activeChannel = {
+  channelId:
+    "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  partyA: "0x1234567890abcdef1234567890abcdef12345678",
+  partyB: COUNTERPARTY,
+  token: USDC,
+  depositA: 10_000_000n,
+  depositB: 5_000_000n,
+  balanceA: 8_000_000n,
+  balanceB: 7_000_000n,
+  status: 2,
+  nonce: 3n,
+  stateEpoch: 2n,
+  openedAt: 1n,
+  closingAt: 0n,
+  closedAt: 0n,
+  challengePeriod: 86_400n,
+  tokenDecimals: 6,
+  tokenSymbol: "USDC",
+  depositADisplay: "10",
+  depositBDisplay: "5",
+  balanceADisplay: "8",
+  balanceBDisplay: "7",
+  statusLabel: "ACTIVE",
+  disputeChallenger: null,
+  disputeNonce: null,
+  disputeExpiresAt: null,
+};
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
+function channelState(overrides: Record<string, unknown> = {}) {
+  return {
+    configured: true,
+    connectedAddress: activeChannel.partyA,
+    settlementTokensConfigured: true,
+    kycVerified: true,
+    channels: [activeChannel],
+    isLoading: false,
+    error: null,
+    refetch: mockRefetch,
+    openChannel: mockOpenChannel,
+    fundChannel: mockFundChannel,
+    closeChannel: mockCloseChannel,
+    cancelOpenChannel: mockCancelOpenChannel,
+    initiateCurrentStateClose: mockInitiateCurrentStateClose,
+    counterDispute: mockCounterDispute,
+    finalizeClose: mockFinalizeClose,
+    buildStateArtifact: mockBuildStateArtifact,
+    inspectStateArtifact: mockInspectStateArtifact,
+    signStateArtifact: mockSignStateArtifact,
+    isMutating: false,
+    reset: mockReset,
+    ...overrides,
+  };
+}
 
 describe("PaymentChannelsPage", () => {
-  it("renders without crashing", () => {
-    render(<PaymentChannelsPage />);
-    expect(screen.getByTestId("top-nav")).toBeInTheDocument();
-    expect(screen.getByTestId("footer")).toBeInTheDocument();
-  });
-
-  it("displays the SEO head with correct title", () => {
-    render(<PaymentChannelsPage />);
-    expect(screen.getByTestId("seo-head")).toHaveTextContent(
-      "Payment Channels",
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockUsePaymentChannels.mockReturnValue(channelState());
+    mockOpenChannel.mockResolvedValue("0xopenchannelhash");
+    mockFundChannel.mockResolvedValue("0xfundchannelhash");
+    mockCloseChannel.mockResolvedValue("0xclosechannelhash");
+    mockCancelOpenChannel.mockResolvedValue("0xcancelchannelhash");
+    mockInitiateCurrentStateClose.mockResolvedValue("0xcurrentstatehash");
+    mockCounterDispute.mockResolvedValue("0xdisputehash");
+    mockFinalizeClose.mockResolvedValue("0xfinalizehash");
+    mockBuildStateArtifact.mockImplementation(
+      ({ stateType }: { stateType: "CLOSE" | "STATE" }) =>
+        Promise.resolve(stateArtifact(stateType)),
+    );
+    mockSignStateArtifact.mockImplementation((artifact: string) =>
+      Promise.resolve(artifact),
     );
   });
 
-  it("displays section headers", () => {
+  it("renders contract-backed balances and lifecycle state", () => {
     render(<PaymentChannelsPage />);
-    // "Active Channels" appears in both a KPI label and section header
-    expect(screen.getAllByText("Active Channels").length).toBeGreaterThan(0);
-    expect(screen.getByText("Channel Throughput (24h)")).toBeInTheDocument();
-    expect(screen.getByText("Recent Settlements")).toBeInTheDocument();
+
+    expect(screen.getByText("ACTIVE")).toBeInTheDocument();
+    expect(screen.getByText(/Counterparty 0x1111/)).toBeInTheDocument();
+    expect(screen.getByText("Channels: 1")).toBeInTheDocument();
+    expect(screen.getByText("Aggregate deposits: 15")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Open channel contract in explorer" }),
+    ).toHaveAttribute(
+      "href",
+      "https://explorer.test/address/0x0000000000000000000000000000000000000008",
+    );
   });
 
-  it("has Open Channel button", () => {
+  it("opens a real channel with the entered settlement terms", async () => {
     render(<PaymentChannelsPage />);
-    const btn = screen.getByText(/Open Channel/i);
-    expect(btn).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Open channel" }));
+    expect(mockReset).toHaveBeenCalled();
+    expect(screen.getByLabelText("Settlement token")).toHaveTextContent("USDC");
+    expect(screen.getByLabelText("Settlement token")).toHaveTextContent("USDT");
+    expect(screen.getByLabelText("Settlement token")).not.toHaveTextContent(
+      "AETHEL",
+    );
+    fireEvent.change(screen.getByLabelText("Counterparty"), {
+      target: { value: COUNTERPARTY },
+    });
+    fireEvent.change(screen.getByLabelText("Initial deposit"), {
+      target: { value: "125.5" },
+    });
+    fireEvent.change(screen.getByLabelText("Challenge hours"), {
+      target: { value: "48" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve and open" }));
+
+    await waitFor(() =>
+      expect(mockOpenChannel).toHaveBeenCalledWith({
+        counterparty: COUNTERPARTY,
+        token: USDC,
+        deposit: "125.5",
+        challengeHours: 48,
+      }),
+    );
+    expect(mockNotify).toHaveBeenCalledWith(
+      "success",
+      "Channel opened",
+      expect.stringContaining("0xopenchanne"),
+    );
   });
 
-  it("opens Open Channel modal on button click", () => {
+  it("funds and cooperatively closes the selected channel", async () => {
     render(<PaymentChannelsPage />);
-    const btn = screen.getByText(/Open Channel/i);
-    fireEvent.click(btn);
-    expect(screen.getByText("Open Payment Channel")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Fund" }));
+    fireEvent.change(screen.getByLabelText("Amount"), {
+      target: { value: "2.25" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Approve and fund" }));
+    await waitFor(() =>
+      expect(mockFundChannel).toHaveBeenCalledWith({
+        channel: activeChannel,
+        amount: "2.25",
+      }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    expect(screen.getByLabelText("Final balance A")).toHaveValue("8");
+    expect(screen.getByLabelText("Final balance B")).toHaveValue("7");
+    expect(screen.getByLabelText("State nonce")).toHaveValue("4");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Build from balances" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("State artifact JSON")).toHaveValue(
+        stateArtifact("CLOSE"),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Submit close state" }));
+    await waitFor(() =>
+      expect(mockCloseChannel).toHaveBeenCalledWith({
+        channel: activeChannel,
+        artifact: stateArtifact("CLOSE"),
+        mode: "cooperative",
+      }),
+    );
   });
 
-  it("displays channel KPI data", () => {
-    render(<PaymentChannelsPage />);
-    // Multiple elements match "Payment Channels" (SEO head, h1)
-    expect(screen.getAllByText(/Payment Channels/i).length).toBeGreaterThan(0);
+  it("exposes guaranteed on-chain exits without requiring an off-chain signature", async () => {
+    const view = render(<PaymentChannelsPage />);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close current state" }),
+    );
+    await waitFor(() =>
+      expect(mockInitiateCurrentStateClose).toHaveBeenCalledWith(activeChannel),
+    );
+    expect(mockNotify).toHaveBeenCalledWith(
+      "success",
+      "Current-state challenge started",
+      expect.stringContaining("0xcurrentsta"),
+    );
+
+    const openChannel = {
+      ...activeChannel,
+      status: 0,
+      statusLabel: "OPEN",
+      depositB: 0n,
+      balanceB: 0n,
+      depositBDisplay: "0",
+      balanceBDisplay: "0",
+    };
+    mockUsePaymentChannels.mockReturnValue(
+      channelState({ channels: [openChannel] }),
+    );
+    view.rerender(<PaymentChannelsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Cancel & refund" }));
+    await waitFor(() =>
+      expect(mockCancelOpenChannel).toHaveBeenCalledWith(openChannel),
+    );
   });
 
-  it("displays all KPI cards", () => {
+  it("lets a party counter a closing channel with a higher signed state", async () => {
+    const closingChannel = {
+      ...activeChannel,
+      status: 3,
+      statusLabel: "CLOSING",
+      closingAt: BigInt(Math.floor(Date.now() / 1000)),
+      disputeChallenger: COUNTERPARTY,
+      disputeNonce: 3n,
+      disputeExpiresAt: BigInt(Math.floor(Date.now() / 1000) + 3600),
+    };
+    mockUsePaymentChannels.mockReturnValue(
+      channelState({ channels: [closingChannel] }),
+    );
     render(<PaymentChannelsPage />);
-    expect(screen.getByText("Total Capacity")).toBeInTheDocument();
-    expect(screen.getByText("Total Transactions")).toBeInTheDocument();
-    expect(screen.getByText("Avg Settlement Time")).toBeInTheDocument();
+
+    expect(screen.queryByRole("button", { name: "Fund" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Counter dispute" }));
+    expect(
+      screen.getByRole("dialog", { name: "Counter channel dispute" }),
+    ).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Final balance A"), {
+      target: { value: "7" },
+    });
+    fireEvent.change(screen.getByLabelText("Final balance B"), {
+      target: { value: "8" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Build from balances" }),
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText("State artifact JSON")).toHaveValue(
+        stateArtifact("STATE"),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Submit newer state" }));
+
+    await waitFor(() =>
+      expect(mockCounterDispute).toHaveBeenCalledWith({
+        channel: closingChannel,
+        artifact: stateArtifact("STATE"),
+      }),
+    );
+    expect(mockNotify).toHaveBeenCalledWith(
+      "success",
+      "Newer channel state submitted",
+      expect.stringContaining("0xdispute"),
+    );
   });
 
-  it("cancel button closes modal", () => {
+  it("fails closed when the contract is unavailable and exposes no sample data", () => {
+    mockUsePaymentChannels.mockReturnValue(
+      channelState({ configured: false, channels: [] }),
+    );
     render(<PaymentChannelsPage />);
-    fireEvent.click(screen.getByText(/Open Channel/i));
-    expect(screen.getByText("Open Payment Channel")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("Cancel"));
+
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Payment Channels is not deployed",
+    );
+    expect(screen.queryByText("ACTIVE")).not.toBeInTheDocument();
   });
 
-  it("open channel submit button closes modal", () => {
+  it("blocks channel creation until on-chain KYC is synchronized", () => {
+    mockUsePaymentChannels.mockReturnValue(
+      channelState({ kycVerified: false, channels: [] }),
+    );
     render(<PaymentChannelsPage />);
-    fireEvent.click(screen.getByText(/Open Channel/i));
-    // The modal has two "Open Channel" texts - the submit button
-    const buttons = screen.getAllByText("Open Channel");
-    fireEvent.click(buttons[buttons.length - 1]);
+
+    expect(
+      screen.getByText("Channel KYC verification required"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open channel" })).toBeDisabled();
+    expect(screen.getByText("No payment channels")).toBeInTheDocument();
   });
 
-  it("displays channel list with counterparty names", () => {
+  it("shows unsupported legacy token records without transaction controls", () => {
+    mockUsePaymentChannels.mockReturnValue(
+      channelState({
+        channels: [
+          {
+            ...activeChannel,
+            token: "0x0000000000000000000000000000000000000007",
+            tokenDecimals: null,
+            tokenSymbol: null,
+            depositADisplay: null,
+            depositBDisplay: null,
+            balanceADisplay: null,
+            balanceBDisplay: null,
+          },
+        ],
+      }),
+    );
     render(<PaymentChannelsPage />);
-    // Check that counterparty names from the mock data are displayed
-    const buttons = screen.getAllByRole("button");
-    expect(buttons.length).toBeGreaterThan(0);
-  });
 
-  it("displays settlements table", () => {
-    render(<PaymentChannelsPage />);
-    expect(screen.getByText("Recent Settlements")).toBeInTheDocument();
-    expect(screen.getByText("Channel")).toBeInTheDocument();
-    expect(screen.getByText("Amount")).toBeInTheDocument();
-    expect(screen.getByText("Dir")).toBeInTheDocument();
-    expect(screen.getByText("Fee")).toBeInTheDocument();
-  });
-
-  it("modal form counterparty input works", () => {
-    render(<PaymentChannelsPage />);
-    fireEvent.click(screen.getByText(/Open Channel/i));
-    const input = screen.getByPlaceholderText("0x...");
-    fireEvent.change(input, { target: { value: "0xabc123" } });
-    expect(input).toHaveValue("0xabc123");
-  });
-
-  it("modal form capacity input works", () => {
-    render(<PaymentChannelsPage />);
-    fireEvent.click(screen.getByText(/Open Channel/i));
-    const input = screen.getByPlaceholderText("500,000");
-    if (input) {
-      fireEvent.change(input, { target: { value: "50000" } });
-    }
-  });
-
-  it("modal close via X button works", () => {
-    render(<PaymentChannelsPage />);
-    fireEvent.click(screen.getByText(/Open Channel/i));
-    expect(screen.getByTestId("modal")).toBeInTheDocument();
-    fireEvent.click(screen.getByTestId("modal-close"));
-    expect(screen.queryByTestId("modal")).not.toBeInTheDocument();
-  });
-
-  it("modal form channel type select works", () => {
-    render(<PaymentChannelsPage />);
-    fireEvent.click(screen.getByText(/Open Channel/i));
-    const selects = screen.getAllByRole("combobox");
-    if (selects.length > 0) {
-      fireEvent.change(selects[0], { target: { value: "hub" } });
-      fireEvent.change(selects[0], { target: { value: "multi" } });
-    }
-  });
-
-  it("displays channel status badges", () => {
-    render(<PaymentChannelsPage />);
-    // The channels have statuses Active, Pending, Closing
-    const allText = screen.getAllByText(/Active|Pending|Closing/);
-    expect(allText.length).toBeGreaterThan(0);
-  });
-
-  it("displays capacity bars for channels", () => {
-    render(<PaymentChannelsPage />);
-    // Capacity bars show Local and Remote labels
-    expect(screen.getAllByText(/Local:/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/Remote:/).length).toBeGreaterThan(0);
-  });
-
-  it("displays settlement directions", () => {
-    render(<PaymentChannelsPage />);
-    // Settlements show Inbound or Outbound
-    const directions = screen.getAllByText(/Inbound|Outbound/);
-    expect(directions.length).toBeGreaterThan(0);
-  });
-
-  it("renders formatUSD for small values under $1000", () => {
-    render(<PaymentChannelsPage />);
-    // formatUSD with value < $1K returns "$X.XX"
-    const allText = document.body.textContent || "";
-    expect(allText.length).toBeGreaterThan(0);
-  });
-
-  // --- Branch coverage: formatUSD billion branch (line 142) ---
-  it("covers formatUSD billion branch via large capacity values", () => {
-    // The page renders formatUSD for various amounts.
-    // The billion branch is exercised when n >= 1_000_000_000.
-    // We verify it by checking that no crash occurs with the default data.
-    render(<PaymentChannelsPage />);
-    const allText = document.body.textContent || "";
-    // The page uses formatUSD — ensure page renders all text
-    expect(allText).toContain("$");
-  });
-
-  // --- Branch coverage: timeAgo all branches (lines 150-151) ---
-  it("covers timeAgo with timestamp just now (< 60s)", () => {
-    // timeAgo with diff < 60000 returns "just now"
-    // The page generates settlements with recent timestamps.
-    // Mock Date.now to control timestamps for edge cases.
-    const originalDateNow = Date.now;
-    Date.now = jest.fn(() => originalDateNow());
-    render(<PaymentChannelsPage />);
-    const allText = document.body.textContent || "";
-    expect(allText.length).toBeGreaterThan(0);
-    Date.now = originalDateNow;
-  });
-
-  // --- Branch coverage: ChannelStatusBadge fallback || (line 163) ---
-  it("covers ChannelStatusBadge with unknown status via fallback", () => {
-    // The CHANNEL_STATUS_STYLES map has defined keys; the fallback || '' on line 163
-    // is hit when a status key is not in the styles map.
-    // This is implicitly covered when all status variants are rendered.
-    render(<PaymentChannelsPage />);
-    const statuses = screen.getAllByText(/Active|Pending|Closing|Settled/);
-    expect(statuses.length).toBeGreaterThan(0);
+    expect(screen.getByText("Unsupported token")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Funding and signed-state actions unavailable/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Fund" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Close" })).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Close current state" }),
+    ).toBeInTheDocument();
   });
 });

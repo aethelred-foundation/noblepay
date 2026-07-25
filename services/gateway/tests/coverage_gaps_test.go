@@ -3,7 +3,6 @@ package tests
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -344,7 +343,7 @@ func TestIndexerStopViaContext(t *testing.T) {
 func TestPaymentServiceListDefaultLimit(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 
 	ctx := context.Background()
@@ -381,7 +380,7 @@ func TestPaymentServiceListDefaultLimit(t *testing.T) {
 func TestPaymentServiceListMaxLimit(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 
 	ctx := context.Background()
@@ -409,7 +408,7 @@ func TestPaymentServiceListMaxLimit(t *testing.T) {
 func TestPaymentServiceListNegativeOffset(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 
 	ctx := context.Background()
@@ -448,18 +447,9 @@ func TestPaymentServiceCancelNotFound(t *testing.T) {
 // --- Payment service: Submit with successful compliance (approved=true) ---
 
 func TestPaymentServiceSubmitWithApprovedCompliance(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(models.ComplianceResult{
-			Approved: true,
-			Score:    100,
-		})
-	}))
-	defer mockServer.Close()
-
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy(mockServer.URL, logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 
 	payment, err := svc.Submit(context.Background(), &models.SubmitPaymentRequest{
@@ -479,14 +469,7 @@ func TestPaymentServiceSubmitWithApprovedCompliance(t *testing.T) {
 // --- Payment service: Submit with compliance returning not approved ---
 
 func TestPaymentServiceSubmitWithRejectedCompliance(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(models.ComplianceResult{
-			Approved: false,
-			Score:    10,
-		})
-	}))
-	defer mockServer.Close()
+	mockServer := complianceServer(t, "Blocked", false, false, 100)
 
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
@@ -499,11 +482,11 @@ func TestPaymentServiceSubmitWithRejectedCompliance(t *testing.T) {
 		Amount:          "1000",
 		Currency:        "USDC",
 	})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+	if err == nil {
+		t.Fatal("expected rejected compliance to fail closed")
 	}
-	if payment.ComplianceCheck {
-		t.Error("expected compliance_check=false for rejected compliance")
+	if payment != nil {
+		t.Error("rejected payment must not be persisted")
 	}
 }
 
@@ -569,10 +552,10 @@ func TestSettlementReconcileAutoUpdate(t *testing.T) {
 	}
 	memStore.Create(ctx, payment)
 
-	// Add a transfer_complete event
+	// Add the exact canonical PaymentSettled event topic.
 	memStore.SaveEvent(ctx, &models.BlockchainEvent{
 		TxHash:    "0xsettled-auto",
-		EventType: "transfer_complete",
+		EventType: services.PaymentSettledTopic,
 		PaymentID: "pay-auto-update",
 		Timestamp: time.Now().UTC(),
 	})
@@ -589,10 +572,10 @@ func TestSettlementReconcileAutoUpdate(t *testing.T) {
 		t.Errorf("expected tx '0xsettled-auto', got %q", record.OnChainTx)
 	}
 
-	// Payment should now be completed
+	// Payment should now reflect the exact on-chain settled state.
 	updated, _ := memStore.GetByID(ctx, "pay-auto-update")
-	if updated.Status != models.PaymentStatusCompleted {
-		t.Errorf("expected completed, got %q", updated.Status)
+	if updated.Status != models.PaymentStatusSettled {
+		t.Errorf("expected settled, got %q", updated.Status)
 	}
 	if updated.TxHash != "0xsettled-auto" {
 		t.Errorf("expected tx_hash '0xsettled-auto', got %q", updated.TxHash)

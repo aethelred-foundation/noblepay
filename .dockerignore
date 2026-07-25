@@ -1,0 +1,16 @@
+.git
+.github
+.next
+**/.next
+**/node_modules
+**/target
+**/dist
+**/coverage
+**/*.log
+**/.env
+**/.env.*
+!**/.env.example
+contracts/artifacts
+contracts/cache
+services/gateway/coverage*.out
+tsconfig.tsbuildinfo

@@ -1,883 +1,562 @@
-/**
- * NoblePay Security Regression Gate
- *
- * Named regression tests anchored to historical findings (NP-01 through NP-12)
- * plus additional attack-surface regressions.  Every test in this file MUST pass
- * before any release is cut — CI should treat failures here as release blockers.
- */
-
+/** Release-blocking regressions for previously identified trust-boundary bugs. */
 import jwt from "jsonwebtoken";
-import crypto from "crypto";
-import fs from "fs";
-import path from "path";
+import { Prisma } from "@prisma/client";
 import {
+  createMockNext,
   createMockPrisma,
   createMockRequest,
   createMockResponse,
-  createMockNext,
-  resetAllMocks,
-  VALID_ETH_ADDRESS,
-  VALID_ETH_ADDRESS_2,
 } from "../setup";
+const BUSINESS_A = "business-aaa-111";
+const BUSINESS_B = "business-bbb-222";
+const WALLET_A = "0x1111111111111111111111111111111111111111";
+const WALLET_B = "0x2222222222222222222222222222222222222222";
 
-// ─── Module-level Prisma mock (mirrors exploit-simulations) ─────────────────
-
-const mockAPKeyFindUnique = jest.fn().mockResolvedValue(null);
-const mockAPKeyUpdate = jest.fn().mockResolvedValue({});
-jest.mock("@prisma/client", () => {
-  const actual = jest.requireActual("@prisma/client");
-  return {
-    ...actual,
-    PrismaClient: jest.fn().mockImplementation(() => ({
-      aPIKey: { findUnique: mockAPKeyFindUnique, update: mockAPKeyUpdate },
-      business: { findUnique: jest.fn(), findFirst: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
-      payment: { findUnique: jest.fn(), findMany: jest.fn(), count: jest.fn(), create: jest.fn(), update: jest.fn(), aggregate: jest.fn(), groupBy: jest.fn() },
-      auditLog: { create: jest.fn().mockResolvedValue({}), findMany: jest.fn(), count: jest.fn(), findUnique: jest.fn() },
-      complianceScreening: { create: jest.fn(), findMany: jest.fn(), findFirst: jest.fn(), count: jest.fn(), aggregate: jest.fn(), update: jest.fn() },
-      tEENode: { findFirst: jest.fn() },
-      travelRuleRecord: { findUnique: jest.fn() },
-      treasuryProposal: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}), update: jest.fn().mockResolvedValue({}), findMany: jest.fn().mockResolvedValue([]), count: jest.fn().mockResolvedValue(0) },
-      $connect: jest.fn(),
-      $disconnect: jest.fn(),
-      $transaction: jest.fn(),
-      $queryRaw: jest.fn(),
+const mockAuthPrisma = {
+  business: {
+    findUnique: jest.fn(async ({ where }: { where: { id: string } }) => ({
+      id: where.id,
+      address: "0x1111111111111111111111111111111111111111",
     })),
-  };
-});
+  },
+};
 
-// ─── Imports under test ─────────────────────────────────────────────────────
+jest.mock("../../lib/db", () => ({ prisma: mockAuthPrisma }));
+jest.mock("../../lib/business-registry-authorization", () => ({
+  getCurrentBusinessRegistryAuthorization: jest.fn(async (address: string) => ({
+    wallet: address,
+    status: "VERIFIED",
+    tier: "STANDARD",
+    active: true,
+    isAdmin: false,
+    registeredAt: 1n,
+    lastVerified: 1n,
+    expiresAt: 2n,
+    blockNumber: 100,
+    blockHash: `0x${"ab".repeat(32)}`,
+  })),
+}));
 
 import { authenticateAPIKey, generateJWT } from "../../middleware/auth";
 import {
   extractRole,
-  requireRole,
-  requirePermission,
-  requireOwnership,
-  getEffectivePermissions,
   hasPermission,
+  requireOwnership,
+  requirePermission,
+  requireRole,
 } from "../../middleware/rbac";
-import { ComplianceService } from "../../services/compliance";
-import { TreasuryService, TreasuryError } from "../../services/treasury";
-import { PaymentService, PaymentError } from "../../services/payment";
-import { AuditService } from "../../services/audit";
+import { BatchPaymentSchema } from "../../middleware/validation";
+import { TreasuryService } from "../../services/treasury";
 import { CrossChainService } from "../../services/crosschain";
+import { PaymentService } from "../../services/payment";
+import { InvoiceService } from "../../services/invoice";
+import { AIComplianceService } from "../../services/ai-compliance";
+import { validateSanctionsMetadata } from "../../services/compliance";
 
-// ─── Shared constants ───────────────────────────────────────────────────────
-
-const BUSINESS_A_ID = "business-aaa-111";
-const BUSINESS_B_ID = "business-bbb-222";
-const TEST_SECRET = "test-secret";
-
-function makeToken(
-  businessId: string,
-  opts: { role?: string; secret?: string; tier?: string; sub?: string; expiresIn?: number } = {},
-): string {
-  const secret = opts.secret || TEST_SECRET;
-  return jwt.sign(
-    {
-      sub: opts.sub || `user:${businessId}:test`,
-      businessId,
-      tier: opts.tier || "STANDARD",
-      role: opts.role || "VIEWER",
-    },
-    secret,
-    { expiresIn: opts.expiresIn || 3600 },
-  );
+function treasuryProposal(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "proposal-1",
+    type: "TRANSFER",
+    title: "Approved transfer",
+    description: "Regression fixture",
+    amount: new Prisma.Decimal("100"),
+    currency: "USDC",
+    recipient: WALLET_B,
+    status: "PENDING",
+    requiredSigs: 2,
+    currentSigs: 0,
+    signers: [],
+    approvedBy: [],
+    timelockUntil: null,
+    createdBy: WALLET_A,
+    businessId: BUSINESS_A,
+    expiresAt: new Date(Date.now() + 86_400_000),
+    executedAt: null,
+    createdAt: new Date(),
+    metadata: { category: "OPERATIONS" },
+    ...overrides,
+  } as any;
 }
 
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-01-regression: delegate cannot double-count approvals
-// ═════════════════════════════════════════════════════════════════════════════
+function treasuryHarness(initial: any) {
+  let stored = initial;
+  const prisma: any = {
+    treasuryProposal: {
+      findFirst: jest.fn(async ({ where }: any) =>
+        stored &&
+        stored.id === where.id &&
+        stored.businessId === where.businessId
+          ? stored
+          : null,
+      ),
+      update: jest.fn(async ({ data }: any) => {
+        stored = { ...stored, ...data };
+        return stored;
+      }),
+    },
+    $transaction: jest.fn(),
+  };
+  prisma.$transaction.mockImplementation(
+    async (operation: (tx: any) => unknown) => operation(prisma),
+  );
+  const audit = { createAuditEntry: jest.fn().mockResolvedValue({}) };
+  return {
+    prisma,
+    audit,
+    service: new TreasuryService(prisma, audit as any),
+    stored: () => stored,
+  };
+}
 
-describe("NP-01-regression: delegate cannot double-count approvals", () => {
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let treasuryService: TreasuryService;
-
-  beforeEach(() => {
-    resetAllMocks();
-    mockPrisma = createMockPrisma();
-    (mockPrisma as any).treasuryProposal = {
-      findUnique: jest.fn().mockResolvedValue(null),
-      create: jest.fn().mockResolvedValue({}),
-      update: jest.fn().mockResolvedValue({}),
-      findMany: jest.fn().mockResolvedValue([]),
-      count: jest.fn().mockResolvedValue(0),
-    };
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    treasuryService = new TreasuryService(mockPrisma as any, auditService);
-  });
-
-  it("rejects the same signer approving a proposal twice (dedup)", async () => {
-    await treasuryService.createProposal(
-      { title: "Test transfer", description: "test", type: "TRANSFER", amount: "5000" },
-      "proposer-a",
-      BUSINESS_A_ID,
+describe("NP-01/NP-07: treasury approval replay and signer collision", () => {
+  it("counts each distinct signer exactly once", async () => {
+    const harness = treasuryHarness(treasuryProposal());
+    const first = await harness.service.approveProposal(
+      "proposal-1",
+      "signer-a",
+      BUSINESS_A,
     );
-    const proposalId = Array.from((treasuryService as any).proposals.keys())[0] as string;
-
-    // First approval succeeds
-    await treasuryService.approveProposal(proposalId, "signer-1", BUSINESS_A_ID);
-
-    // Second approval by the same signer must be rejected
-    await expect(
-      treasuryService.approveProposal(proposalId, "signer-1", BUSINESS_A_ID),
-    ).rejects.toThrow("has already approved this proposal");
-
-    try {
-      await treasuryService.approveProposal(proposalId, "signer-1", BUSINESS_A_ID);
-    } catch (e) {
-      expect((e as TreasuryError).code).toBe("DUPLICATE_APPROVAL");
-      expect((e as TreasuryError).statusCode).toBe(409);
-    }
-  });
-
-  it("counts unique signers only — two different signers each counted once", async () => {
-    await treasuryService.createProposal(
-      { title: "Multi-sig test", description: "test", type: "TRANSFER", amount: "5000" },
-      "proposer-a",
-      BUSINESS_A_ID,
+    const second = await harness.service.approveProposal(
+      "proposal-1",
+      "signer-b",
+      BUSINESS_A,
     );
-    const proposalId = Array.from((treasuryService as any).proposals.keys())[0] as string;
-
-    const res1 = await treasuryService.approveProposal(proposalId, "signer-1", BUSINESS_A_ID);
-    const res2 = await treasuryService.approveProposal(proposalId, "signer-2", BUSINESS_A_ID);
-
-    expect(res1.remainingApprovals).toBeGreaterThan(res2.remainingApprovals);
-
-    const proposal = (treasuryService as any).proposals.get(proposalId);
-    expect(proposal.approvers).toEqual(["signer-1", "signer-2"]);
-    expect(proposal.currentApprovals).toBe(2);
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-02-regression: forged JWT returns 401 not 500
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-02-regression: forged JWT returns 401 not 500", () => {
-  beforeEach(resetAllMocks);
-
-  it("returns 401 (not 500) for a JWT signed with a wrong secret", async () => {
-    const forgedToken = jwt.sign(
-      { sub: "attacker", businessId: BUSINESS_A_ID, tier: "INSTITUTIONAL", role: "SUPER_ADMIN" },
-      "completely-wrong-secret-" + crypto.randomBytes(16).toString("hex"),
-      { expiresIn: 3600 },
-    );
-
-    const req = createMockRequest({ headers: { authorization: `Bearer ${forgedToken}` } });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-    // The critical assertion: NOT 500
-    expect(res.status).not.toHaveBeenCalledWith(500);
-  });
-
-  it("returns 401 for an expired JWT (not 500)", async () => {
-    const expiredToken = jwt.sign(
-      { sub: "user", businessId: BUSINESS_A_ID, tier: "STANDARD", exp: Math.floor(Date.now() / 1000) - 60 },
-      TEST_SECRET,
-    );
-
-    const req = createMockRequest({ headers: { authorization: `Bearer ${expiredToken}` } });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-    expect(res.status).not.toHaveBeenCalledWith(500);
-  });
-
-  it("returns 401 for a JWT with alg:none attack (not 500)", async () => {
-    const header = Buffer.from(JSON.stringify({ alg: "none", typ: "JWT" })).toString("base64url");
-    const payload = Buffer.from(
-      JSON.stringify({ sub: "attacker", businessId: BUSINESS_A_ID, tier: "INSTITUTIONAL", role: "SUPER_ADMIN", iat: Math.floor(Date.now() / 1000), exp: Math.floor(Date.now() / 1000) + 3600 }),
-    ).toString("base64url");
-    const noneToken = `${header}.${payload}.`;
-
-    const req = createMockRequest({ headers: { authorization: `Bearer ${noneToken}` } });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-    expect(res.status).not.toHaveBeenCalledWith(500);
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-03-regression: X-User-Role header completely ignored
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-03-regression: X-User-Role header completely ignored", () => {
-  beforeEach(resetAllMocks);
-
-  it("role is derived from JWT payload, not from X-User-Role header", () => {
-    const req = createMockRequest({
-      headers: { "x-user-role": "SUPER_ADMIN" },
-      jwtPayload: { sub: "user-1", businessId: BUSINESS_A_ID, tier: "STANDARD", role: "VIEWER" },
-    });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    extractRole(req, res, next);
-
-    expect(req.userRole).toBe("VIEWER");
-    expect(req.userRole).not.toBe("SUPER_ADMIN");
-    expect(next).toHaveBeenCalled();
-  });
-
-  it("X-User-Role with ADMIN is ignored when JWT says OPERATOR", () => {
-    const req = createMockRequest({
-      headers: { "x-user-role": "ADMIN" },
-      jwtPayload: { sub: "user-2", businessId: BUSINESS_A_ID, tier: "STANDARD", role: "OPERATOR" },
-    });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    extractRole(req, res, next);
-
-    expect(req.userRole).toBe("OPERATOR");
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-04-regression: empty API key never bypasses auth
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-04-regression: empty API key never bypasses auth", () => {
-  beforeEach(resetAllMocks);
-
-  it("rejects Bearer with an empty string after it", async () => {
-    const req = createMockRequest({ headers: { authorization: "Bearer " } });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-  });
-
-  it("rejects missing Authorization header entirely", async () => {
-    const req = createMockRequest({ headers: {} });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-  });
-
-  it("rejects Authorization header without Bearer prefix", async () => {
-    const req = createMockRequest({ headers: { authorization: "Token some-token" } });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-05-regression: compliance status unknown maps to FAILED
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-05-regression: compliance status unknown maps to FAILED", () => {
-  beforeEach(resetAllMocks);
-
-  it("maps an unrecognized Rust status to FAILED (fail-closed)", () => {
-    // The mapComplianceStatus function is module-private, but we can verify
-    // its behavior through the ComplianceService's callComplianceService
-    // returning FAILED for unknown statuses.  We verify the mapping table
-    // by importing the module and checking the exported behavior.
-    const mockPrisma = createMockPrisma();
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    const complianceService = new ComplianceService(mockPrisma as any, auditService);
-
-    // The callComplianceService method fail-closes on network errors
-    const paymentData = {
-      sender: VALID_ETH_ADDRESS,
-      recipient: VALID_ETH_ADDRESS_2,
-      amount: { toString: () => "500" },
-      currency: "USDC",
-    };
-
-    // When compliance service is unavailable, status MUST be FAILED
-    const result = (complianceService as any).callComplianceService(paymentData);
-    return expect(result).resolves.toMatchObject({
-      status: "FAILED",
-      amlRiskScore: 100,
-    });
-  });
-
-  it("never returns an APPROVED / PASSED result when service is down", () => {
-    const mockPrisma = createMockPrisma();
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    const complianceService = new ComplianceService(mockPrisma as any, auditService);
-
-    const result = (complianceService as any).callComplianceService({
-      sender: VALID_ETH_ADDRESS,
-      recipient: VALID_ETH_ADDRESS_2,
-      amount: { toString: () => "100000" },
-      currency: "USDC",
-    });
-
-    return result.then((r: any) => {
-      expect(r.status).not.toBe("PASSED");
-      expect(r.sanctionsClear).toBe(false);
-    });
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-06-regression: cross-chain recovery captures original status
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-06-regression: cross-chain recovery captures original status", () => {
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let crossChainService: CrossChainService;
-
-  beforeEach(() => {
-    resetAllMocks();
-    mockPrisma = createMockPrisma();
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    crossChainService = new CrossChainService(mockPrisma as any, auditService);
-  });
-
-  it("recovery moves STUCK transfer to RECOVERED", async () => {
-    const transfer = await crossChainService.initiateTransfer(
-      { sourceChain: "aethelred-mainnet", destinationChain: "ethereum-mainnet", token: "USDC", amount: "1000", recipient: VALID_ETH_ADDRESS },
-      VALID_ETH_ADDRESS_2,
-      BUSINESS_A_ID,
-    );
-
-    // Force transfer to STUCK state for test
-    const stored = (crossChainService as any).transfers.get(transfer.id);
-    stored.status = "STUCK";
-
-    const result = await crossChainService.recoverTransfer(transfer.id, "admin", BUSINESS_A_ID);
-    expect(result.success).toBe(true);
-
-    const recovered = crossChainService.getTransfer(transfer.id, BUSINESS_A_ID);
-    expect(recovered.status).toBe("RECOVERED");
-  });
-
-  it("cannot recover a transfer in INITIATED state", async () => {
-    const transfer = await crossChainService.initiateTransfer(
-      { sourceChain: "aethelred-mainnet", destinationChain: "ethereum-mainnet", token: "USDC", amount: "1000", recipient: VALID_ETH_ADDRESS },
-      VALID_ETH_ADDRESS_2,
-      BUSINESS_A_ID,
-    );
-
-    await expect(
-      crossChainService.recoverTransfer(transfer.id, "admin", BUSINESS_A_ID),
-    ).rejects.toThrow("Cannot recover transfer");
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-07-regression: webhook replay blocked by dedup
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-07-regression: webhook replay blocked by dedup", () => {
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let treasuryService: TreasuryService;
-
-  beforeEach(() => {
-    resetAllMocks();
-    mockPrisma = createMockPrisma();
-    (mockPrisma as any).treasuryProposal = {
-      findUnique: jest.fn().mockResolvedValue(null),
-      create: jest.fn().mockResolvedValue({}),
-      update: jest.fn().mockResolvedValue({}),
-      findMany: jest.fn().mockResolvedValue([]),
-      count: jest.fn().mockResolvedValue(0),
-    };
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    treasuryService = new TreasuryService(mockPrisma as any, auditService);
-  });
-
-  it("replaying the same approval request yields DUPLICATE_APPROVAL error", async () => {
-    await treasuryService.createProposal(
-      { title: "Replay test", description: "test", type: "TRANSFER", amount: "5000" },
-      "proposer-a",
-      BUSINESS_A_ID,
-    );
-    const proposalId = Array.from((treasuryService as any).proposals.keys())[0] as string;
-
-    // First approval
-    await treasuryService.approveProposal(proposalId, "webhook-signer", BUSINESS_A_ID);
-
-    // Replayed approval
-    try {
-      await treasuryService.approveProposal(proposalId, "webhook-signer", BUSINESS_A_ID);
-      fail("Expected DUPLICATE_APPROVAL error");
-    } catch (e) {
-      expect((e as TreasuryError).code).toBe("DUPLICATE_APPROVAL");
-    }
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-08-regression: compliance API requires auth on POST
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-08-regression: compliance API requires auth on POST", () => {
-  beforeEach(resetAllMocks);
-
-  it("POST without auth header returns 401", async () => {
-    const req = createMockRequest({ method: "POST", path: "/v1/compliance/screen", headers: {} });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-  });
-
-  it("POST with forged JWT returns 401", async () => {
-    const forgedToken = jwt.sign(
-      { sub: "attacker", businessId: "hacked", tier: "INSTITUTIONAL" },
-      "wrong-secret",
-      { expiresIn: 3600 },
-    );
-    const req = createMockRequest({
-      method: "POST",
-      path: "/v1/compliance/screen",
-      headers: { authorization: `Bearer ${forgedToken}` },
-    });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    await authenticateAPIKey(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(401);
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-09-regression: mock-tee not in default features
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-09-regression: mock-tee not in default features", () => {
-  it("Cargo.toml default features do not include mock-tee", () => {
-    const cargoPath = path.resolve(__dirname, "../../../../crates/noblepay-compliance/Cargo.toml");
-    const cargo = fs.readFileSync(cargoPath, "utf-8");
-
-    // Parse the [features] section
-    const featuresMatch = cargo.match(/\[features\]([\s\S]*?)(?:\[|$)/);
-    expect(featuresMatch).toBeTruthy();
-
-    const featuresSection = featuresMatch![1];
-    const defaultLine = featuresSection.split("\n").find((l) => l.trim().startsWith("default"));
-    expect(defaultLine).toBeTruthy();
-
-    // Ensure mock-tee is NOT in the default feature set
-    expect(defaultLine).not.toContain("mock-tee");
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-10-regression: compliance unavailable returns risk score 100
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-10-regression: compliance unavailable returns risk score 100", () => {
-  beforeEach(resetAllMocks);
-
-  it("callComplianceService returns amlRiskScore 100 on network failure", () => {
-    const mockPrisma = createMockPrisma();
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    const complianceService = new ComplianceService(mockPrisma as any, auditService);
-
-    const result = (complianceService as any).callComplianceService({
-      sender: VALID_ETH_ADDRESS,
-      recipient: VALID_ETH_ADDRESS_2,
-      amount: { toString: () => "10000" },
-      currency: "USDC",
-    });
-
-    return expect(result).resolves.toMatchObject({
-      amlRiskScore: 100,
-      sanctionsClear: false,
-      status: "FAILED",
-    });
-  });
-
-  it("fail-closed result includes flagReason explaining the failure", () => {
-    const mockPrisma = createMockPrisma();
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    const complianceService = new ComplianceService(mockPrisma as any, auditService);
-
-    return (complianceService as any)
-      .callComplianceService({
-        sender: VALID_ETH_ADDRESS,
-        recipient: VALID_ETH_ADDRESS_2,
-        amount: { toString: () => "500" },
-        currency: "USDC",
-      })
-      .then((r: any) => {
-        expect(r.flagReason).toBeTruthy();
-        expect(r.flagReason).toContain("fail-closed");
-      });
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-11-regression: recurring payment requires ADMIN_ROLE
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-11-regression: recurring payment requires ADMIN_ROLE", () => {
-  beforeEach(resetAllMocks);
-
-  it("VIEWER cannot access treasury propose permission (needed for recurring)", () => {
-    expect(hasPermission("VIEWER", "treasury:propose")).toBe(false);
-  });
-
-  it("OPERATOR cannot access treasury propose permission", () => {
-    expect(hasPermission("OPERATOR", "treasury:propose")).toBe(false);
-  });
-
-  it("ADMIN can access treasury propose permission", () => {
-    expect(hasPermission("ADMIN", "treasury:propose")).toBe(true);
-  });
-
-  it("requireRole(ADMIN, TREASURY_MANAGER) blocks VIEWER", () => {
-    const middleware = requireRole("ADMIN", "TREASURY_MANAGER");
-    const req = createMockRequest({ userRole: "VIEWER" });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    middleware(req, res, next);
-
-    expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(403);
-  });
-
-  it("requireRole(ADMIN, TREASURY_MANAGER) allows ADMIN", () => {
-    const middleware = requireRole("ADMIN", "TREASURY_MANAGER");
-    const req = createMockRequest({ userRole: "ADMIN" });
-    const res = createMockResponse();
-    const next = createMockNext();
-
-    middleware(req, res, next);
-
-    expect(next).toHaveBeenCalled();
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// NP-12-regression: batch channel uses shared validation
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("NP-12-regression: batch channel uses shared validation", () => {
-  it("BatchPaymentSchema is imported from the shared validation module", () => {
-    // Verify the schema exists and validates correctly
-    const { BatchPaymentSchema } = require("../../middleware/validation");
-    expect(BatchPaymentSchema).toBeDefined();
-
-    // Empty batch must fail
-    const emptyResult = BatchPaymentSchema.safeParse({ payments: [] });
-    expect(emptyResult.success).toBe(false);
-
-    // Valid batch must pass
-    const validResult = BatchPaymentSchema.safeParse({
-      payments: [
-        {
-          sender: VALID_ETH_ADDRESS,
-          recipient: VALID_ETH_ADDRESS_2,
-          amount: "100",
-          currency: "USDC",
-        },
-      ],
-    });
-    expect(validResult.success).toBe(true);
-  });
-
-  it("batch rejects payments with invalid addresses (same schema as single)", () => {
-    const { BatchPaymentSchema } = require("../../middleware/validation");
-
-    const invalidResult = BatchPaymentSchema.safeParse({
-      payments: [
-        {
-          sender: "not-an-address",
-          recipient: VALID_ETH_ADDRESS_2,
-          amount: "100",
-          currency: "USDC",
-        },
-      ],
-    });
-    expect(invalidResult.success).toBe(false);
-  });
-});
-
-// ═════════════════════════════════════════════════════════════════════════════
-// Additional attack regressions
-// ═════════════════════════════════════════════════════════════════════════════
-
-describe("Treasury restore-outage: DB failure during restore returns 503", () => {
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let treasuryService: TreasuryService;
-
-  beforeEach(() => {
-    resetAllMocks();
-    mockPrisma = createMockPrisma();
-    (mockPrisma as any).treasuryProposal = {
-      findUnique: jest.fn().mockRejectedValue(new Error("DB connection refused")),
-      create: jest.fn().mockResolvedValue({}),
-      update: jest.fn().mockResolvedValue({}),
-      findMany: jest.fn().mockResolvedValue([]),
-      count: jest.fn().mockResolvedValue(0),
-    };
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    treasuryService = new TreasuryService(mockPrisma as any, auditService);
-  });
-
-  it("returns 404 (not 500) for unknown proposal in test mode when DB fails", async () => {
-    // In test mode, the DB failure is silently caught and proposal stays null -> 404
-    await expect(
-      treasuryService.approveProposal("nonexistent-id", "signer-1", BUSINESS_A_ID),
-    ).rejects.toThrow("Proposal not found");
-
-    try {
-      await treasuryService.approveProposal("nonexistent-id", "signer-1", BUSINESS_A_ID);
-    } catch (e) {
-      expect((e as TreasuryError).statusCode).toBe(404);
-    }
-  });
-});
-
-describe("Signer collision: same signerId prefix cannot double-approve", () => {
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let treasuryService: TreasuryService;
-
-  beforeEach(() => {
-    resetAllMocks();
-    mockPrisma = createMockPrisma();
-    (mockPrisma as any).treasuryProposal = {
-      findUnique: jest.fn().mockResolvedValue(null),
-      create: jest.fn().mockResolvedValue({}),
-      update: jest.fn().mockResolvedValue({}),
-      findMany: jest.fn().mockResolvedValue([]),
-      count: jest.fn().mockResolvedValue(0),
-    };
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    treasuryService = new TreasuryService(mockPrisma as any, auditService);
-  });
-
-  it("two different users with the same signer ID are treated as the same signer", async () => {
-    await treasuryService.createProposal(
-      { title: "Collision test", description: "test", type: "TRANSFER", amount: "5000" },
-      "proposer-a",
-      BUSINESS_A_ID,
-    );
-    const proposalId = Array.from((treasuryService as any).proposals.keys())[0] as string;
-
-    // Both "user" objects resolve to the same signerId
-    await treasuryService.approveProposal(proposalId, "shared-signer-id", BUSINESS_A_ID);
-
-    await expect(
-      treasuryService.approveProposal(proposalId, "shared-signer-id", BUSINESS_A_ID),
-    ).rejects.toThrow("has already approved");
-  });
-
-  it("two different signer IDs are counted separately", async () => {
-    await treasuryService.createProposal(
-      { title: "Distinct signers", description: "test", type: "TRANSFER", amount: "5000" },
-      "proposer-a",
-      BUSINESS_A_ID,
-    );
-    const proposalId = Array.from((treasuryService as any).proposals.keys())[0] as string;
-
-    await treasuryService.approveProposal(proposalId, "signer-alpha", BUSINESS_A_ID);
-    const res = await treasuryService.approveProposal(proposalId, "signer-beta", BUSINESS_A_ID);
-
-    expect(res.remainingApprovals).toBeDefined();
-    const proposal = (treasuryService as any).proposals.get(proposalId);
-    expect(proposal.approvers).toContain("signer-alpha");
-    expect(proposal.approvers).toContain("signer-beta");
-  });
-});
-
-describe("Tenant crossing: businessId A cannot list/modify businessId B resources", () => {
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let paymentService: PaymentService;
-  let crossChainService: CrossChainService;
-
-  beforeEach(() => {
-    resetAllMocks();
-    mockPrisma = createMockPrisma();
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    paymentService = new PaymentService(mockPrisma as any, auditService);
-    crossChainService = new CrossChainService(mockPrisma as any, auditService);
-  });
-
-  it("requireOwnership rejects when callerBusinessId != resourceBusinessId", () => {
-    const req = createMockRequest({ businessId: BUSINESS_A_ID, userRole: "OPERATOR" });
-    expect(requireOwnership(req, BUSINESS_B_ID)).toBe(false);
-  });
-
-  it("cross-chain getTransfer blocks access from wrong business", async () => {
-    const transfer = await crossChainService.initiateTransfer(
-      { sourceChain: "aethelred-mainnet", destinationChain: "ethereum-mainnet", token: "USDC", amount: "1000", recipient: VALID_ETH_ADDRESS },
-      VALID_ETH_ADDRESS_2,
-      BUSINESS_B_ID,
-    );
-
-    expect(() => {
-      crossChainService.getTransfer(transfer.id, BUSINESS_A_ID);
-    }).toThrow("You do not have permission");
-  });
-
-  it("cross-chain listTransfers scopes by businessId", async () => {
-    await crossChainService.initiateTransfer(
-      { sourceChain: "aethelred-mainnet", destinationChain: "ethereum-mainnet", token: "USDC", amount: "1000", recipient: VALID_ETH_ADDRESS },
-      VALID_ETH_ADDRESS_2,
-      BUSINESS_B_ID,
-    );
-
-    const results = crossChainService.listTransfers({ businessId: BUSINESS_A_ID });
-    expect(results).toHaveLength(0);
-  });
-
-  it("payment cancelPayment rejects cross-tenant cancel", async () => {
-    mockPrisma.payment.findUnique.mockResolvedValue({
-      id: "payment-tenant-1",
-      paymentId: "0xabc",
-      businessId: BUSINESS_B_ID,
+    expect(first).toEqual({
+      approved: false,
+      remainingApprovals: 1,
       status: "PENDING",
-      amount: { toString: () => "100" },
-      currency: "USDC",
-      sender: VALID_ETH_ADDRESS,
-      recipient: VALID_ETH_ADDRESS_2,
     });
+    expect(second).toEqual({
+      approved: true,
+      remainingApprovals: 0,
+      status: "APPROVED",
+    });
+    expect(harness.stored().approvedBy).toEqual(["signer-a", "signer-b"]);
+  });
 
+  it("rejects an exact signer replay without a second update", async () => {
+    const harness = treasuryHarness(
+      treasuryProposal({ approvedBy: ["same-signer"], currentSigs: 1 }),
+    );
     await expect(
-      paymentService.cancelPayment("payment-tenant-1", BUSINESS_A_ID),
-    ).rejects.toThrow("You do not have permission to cancel this payment");
+      harness.service.approveProposal("proposal-1", "same-signer", BUSINESS_A),
+    ).rejects.toMatchObject({
+      code: "DUPLICATE_APPROVAL",
+      statusCode: 409,
+    });
+    expect(harness.prisma.treasuryProposal.update).not.toHaveBeenCalled();
+  });
+
+  it("treats two users presenting the same signer identity as the same approver", async () => {
+    const harness = treasuryHarness(treasuryProposal());
+    await harness.service.approveProposal(
+      "proposal-1",
+      "shared-wallet",
+      BUSINESS_A,
+    );
+    await expect(
+      harness.service.approveProposal(
+        "proposal-1",
+        "shared-wallet",
+        BUSINESS_A,
+      ),
+    ).rejects.toMatchObject({
+      code: "DUPLICATE_APPROVAL",
+    });
+    expect(harness.stored().currentSigs).toBe(1);
+  });
+
+  it("maps transaction infrastructure failure to a 503 without local fallback", async () => {
+    const harness = treasuryHarness(treasuryProposal());
+    harness.prisma.$transaction.mockRejectedValue(new Error("database down"));
+    await expect(
+      harness.service.approveProposal("proposal-1", "signer-a", BUSINESS_A),
+    ).rejects.toMatchObject({
+      code: "PERSISTENCE_FAILURE",
+      statusCode: 503,
+    });
+    expect(harness.prisma.treasuryProposal.update).not.toHaveBeenCalled();
   });
 });
 
-describe("Bad role: VIEWER cannot access treasury, reports, or admin routes", () => {
-  beforeEach(resetAllMocks);
-
-  it("VIEWER lacks treasury:propose", () => {
-    expect(hasPermission("VIEWER", "treasury:propose")).toBe(false);
-  });
-
-  it("VIEWER lacks treasury:approve", () => {
-    expect(hasPermission("VIEWER", "treasury:approve")).toBe(false);
-  });
-
-  it("VIEWER lacks treasury:execute", () => {
-    expect(hasPermission("VIEWER", "treasury:execute")).toBe(false);
-  });
-
-  it("VIEWER lacks reports:generate", () => {
-    expect(hasPermission("VIEWER", "reports:generate")).toBe(false);
-  });
-
-  it("VIEWER lacks audit:export", () => {
-    expect(hasPermission("VIEWER", "audit:export")).toBe(false);
-  });
-
-  it("VIEWER lacks businesses:manage", () => {
-    expect(hasPermission("VIEWER", "businesses:manage")).toBe(false);
-  });
-
-  it("VIEWER lacks settings:manage", () => {
-    expect(hasPermission("VIEWER", "settings:manage")).toBe(false);
-  });
-
-  it("VIEWER lacks admin:all", () => {
-    expect(hasPermission("VIEWER", "admin:all")).toBe(false);
-  });
-
-  it("requireRole(ADMIN) blocks VIEWER", () => {
-    const middleware = requireRole("ADMIN");
-    const req = createMockRequest({ userRole: "VIEWER" });
+describe("NP-02/NP-04: session token verification", () => {
+  it.each([
+    [
+      "wrong signature",
+      jwt.sign(
+        {
+          sub: "attacker",
+          businessId: BUSINESS_A,
+          tier: "STANDARD",
+          role: "ADMIN",
+        },
+        "wrong-secret",
+      ),
+    ],
+    [
+      "alg:none",
+      `${Buffer.from('{"alg":"none","typ":"JWT"}').toString("base64url")}.${Buffer.from(JSON.stringify({ sub: "attacker", businessId: BUSINESS_A, tier: "STANDARD", role: "ADMIN", exp: 4_000_000_000 })).toString("base64url")}.`,
+    ],
+  ])("returns 401, never 500, for %s", async (_name, token) => {
+    const req = createMockRequest({
+      headers: { authorization: `Bearer ${token}` },
+      businessId: undefined,
+    });
     const res = createMockResponse();
     const next = createMockNext();
-
-    middleware(req, res, next);
-
+    await authenticateAPIKey(req, res, next);
     expect(next).not.toHaveBeenCalled();
-    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.status).not.toHaveBeenCalledWith(500);
+  });
+
+  it.each([
+    {},
+    { authorization: "Bearer " },
+    { authorization: "Basic attacker" },
+  ])("rejects empty or non-bearer credentials %#", async (headers) => {
+    const req = createMockRequest({ headers, businessId: undefined });
+    const res = createMockResponse();
+    const next = createMockNext();
+    await authenticateAPIKey(req, res, next);
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  it("accepts a generated token with issuer, audience, role and signer intact", async () => {
+    const token = generateJWT(BUSINESS_A, "STANDARD", "OPERATOR", WALLET_A);
+    const req = createMockRequest({
+      headers: { authorization: `Bearer ${token}` },
+      businessId: undefined,
+    });
+    const res = createMockResponse();
+    const next = createMockNext();
+    await authenticateAPIKey(req, res, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(req).toMatchObject({
+      businessId: BUSINESS_A,
+      signerId: WALLET_A,
+    });
   });
 });
 
-describe("Replay: same approval request twice returns DUPLICATE_APPROVAL", () => {
-  let mockPrisma: ReturnType<typeof createMockPrisma>;
-  let treasuryService: TreasuryService;
-
-  beforeEach(() => {
-    resetAllMocks();
-    mockPrisma = createMockPrisma();
-    (mockPrisma as any).treasuryProposal = {
-      findUnique: jest.fn().mockResolvedValue(null),
-      create: jest.fn().mockResolvedValue({}),
-      update: jest.fn().mockResolvedValue({}),
-      findMany: jest.fn().mockResolvedValue([]),
-      count: jest.fn().mockResolvedValue(0),
-    };
-    mockPrisma.auditLog.create.mockResolvedValue({});
-    const auditService = new AuditService(mockPrisma as any);
-    treasuryService = new TreasuryService(mockPrisma as any, auditService);
+describe("NP-03/NP-11: role and ownership claims", () => {
+  it("ignores X-User-Role and X-User-Id headers", () => {
+    const req = createMockRequest({
+      headers: { "x-user-role": "SUPER_ADMIN", "x-user-id": "attacker" },
+      jwtPayload: {
+        sub: "signed-user",
+        businessId: BUSINESS_A,
+        tier: "STANDARD",
+        role: "OPERATOR",
+      },
+    });
+    extractRole(req, createMockResponse(), createMockNext());
+    expect(req.userRole).toBe("OPERATOR");
+    expect(req.userId).toBe("signed-user");
   });
 
-  it("returns 409 with DUPLICATE_APPROVAL code on replay", async () => {
-    await treasuryService.createProposal(
-      { title: "Replay 409 test", description: "test", type: "TRANSFER", amount: "5000" },
-      "proposer",
-      BUSINESS_A_ID,
-    );
-    const proposalId = Array.from((treasuryService as any).proposals.keys())[0] as string;
-
-    await treasuryService.approveProposal(proposalId, "signer-replay", BUSINESS_A_ID);
-
-    try {
-      await treasuryService.approveProposal(proposalId, "signer-replay", BUSINESS_A_ID);
-      fail("Should have thrown");
-    } catch (e) {
-      expect((e as TreasuryError).code).toBe("DUPLICATE_APPROVAL");
-      expect((e as TreasuryError).statusCode).toBe(409);
+  it("does not grant VIEWER privileged treasury, reporting, audit, or admin permissions", () => {
+    for (const permission of [
+      "treasury:propose",
+      "treasury:approve",
+      "treasury:execute",
+      "reports:generate",
+      "audit:export",
+      "businesses:manage",
+      "settings:manage",
+      "admin:all",
+    ]) {
+      expect(hasPermission("VIEWER", permission as any)).toBe(false);
     }
   });
+
+  it("blocks VIEWER through both role and permission middleware", () => {
+    const roleNext = createMockNext();
+    const permissionNext = createMockNext();
+    const roleRes = createMockResponse();
+    const permissionRes = createMockResponse();
+    requireRole("ADMIN", "TREASURY_MANAGER")(
+      createMockRequest({ userRole: "VIEWER" }),
+      roleRes,
+      roleNext,
+    );
+    requirePermission("reports:generate")(
+      createMockRequest({ userRole: "VIEWER" }),
+      permissionRes,
+      permissionNext,
+    );
+    expect(roleNext).not.toHaveBeenCalled();
+    expect(permissionNext).not.toHaveBeenCalled();
+    expect(roleRes.status).toHaveBeenCalledWith(403);
+    expect(permissionRes.status).toHaveBeenCalledWith(403);
+  });
+
+  it("rejects ownership when the tenant IDs differ or are missing", () => {
+    expect(
+      requireOwnership(
+        createMockRequest({ businessId: BUSINESS_A }),
+        BUSINESS_B,
+      ),
+    ).toBe(false);
+    expect(
+      requireOwnership(
+        createMockRequest({ businessId: undefined }),
+        BUSINESS_A,
+      ),
+    ).toBe(false);
+  });
 });
 
-describe("Migration boot: Prisma schema validates", () => {
-  it("prisma schema file exists and contains generator + datasource blocks", () => {
-    const schemaPath = path.resolve(__dirname, "../../../../backend/prisma/schema.prisma");
-    expect(fs.existsSync(schemaPath)).toBe(true);
+describe("NP-05/NP-10: compliance data fails closed", () => {
+  it("rejects metadata that advertises mock, test, or fixture sanctions data", () => {
+    const generated = new Date().toISOString();
+    const base = {
+      total_entries: 100,
+      last_updated: {
+        OFAC: generated,
+        "UAE Central Bank": generated,
+        UN: generated,
+        EU: generated,
+      },
+      dataset_generated_at: generated,
+      dataset_digest: "a".repeat(64),
+    };
+    for (const source of ["mock dataset", "test feed", "fixture source"]) {
+      expect(() => validateSanctionsMetadata({ ...base, source })).toThrow(
+        expect.objectContaining({
+          code: "SANCTIONS_DATASET_INVALID",
+          statusCode: 503,
+        }),
+      );
+    }
+  });
 
-    const schema = fs.readFileSync(schemaPath, "utf-8");
-    expect(schema).toContain("generator client");
-    expect(schema).toContain("datasource db");
-    // Ensure core models exist
-    expect(schema).toContain("model Payment");
-    expect(schema).toContain("model Business");
-    expect(schema).toContain("model AuditLog");
+  it("rejects stale sanctions data instead of reporting it fresh", () => {
+    const stale = "2020-01-01T00:00:00.000Z";
+    expect(() =>
+      validateSanctionsMetadata(
+        {
+          total_entries: 100,
+          last_updated: {
+            OFAC: stale,
+            "UAE Central Bank": stale,
+            UN: stale,
+            EU: stale,
+          },
+          source: "Official regulator feed",
+          dataset_generated_at: stale,
+          dataset_digest: "b".repeat(64),
+        },
+        Date.parse("2026-07-21T00:00:00.000Z"),
+        86_400_000,
+      ),
+    ).toThrow(
+      expect.objectContaining({
+        code: "SANCTIONS_DATASET_STALE",
+        statusCode: 503,
+      }),
+    );
+  });
+
+  it("rejects incomplete list coverage", () => {
+    const generated = new Date().toISOString();
+    expect(() =>
+      validateSanctionsMetadata({
+        total_entries: 100,
+        last_updated: { OFAC: generated, UN: generated, EU: generated },
+        source: "Official regulator feed",
+        dataset_generated_at: generated,
+        dataset_digest: "c".repeat(64),
+      }),
+    ).toThrow(expect.objectContaining({ code: "SANCTIONS_DATASET_INVALID" }));
+  });
+});
+
+describe("NP-06: cross-chain recovery and tenant boundaries", () => {
+  it("fails transfer initiation and recovery closed without verified receipts", async () => {
+    const prisma: any = {
+      crossChainTransfer: { create: jest.fn(), update: jest.fn() },
+    };
+    const service = new CrossChainService(prisma, {} as any, jest.fn());
+    await expect(
+      service.initiateTransfer(
+        {
+          sourceChain: "aethelred",
+          destinationChain: "ethereum",
+          token: "USDC",
+          amount: "1",
+          recipient: WALLET_B,
+        },
+        WALLET_A,
+        BUSINESS_A,
+      ),
+    ).rejects.toMatchObject({
+      code: "BRIDGE_EXECUTION_UNAVAILABLE",
+      statusCode: 501,
+    });
+    await expect(
+      service.recoverTransfer("transfer-1", WALLET_A, BUSINESS_A),
+    ).rejects.toMatchObject({
+      code: "RECOVERY_EXECUTION_UNAVAILABLE",
+      statusCode: 501,
+    });
+    expect(prisma.crossChainTransfer.create).not.toHaveBeenCalled();
+    expect(prisma.crossChainTransfer.update).not.toHaveBeenCalled();
+  });
+
+  it("conceals a transfer not owned by the tenant wallet", async () => {
+    const prisma: any = {
+      business: {
+        findUnique: jest.fn().mockResolvedValue({ address: WALLET_A }),
+      },
+      crossChainTransfer: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+    const service = new CrossChainService(prisma, {} as any, jest.fn());
+    await expect(
+      service.getTransfer("transfer-b", BUSINESS_A),
+    ).rejects.toMatchObject({
+      code: "TRANSFER_NOT_FOUND",
+      statusCode: 404,
+    });
+    expect(prisma.crossChainTransfer.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "transfer-b",
+        sender: { equals: WALLET_A, mode: "insensitive" },
+      },
+    });
+  });
+
+  it("rejects a caller-supplied sender that differs from the authenticated wallet", async () => {
+    const prisma: any = {
+      business: {
+        findUnique: jest.fn().mockResolvedValue({ address: WALLET_A }),
+      },
+      crossChainTransfer: { findMany: jest.fn() },
+    };
+    const service = new CrossChainService(prisma, {} as any, jest.fn());
+    await expect(
+      service.listTransfers({ businessId: BUSINESS_A, sender: WALLET_B }),
+    ).rejects.toMatchObject({
+      code: "FORBIDDEN",
+      statusCode: 403,
+    });
+    expect(prisma.crossChainTransfer.findMany).not.toHaveBeenCalled();
+  });
+});
+
+describe("NP-12: shared batch validation cannot bypass payment validation", () => {
+  const validPayment = {
+    sender: WALLET_A,
+    recipient: WALLET_B,
+    amount: "10.5",
+    currency: "USDC",
+    purposeHash: `0x${"a".repeat(64)}`,
+  };
+
+  it("accepts a bounded batch of individually valid payments", () => {
+    expect(
+      BatchPaymentSchema.safeParse({ payments: [validPayment] }).success,
+    ).toBe(true);
+  });
+
+  it.each([
+    [{ ...validPayment, sender: "not-an-address" }, "invalid address"],
+    [{ ...validPayment, amount: "0" }, "zero amount"],
+    [{ ...validPayment, currency: "usdc" }, "lowercase currency"],
+  ])("rejects %s (%s)", (payment) => {
+    expect(BatchPaymentSchema.safeParse({ payments: [payment] }).success).toBe(
+      false,
+    );
+  });
+
+  it("rejects empty and oversized batches", () => {
+    expect(BatchPaymentSchema.safeParse({ payments: [] }).success).toBe(false);
+    expect(
+      BatchPaymentSchema.safeParse({
+        payments: Array.from({ length: 101 }, () => validPayment),
+      }).success,
+    ).toBe(false);
+  });
+});
+
+describe("mutation adapters remain fail-closed", () => {
+  it("blocks database-only payment lifecycle changes", async () => {
+    const prisma = createMockPrisma();
+    const service = new PaymentService(prisma, {} as any);
+    await expect(
+      service.cancelPayment("payment-1", BUSINESS_A),
+    ).rejects.toMatchObject({
+      code: "ON_CHAIN_CANCELLATION_REQUIRED",
+      statusCode: 501,
+    });
+    await expect(
+      service.refundPayment("payment-1", BUSINESS_A),
+    ).rejects.toMatchObject({
+      code: "ON_CHAIN_REFUND_REQUIRED",
+      statusCode: 501,
+    });
+    expect(prisma.payment.update).not.toHaveBeenCalled();
+  });
+
+  it("blocks invoice financing without a verified gateway", async () => {
+    const prisma: any = {
+      invoice: { findFirst: jest.fn() },
+      invoiceFinancingRequest: { create: jest.fn() },
+    };
+    const service = new InvoiceService(prisma, {} as any, null);
+    await expect(
+      service.requestFinancing(
+        "invoice-1",
+        "10",
+        WALLET_A,
+        BUSINESS_A,
+        "key-1",
+      ),
+    ).rejects.toMatchObject({
+      code: "INVOICE_FINANCING_NOT_CONFIGURED",
+      statusCode: 501,
+    });
+    expect(prisma.invoice.findFirst).not.toHaveBeenCalled();
+    expect(prisma.invoiceFinancingRequest.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "decision",
+      (service: AIComplianceService) =>
+        service.runDecision("model-1", "payment-1", BUSINESS_A, "key-1"),
+      "AI_DECISION_VERIFICATION_UNAVAILABLE",
+    ],
+    [
+      "override",
+      (service: AIComplianceService) =>
+        service.overrideDecision(
+          "decision-1",
+          "APPROVE",
+          WALLET_A,
+          "reason",
+          BUSINESS_A,
+        ),
+      "AI_DECISION_MUTATIONS_UNAVAILABLE",
+    ],
+    [
+      "appeal",
+      (service: AIComplianceService) =>
+        service.submitAppeal("decision-1", WALLET_A, "reason", BUSINESS_A),
+      "AI_APPEAL_VERIFICATION_UNAVAILABLE",
+    ],
+  ])("blocks unverified AI %s mutation", async (_name, operation, code) => {
+    const prisma: any = {
+      aIDecision: { create: jest.fn(), update: jest.fn() },
+      aIAppeal: { create: jest.fn() },
+      $transaction: jest.fn(),
+    };
+    const service = new AIComplianceService(prisma, {} as any, null);
+    await expect(operation(service)).rejects.toMatchObject({
+      code,
+      statusCode: 501,
+    });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
   });
 });

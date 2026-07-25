@@ -3,10 +3,20 @@ import cors from "cors";
 import helmet from "helmet";
 import compression from "compression";
 import morgan from "morgan";
-import rateLimit from "express-rate-limit";
-import { PrismaClient } from "@prisma/client";
 import { logger, generateCorrelationId } from "./lib/logger";
 import { register, httpRequestDuration, httpRequestTotal } from "./lib/metrics";
+import { disconnectDatabase } from "./lib/db";
+import { collectProductionEnvErrors } from "./lib/env-validation";
+import {
+  authenticateAPIKey,
+  createTierRateLimit,
+  tierRateLimit,
+} from "./middleware/auth";
+import {
+  createDefaultReadinessDependencies,
+  ReadinessDependencies,
+  runReadinessChecks,
+} from "./services/readiness";
 
 // Route modules
 import paymentRoutes from "./routes/payments";
@@ -20,38 +30,33 @@ import fxRoutes from "./routes/fx";
 import invoiceRoutes from "./routes/invoices";
 import crosschainRoutes from "./routes/crosschain";
 import reportingRoutes from "./routes/reporting";
+import authRoutes from "./routes/auth";
+import aiComplianceRoutes from "./routes/ai-compliance";
 
 // WebSocket
 import { wsService } from "./services/websocket";
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 
-const PORT = parseInt(process.env.PORT || "3003", 10);
-const NODE_ENV = process.env.NODE_ENV || "development";
+const PORT = parseInt(process.env.PORT || "4008", 10);
+const NODE_ENV = process.env.NODE_ENV;
 const isProduction = NODE_ENV === "production";
+// Roadmap modules are available for local development and automated tests
+// only. Unknown deployment environments fail closed alongside production.
+const roadmapPreviewEnabled = NODE_ENV === "development" || NODE_ENV === "test";
 
 // ─── Strict Environment Validation ─────────────────────────────────────────
 
 export function validateProductionEnv(): void {
-  const errors: string[] = [];
-
-  if (!process.env.JWT_SECRET) {
-    errors.push("JWT_SECRET is required in production");
-  }
-
-  if (!process.env.DATABASE_URL) {
-    errors.push("DATABASE_URL is required in production");
-  }
-
-  if (!process.env.CORS_ORIGIN || process.env.CORS_ORIGIN === "*") {
-    errors.push("CORS_ORIGIN must be set to a specific origin in production (wildcard '*' is not allowed)");
-  }
+  const errors = collectProductionEnvErrors();
 
   if (errors.length > 0) {
     for (const err of errors) {
       logger.error(`FATAL: ${err}`);
     }
-    logger.error("Refusing to start — fix the environment variables above and restart.");
+    logger.error(
+      "Refusing to start — fix the environment variables above and restart.",
+    );
     process.exit(1);
   }
 }
@@ -62,36 +67,27 @@ if (isProduction) {
 
 // Resolve CORS origin: in production it is guaranteed to be a real origin
 // thanks to the validation above. In development default to localhost.
-const CORS_ORIGIN: string = process.env.CORS_ORIGIN || "http://localhost:3000";
+const CORS_ORIGINS = (process.env.CORS_ORIGIN || "http://localhost:3008")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 // Log validated configuration (no secrets)
 logger.info("NoblePay boot configuration", {
   NODE_ENV,
   PORT,
-  CORS_ORIGIN,
+  CORS_ORIGINS,
   DATABASE_URL: process.env.DATABASE_URL ? "(set)" : "(unset)",
   JWT_SECRET: process.env.JWT_SECRET ? "(set)" : "(unset)",
-});
-
-// ─── Prisma Client ──────────────────────────────────────────────────────────
-
-export const prisma = new PrismaClient({
-  log:
-    NODE_ENV === "development"
-      ? [
-          { emit: "event", level: "query" },
-          { emit: "event", level: "error" },
-        ]
-      : [{ emit: "event", level: "error" }],
-});
-
-prisma.$on("error" as never, (e: unknown) => {
-  logger.error("Prisma error", { error: e });
 });
 
 // ─── Express App ────────────────────────────────────────────────────────────
 
 const app = express();
+app.disable("x-powered-by");
+// Production places exactly one managed reverse proxy in front of Express.
+// This keeps client IP handling deterministic for rate-limit fallbacks.
+app.set("trust proxy", 1);
 
 // ─── Security Middleware ────────────────────────────────────────────────────
 
@@ -99,10 +95,30 @@ app.use(helmet());
 
 app.use(
   cors({
-    origin: CORS_ORIGIN,
-    methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization", "X-Correlation-ID"],
-    exposedHeaders: ["X-Correlation-ID", "X-RateLimit-Limit", "X-RateLimit-Remaining", "X-RateLimit-Reset"],
+    origin(origin, callback) {
+      if (!origin || CORS_ORIGINS.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("Origin is not allowed by CORS"));
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Correlation-ID",
+      "X-CSRF-Token",
+      "Idempotency-Key",
+    ],
+    exposedHeaders: [
+      "X-Correlation-ID",
+      "X-RateLimit-Limit",
+      "X-RateLimit-Remaining",
+      "X-RateLimit-Reset",
+      "X-CSRF-Token",
+      "Idempotency-Key",
+    ],
     maxAge: 86400,
   }),
 );
@@ -110,14 +126,20 @@ app.use(
 // ─── Body Parsing & Compression ─────────────────────────────────────────────
 
 app.use(compression());
-app.use(express.json({ limit: "10mb" }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: "1mb" }));
+app.use(
+  express.urlencoded({ extended: false, limit: "256kb", parameterLimit: 100 }),
+);
 
 // ─── Correlation ID Middleware ──────────────────────────────────────────────
 
 app.use((req, res, next) => {
+  const suppliedCorrelationId = req.headers["x-correlation-id"];
   const correlationId =
-    (req.headers["x-correlation-id"] as string) || generateCorrelationId();
+    typeof suppliedCorrelationId === "string" &&
+    /^[A-Za-z0-9._:-]{1,128}$/.test(suppliedCorrelationId)
+      ? suppliedCorrelationId
+      : generateCorrelationId();
   res.setHeader("X-Correlation-ID", correlationId);
   (req as unknown as Record<string, unknown>).correlationId = correlationId;
   next();
@@ -128,16 +150,26 @@ app.use((req, res, next) => {
 app.use(
   morgan("combined", {
     stream: {
-      write: (message: string) => logger.info(message.trim(), { component: "http" }),
+      write: (message: string) =>
+        logger.info(message.trim(), { component: "http" }),
     },
-    skip: (req) => req.url === "/health" || req.url === "/healthz" || req.url === "/readyz" || req.url === "/metrics",
+    skip: (req) =>
+      req.url === "/health" ||
+      req.url === "/healthz" ||
+      req.url === "/readyz" ||
+      req.url === "/metrics",
   }),
 );
 
 // ─── Prometheus Metrics Middleware ──────────────────────────────────────────
 
 app.use((req, res, next) => {
-  if (req.url === "/health" || req.url === "/healthz" || req.url === "/readyz" || req.url === "/metrics") {
+  if (
+    req.url === "/health" ||
+    req.url === "/healthz" ||
+    req.url === "/readyz" ||
+    req.url === "/metrics"
+  ) {
     next();
     return;
   }
@@ -146,7 +178,10 @@ app.use((req, res, next) => {
 
   res.on("finish", () => {
     const duration = Number(process.hrtime.bigint() - start) / 1e9;
-    const route = req.route?.path || req.url;
+    // Never use attacker-controlled URLs as Prometheus labels. Unknown and
+    // rejected paths share a bounded label instead of growing cardinality.
+    const route =
+      typeof req.route?.path === "string" ? req.route.path : "unmatched";
     const labels = {
       method: req.method,
       route,
@@ -160,36 +195,19 @@ app.use((req, res, next) => {
   next();
 });
 
-// ─── Rate Limiting ──────────────────────────────────────────────────────────
-
-// General rate limit: 100 req/min
-const generalLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    error: "RATE_LIMITED",
-    message: "Too many requests. Please try again later.",
-  },
-  skip: (req) => req.url === "/health" || req.url === "/healthz" || req.url === "/readyz" || req.url === "/metrics",
-});
-
-// Strict rate limit for payment creation: 10 req/min
-const paymentCreationLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: {
-    error: "RATE_LIMITED",
-    message: "Payment creation rate limit exceeded. Maximum 10 per minute.",
-  },
-});
-
-app.use(generalLimiter);
-
 // ─── Health / Readiness Checks ──────────────────────────────────────────────
+
+let readinessDependencies: ReadinessDependencies =
+  createDefaultReadinessDependencies();
+
+/** Test-only injection point for deterministic readiness endpoint coverage. */
+export function setReadinessDependenciesForTest(
+  dependencies: ReadinessDependencies,
+): void {
+  if (NODE_ENV !== "test")
+    throw new Error("Readiness dependencies can only be replaced in tests");
+  readinessDependencies = dependencies;
+}
 
 // Liveness probe — always returns 200 if the process is running.
 app.get("/healthz", (_req, res) => {
@@ -202,54 +220,29 @@ app.get("/healthz", (_req, res) => {
   });
 });
 
-// Readiness probe — returns 200 only when the DB connection is healthy.
+// Readiness is fail-closed across storage, compliance freshness, chain identity,
+// and both production contract deployments. Only coarse states are exposed.
 app.get("/readyz", async (_req, res) => {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-
-    res.json({
-      status: "ready",
-      service: "noblepay-api",
-      version: "1.0.0",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: "connected",
-    });
-  } catch {
-    res.status(503).json({
-      status: "not_ready",
-      service: "noblepay-api",
-      version: "1.0.0",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: "disconnected",
-    });
-  }
+  const result = await runReadinessChecks(readinessDependencies);
+  res.status(result.ready ? 200 : 503).json({
+    status: result.ready ? "ready" : "not_ready",
+    service: "noblepay-api",
+    version: "1.0.0",
+    timestamp: new Date().toISOString(),
+    checks: result.checks,
+  });
 });
 
-// Legacy /health endpoint — kept for backward compatibility, delegates to readyz.
+// Legacy /health endpoint remains a readiness alias for older orchestration.
 app.get("/health", async (_req, res) => {
-  try {
-    await prisma.$queryRaw`SELECT 1`;
-
-    res.json({
-      status: "healthy",
-      service: "noblepay-api",
-      version: "1.0.0",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: "connected",
-    });
-  } catch {
-    res.status(503).json({
-      status: "unhealthy",
-      service: "noblepay-api",
-      version: "1.0.0",
-      timestamp: new Date().toISOString(),
-      uptime: process.uptime(),
-      database: "disconnected",
-    });
-  }
+  const result = await runReadinessChecks(readinessDependencies);
+  res.status(result.ready ? 200 : 503).json({
+    status: result.ready ? "healthy" : "unhealthy",
+    service: "noblepay-api",
+    version: "1.0.0",
+    timestamp: new Date().toISOString(),
+    checks: result.checks,
+  });
 });
 
 // ─── Prometheus Metrics Endpoint ────────────────────────────────────────────
@@ -266,25 +259,71 @@ app.get("/metrics", async (_req, res) => {
 
 // ─── API Routes ─────────────────────────────────────────────────────────────
 
-// Apply strict rate limit to payment creation
+const roadmapApiPaths = [
+  "/v1/treasury",
+  "/v1/liquidity",
+  "/v1/streams",
+  "/v1/fx",
+  "/v1/invoices",
+  "/v1/crosschain",
+  "/v1/ai-compliance",
+];
+const authenticatedApiPaths = [
+  "/v1/payments",
+  "/v1/compliance",
+  "/v1/audit",
+  "/v1/reports",
+  ...(roadmapPreviewEnabled ? roadmapApiPaths : []),
+];
+app.use(authenticatedApiPaths, authenticateAPIKey, tierRateLimit);
+
+// Registration is the only public business route. Every other business route
+// is authenticated and consumes the same durable tenant counter.
+app.use("/v1/businesses", (req, res, next) => {
+  if (req.method === "POST" && req.path === "/") return next();
+  return authenticateAPIKey(req, res, next);
+});
+app.use("/v1/businesses", (req, res, next) => {
+  if (req.method === "POST" && req.path === "/") return next();
+  return tierRateLimit(req, res, next);
+});
+
+// Challenge and verification have separate durable public counters in their
+// router. Session inspection/logout are authenticated and tenant-limited here.
+app.use("/v1/auth", (req, res, next) => {
+  if (req.path === "/challenge" || req.path === "/verify") return next();
+  return authenticateAPIKey(req, res, next);
+});
+app.use("/v1/auth", (req, res, next) => {
+  if (req.path === "/challenge" || req.path === "/verify") return next();
+  return tierRateLimit(req, res, next);
+});
+
+const paymentWriteLimiter = createTierRateLimit({
+  scope: "payment-write",
+  limitOverride: 10,
+});
 app.use("/v1/payments", (req, res, next) => {
-  if (req.method === "POST" && (req.path === "/" || req.path === "/batch")) {
-    return paymentCreationLimiter(req, res, next);
-  }
+  if (req.method === "POST") return paymentWriteLimiter(req, res, next);
   next();
 });
 
 app.use("/v1/payments", paymentRoutes);
+app.use("/v1/auth", authRoutes);
 app.use("/v1/compliance", complianceRoutes);
 app.use("/v1/businesses", businessRoutes);
 app.use("/v1/audit", auditRoutes);
-app.use("/v1/treasury", treasuryRoutes);
-app.use("/v1/liquidity", liquidityRoutes);
-app.use("/v1/streams", streamingRoutes);
-app.use("/v1/fx", fxRoutes);
-app.use("/v1/invoices", invoiceRoutes);
-app.use("/v1/crosschain", crosschainRoutes);
 app.use("/v1/reports", reportingRoutes);
+
+if (roadmapPreviewEnabled) {
+  app.use("/v1/treasury", treasuryRoutes);
+  app.use("/v1/liquidity", liquidityRoutes);
+  app.use("/v1/streams", streamingRoutes);
+  app.use("/v1/fx", fxRoutes);
+  app.use("/v1/invoices", invoiceRoutes);
+  app.use("/v1/crosschain", crosschainRoutes);
+  app.use("/v1/ai-compliance", aiComplianceRoutes);
+}
 
 // ─── 404 Handler ────────────────────────────────────────────────────────────
 
@@ -312,9 +351,7 @@ app.use(
     res.status(500).json({
       error: "INTERNAL_ERROR",
       message:
-        NODE_ENV === "development"
-          ? err.message
-          : "An internal error occurred",
+        NODE_ENV === "development" ? err.message : "An internal error occurred",
     });
   },
 );
@@ -350,12 +387,12 @@ async function gracefulShutdown(signal: string) {
   }
 
   // Stop accepting new connections
+  wsService.close();
   server.close(async () => {
     logger.info("HTTP server closed");
 
     try {
-      // Disconnect Prisma
-      await prisma.$disconnect();
+      await disconnectDatabase();
       logger.info("Database connections closed");
     } catch (error) {
       logger.error("Error during shutdown", {

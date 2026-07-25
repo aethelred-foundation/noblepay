@@ -1,54 +1,6 @@
-// ============================================================
-// NoblePay Shared Utilities
-// Deterministic RNG, formatting, currency helpers, compliance utils
-// ============================================================
-
-/**
- * Deterministic pseudo-random number generator using sine function.
- * Used for generating consistent mock data across SSR and client.
- */
-export function seededRandom(seed: number): number {
-  const x = Math.sin(seed) * 10000;
-  return x - Math.floor(x);
-}
-
-/**
- * Generate a random float in [min, max) range from a seed.
- */
-export function seededRange(seed: number, min: number, max: number): number {
-  return min + seededRandom(seed) * (max - min);
-}
-
-/**
- * Generate a random integer in [min, max] range from a seed.
- */
-export function seededInt(seed: number, min: number, max: number): number {
-  return Math.floor(seededRange(seed, min, max + 1));
-}
-
-/**
- * Generate a hexadecimal string of given length from a seed.
- */
-export function seededHex(seed: number, length: number): string {
-  const chars = "0123456789abcdef";
-  let result = "";
-  for (let i = 0; i < length; i++) {
-    result += chars[Math.floor(seededRandom(seed + i * 7 + 3) * chars.length)];
-  }
-  return result;
-}
-
-/**
- * Generate an Aethelred-style address from a seed.
- */
-export function seededAddress(seed: number): string {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let addr = "aeth1";
-  for (let i = 0; i < 38; i++) {
-    addr += chars[Math.floor(seededRandom(seed + i + 1) * chars.length)];
-  }
-  return addr;
-}
+// Shared display and data-protection helpers. Runtime identifiers and records
+// must come from wallets, the chain, or the API; this module intentionally has
+// no seeded/demo-data generators.
 
 /**
  * Format a number with compact notation (K, M, B suffixes).
@@ -168,14 +120,6 @@ export function getRiskColor(score: number): string {
   if (score <= 50) return "#f59e0b"; // amber — medium risk
   if (score <= 75) return "#f97316"; // orange — high risk
   return "#ef4444"; // red — critical risk
-}
-
-/**
- * Generate a deterministic payment ID from a seed.
- * Returns a 0x-prefixed 64-character hex string (bytes32).
- */
-export function generatePaymentId(seed: number): string {
-  return `0x${seededHex(seed, 64)}`;
 }
 
 /**

@@ -8,11 +8,14 @@
 // AI Decision Types
 // ---------------------------------------------------------------------------
 
-/** AI model decision outcome */
-export type DecisionOutcome = "Approve" | "Flag" | "Block" | "Review";
+/** Server-authoritative AI model decision outcome. */
+export type DecisionOutcome = "APPROVE" | "FLAG" | "BLOCK" | "ESCALATE";
 
-/** AI confidence level classification */
-export type ConfidenceLevel = "High" | "Medium" | "Low";
+export interface AIDecisionFactor {
+  name: string;
+  contribution: number;
+  value: string;
+}
 
 /** An individual AI compliance decision */
 export interface AIDecision {
@@ -26,30 +29,31 @@ export interface AIDecision {
   modelVersion: string;
   /** Decision outcome */
   outcome: DecisionOutcome;
-  /** Confidence score (0-100) */
+  /** Original engine outcome before any escalation or human override. */
+  originalOutcome: DecisionOutcome;
+  /** Confidence score (0-1) */
   confidence: number;
-  /** Confidence level classification */
-  confidenceLevel: ConfidenceLevel;
   /** Risk score assigned (0-100) */
   riskScore: number;
   /** Key factors that influenced the decision */
-  factors: string[];
+  factors: AIDecisionFactor[];
+  explanation: string;
   /** Processing latency in milliseconds */
-  latencyMs: number;
+  processingTimeMs: number;
+  teeAttestation: string | null;
+  humanOverride: boolean;
+  overrideBy: string | null;
+  overrideReason: string | null;
   /** Decision timestamp (Unix ms) */
-  decidedAt: number;
-  /** Whether this decision was appealed */
-  appealed: boolean;
-  /** Appeal outcome, if appealed */
-  appealOutcome?: "Upheld" | "Overturned" | "Pending";
+  createdAt: number;
 }
 
 // ---------------------------------------------------------------------------
 // AI Model Types
 // ---------------------------------------------------------------------------
 
-/** AI model operational status */
-export type ModelStatus = "Active" | "Training" | "Deprecated" | "Shadow";
+/** AI model operational status. */
+export type ModelStatus = "ACTIVE" | "STAGING" | "DEPRECATED" | "UNDER_REVIEW";
 
 /** AI compliance model metadata */
 export interface AIModel {
@@ -59,22 +63,67 @@ export interface AIModel {
   name: string;
   /** Model version */
   version: string;
+  type: string;
   /** Model status */
   status: ModelStatus;
-  /** Accuracy percentage (0-100) */
+  /** Accuracy ratio (0-1) */
   accuracy: number;
-  /** False positive rate (0-100) */
-  falsePositiveRate: number;
-  /** False negative rate (0-100) */
-  falseNegativeRate: number;
+  precision: number;
+  recall: number;
+  f1Score: number;
+  falsePositiveRate: number | null;
+  falseNegativeRate: number | null;
+  teeAttested: boolean;
+  attestationHash: string | null;
+  trainingDataHash: string | null;
   /** Total decisions made */
   totalDecisions: number;
-  /** Average latency in milliseconds */
-  avgLatencyMs: number;
-  /** Last training timestamp (Unix ms) */
-  lastTrained: number;
   /** Last deployed timestamp (Unix ms) */
   deployedAt: number;
+  lastEvaluated: number | null;
+  metadata: Record<string, unknown>;
+}
+
+export type AIAppealStatus =
+  "SUBMITTED" | "UNDER_REVIEW" | "UPHELD" | "OVERTURNED" | "DISMISSED";
+
+export interface AIAppeal {
+  id: string;
+  decisionId: string;
+  paymentId: string;
+  submittedBy: string;
+  reason: string;
+  status: AIAppealStatus;
+  externalReference: string;
+  reviewer: string | null;
+  reviewNotes: string | null;
+  originalOutcome: DecisionOutcome;
+  finalOutcome: DecisionOutcome | null;
+  submittedAt: number;
+  resolvedAt: number | null;
+}
+
+export interface AIBiasMetric {
+  jurisdiction: string;
+  totalScreened: number;
+  flagRate: number;
+  blockRate: number;
+  falsePositiveRate: number;
+  avgProcessingTime: number;
+  deviationFromGlobal: number | null;
+}
+
+export interface AIComplianceAnalytics {
+  activeModels: number;
+  totalDecisions: number;
+  avgConfidence: number;
+  avgProcessingTime: number;
+  escalationRate: number;
+  humanOverrideRate: number;
+  appealRate: number;
+  appealOverturnRate: number;
+  biasMetrics: AIBiasMetric[];
+  recentDecisions: AIDecision[];
 }
 
 // ---------------------------------------------------------------------------
@@ -153,19 +202,11 @@ export interface NetworkAnalysis {
 
 /** Regulatory report type */
 export type ReportType =
-  | "SAR"
-  | "CTR"
-  | "STR"
-  | "AML_QUARTERLY"
-  | "ANNUAL_AUDIT";
+  "SAR" | "CTR" | "STR" | "AML_QUARTERLY" | "ANNUAL_AUDIT";
 
 /** Regulatory report status */
 export type ReportStatus =
-  | "Draft"
-  | "Pending"
-  | "Submitted"
-  | "Acknowledged"
-  | "Rejected";
+  "Draft" | "Pending" | "Submitted" | "Acknowledged" | "Rejected";
 
 /** A regulatory compliance report */
 export interface RegulatoryReport {

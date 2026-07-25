@@ -46,6 +46,12 @@ pub struct TravelRuleEngine {
     threshold_usd_cents: u64,
 }
 
+impl Default for TravelRuleEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TravelRuleEngine {
     /// Create an engine with the standard FATF threshold.
     pub fn new() -> Self {
@@ -319,7 +325,7 @@ mod tests {
             originator_account: None, // missing
             originator_address: None, // missing
             originator_id: None,
-            beneficiary_name: None, // missing
+            beneficiary_name: None,    // missing
             beneficiary_account: None, // missing
             beneficiary_institution: None,
         };
@@ -338,9 +344,7 @@ mod tests {
 
         // The hash will differ because of UUID generation in the package,
         // but the structure should always be present.
-        let result = engine
-            .verify_travel_rule(&payment, Some(&data))
-            .unwrap();
+        let result = engine.verify_travel_rule(&payment, Some(&data)).unwrap();
         let pkg = result.ivms101_package.unwrap();
         assert!(!pkg.commitment_hash.is_empty());
         assert_eq!(pkg.commitment_hash.len(), 64); // SHA3-256 hex = 64 chars
@@ -445,9 +449,13 @@ mod tests {
             beneficiary_account: Some("0xdef".into()),
             beneficiary_institution: None,
         };
-        let result = engine.verify_travel_rule(&large_payment(), Some(&data)).unwrap();
+        let result = engine
+            .verify_travel_rule(&large_payment(), Some(&data))
+            .unwrap();
         assert!(!result.compliant);
-        assert!(result.missing_fields.contains(&"originator_name".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"originator_name".to_string()));
         assert_eq!(result.missing_fields.len(), 1);
     }
 
@@ -463,9 +471,13 @@ mod tests {
             beneficiary_account: Some("0xdef".into()),
             beneficiary_institution: None,
         };
-        let result = engine.verify_travel_rule(&large_payment(), Some(&data)).unwrap();
+        let result = engine
+            .verify_travel_rule(&large_payment(), Some(&data))
+            .unwrap();
         assert!(!result.compliant);
-        assert!(result.missing_fields.contains(&"beneficiary_name".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"beneficiary_name".to_string()));
     }
 
     // -----------------------------------------------------------------------
@@ -510,7 +522,9 @@ mod tests {
     fn below_threshold_with_data_still_compliant() {
         let engine = TravelRuleEngine::new();
         let data = complete_travel_data();
-        let result = engine.verify_travel_rule(&small_payment(), Some(&data)).unwrap();
+        let result = engine
+            .verify_travel_rule(&small_payment(), Some(&data))
+            .unwrap();
         assert!(result.compliant);
         assert!(!result.above_threshold);
         assert!(result.ivms101_package.is_none());
@@ -527,11 +541,21 @@ mod tests {
         assert!(!result.compliant);
         assert!(result.above_threshold);
         assert_eq!(result.missing_fields.len(), 5);
-        assert!(result.missing_fields.contains(&"originator_name".to_string()));
-        assert!(result.missing_fields.contains(&"originator_account".to_string()));
-        assert!(result.missing_fields.contains(&"originator_address".to_string()));
-        assert!(result.missing_fields.contains(&"beneficiary_name".to_string()));
-        assert!(result.missing_fields.contains(&"beneficiary_account".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"originator_name".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"originator_account".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"originator_address".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"beneficiary_name".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"beneficiary_account".to_string()));
     }
 
     // -----------------------------------------------------------------------
@@ -550,10 +574,14 @@ mod tests {
             beneficiary_account: Some("0xdef".into()),
             beneficiary_institution: None,
         };
-        let result = engine.verify_travel_rule(&large_payment(), Some(&data)).unwrap();
+        let result = engine
+            .verify_travel_rule(&large_payment(), Some(&data))
+            .unwrap();
         assert!(!result.compliant);
         assert!(result.above_threshold);
         assert!(result.ivms101_package.is_none());
-        assert!(result.missing_fields.contains(&"originator_address".to_string()));
+        assert!(result
+            .missing_fields
+            .contains(&"originator_address".to_string()));
     }
 }

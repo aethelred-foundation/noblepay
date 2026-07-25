@@ -1,10 +1,21 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const {
+  loadFixture,
+  time,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("ComplianceOracle", function () {
   async function deployFixture() {
-    const [admin, teeManager, thresholdMgr, thresholdMgr2, node1, node2, other] = await ethers.getSigners();
+    const [
+      admin,
+      teeManager,
+      thresholdMgr,
+      thresholdMgr2,
+      node1,
+      node2,
+      other,
+    ] = await ethers.getSigners();
 
     const Oracle = await ethers.getContractFactory("ComplianceOracle");
     const oracle = await Oracle.deploy(admin.address);
@@ -13,10 +24,25 @@ describe("ComplianceOracle", function () {
     const THRESHOLD_MANAGER_ROLE = await oracle.THRESHOLD_MANAGER_ROLE();
 
     await oracle.connect(admin).grantRole(TEE_MANAGER_ROLE, teeManager.address);
-    await oracle.connect(admin).grantRole(THRESHOLD_MANAGER_ROLE, thresholdMgr.address);
-    await oracle.connect(admin).grantRole(THRESHOLD_MANAGER_ROLE, thresholdMgr2.address);
+    await oracle
+      .connect(admin)
+      .grantRole(THRESHOLD_MANAGER_ROLE, thresholdMgr.address);
+    await oracle
+      .connect(admin)
+      .grantRole(THRESHOLD_MANAGER_ROLE, thresholdMgr2.address);
 
-    return { oracle, admin, teeManager, thresholdMgr, thresholdMgr2, node1, node2, other, TEE_MANAGER_ROLE, THRESHOLD_MANAGER_ROLE };
+    return {
+      oracle,
+      admin,
+      teeManager,
+      thresholdMgr,
+      thresholdMgr2,
+      node1,
+      node2,
+      other,
+      TEE_MANAGER_ROLE,
+      THRESHOLD_MANAGER_ROLE,
+    };
   }
 
   async function nodeRegisteredFixture() {
@@ -24,7 +50,9 @@ describe("ComplianceOracle", function () {
     const { oracle, node1 } = fixture;
     const enclaveKey = ethers.toUtf8Bytes("enclave-public-key-data");
     const platformId = ethers.keccak256(ethers.toUtf8Bytes("sgx-platform"));
-    await oracle.connect(node1).registerTEENode(enclaveKey, platformId, { value: ethers.parseEther("10") });
+    await oracle.connect(node1).registerTEENode(enclaveKey, platformId, {
+      value: ethers.parseEther("10"),
+    });
     return { ...fixture, enclaveKey, platformId };
   }
 
@@ -40,8 +68,9 @@ describe("ComplianceOracle", function () {
 
     it("should revert with zero admin", async function () {
       const Oracle = await ethers.getContractFactory("ComplianceOracle");
-      await expect(Oracle.deploy(ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(Oracle, "ZeroAddress");
+      await expect(
+        Oracle.deploy(ethers.ZeroAddress),
+      ).to.be.revertedWithCustomError(Oracle, "ZeroAddress");
     });
   });
 
@@ -50,21 +79,30 @@ describe("ComplianceOracle", function () {
       const { oracle, node1 } = await loadFixture(deployFixture);
       const enclaveKey = ethers.toUtf8Bytes("key");
       const platformId = ethers.keccak256(ethers.toUtf8Bytes("platform"));
-      await expect(oracle.connect(node1).registerTEENode(enclaveKey, platformId, { value: ethers.parseEther("10") }))
-        .to.emit(oracle, "TEENodeRegistered");
+      await expect(
+        oracle.connect(node1).registerTEENode(enclaveKey, platformId, {
+          value: ethers.parseEther("10"),
+        }),
+      ).to.emit(oracle, "TEENodeRegistered");
       expect(await oracle.getActiveTEENodeCount()).to.equal(1);
     });
 
     it("should revert with insufficient stake", async function () {
       const { oracle, node1 } = await loadFixture(deployFixture);
-      await expect(oracle.connect(node1).registerTEENode("0x", ethers.ZeroHash, { value: ethers.parseEther("5") }))
-        .to.be.revertedWithCustomError(oracle, "InsufficientStake");
+      await expect(
+        oracle.connect(node1).registerTEENode("0x", ethers.ZeroHash, {
+          value: ethers.parseEther("5"),
+        }),
+      ).to.be.revertedWithCustomError(oracle, "InsufficientStake");
     });
 
     it("should revert for duplicate registration", async function () {
       const { oracle, node1 } = await nodeRegisteredFixture();
-      await expect(oracle.connect(node1).registerTEENode("0x", ethers.ZeroHash, { value: ethers.parseEther("10") }))
-        .to.be.revertedWithCustomError(oracle, "NodeAlreadyRegistered");
+      await expect(
+        oracle.connect(node1).registerTEENode("0x", ethers.ZeroHash, {
+          value: ethers.parseEther("10"),
+        }),
+      ).to.be.revertedWithCustomError(oracle, "NodeAlreadyRegistered");
     });
   });
 
@@ -76,40 +114,48 @@ describe("ComplianceOracle", function () {
       const receipt = await tx.wait();
       const balAfter = await ethers.provider.getBalance(node1.address);
       // Should have gotten ~10 ETH back minus gas
-      expect(balAfter - balBefore + receipt.gasUsed * receipt.gasPrice).to.be.closeTo(ethers.parseEther("10"), ethers.parseEther("0.01"));
+      expect(
+        balAfter - balBefore + receipt.gasUsed * receipt.gasPrice,
+      ).to.be.closeTo(ethers.parseEther("10"), ethers.parseEther("0.01"));
       expect(await oracle.getActiveTEENodeCount()).to.equal(0);
     });
 
     it("should deregister by TEE manager", async function () {
       const { oracle, teeManager, node1 } = await nodeRegisteredFixture();
-      await expect(oracle.connect(teeManager).deregisterTEENode(node1.address))
-        .to.emit(oracle, "TEENodeDeregistered");
+      await expect(
+        oracle.connect(teeManager).deregisterTEENode(node1.address),
+      ).to.emit(oracle, "TEENodeDeregistered");
     });
 
     it("should revert deregister by unauthorized", async function () {
       const { oracle, other, node1 } = await nodeRegisteredFixture();
-      await expect(oracle.connect(other).deregisterTEENode(node1.address))
-        .to.be.revertedWith("ComplianceOracle: unauthorized");
+      await expect(
+        oracle.connect(other).deregisterTEENode(node1.address),
+      ).to.be.revertedWith("ComplianceOracle: unauthorized");
     });
 
     it("should revert for non-existent node", async function () {
       const { oracle, other } = await loadFixture(deployFixture);
-      await expect(oracle.connect(other).deregisterTEENode(other.address))
-        .to.be.revertedWithCustomError(oracle, "NodeNotFound");
+      await expect(
+        oracle.connect(other).deregisterTEENode(other.address),
+      ).to.be.revertedWithCustomError(oracle, "NodeNotFound");
     });
   });
 
   describe("Heartbeat", function () {
     it("should record heartbeat", async function () {
       const { oracle, node1 } = await nodeRegisteredFixture();
-      await expect(oracle.connect(node1).heartbeat())
-        .to.emit(oracle, "TEENodeHeartbeat");
+      await expect(oracle.connect(node1).heartbeat()).to.emit(
+        oracle,
+        "TEENodeHeartbeat",
+      );
     });
 
     it("should revert for unregistered node", async function () {
       const { oracle, other } = await loadFixture(deployFixture);
-      await expect(oracle.connect(other).heartbeat())
-        .to.be.revertedWithCustomError(oracle, "NodeNotFound");
+      await expect(
+        oracle.connect(other).heartbeat(),
+      ).to.be.revertedWithCustomError(oracle, "NodeNotFound");
     });
   });
 
@@ -117,8 +163,9 @@ describe("ComplianceOracle", function () {
     it("should slash an offline node", async function () {
       const { oracle, teeManager, node1 } = await nodeRegisteredFixture();
       await time.increase(301); // > 5 minutes
-      await expect(oracle.connect(teeManager).slashOfflineNode(node1.address))
-        .to.emit(oracle, "TEENodeSlashed");
+      await expect(
+        oracle.connect(teeManager).slashOfflineNode(node1.address),
+      ).to.emit(oracle, "TEENodeSlashed");
       const node = await oracle.getTEENode(node1.address);
       expect(node.slashCount).to.equal(1);
       // 5% of 10 ETH = 0.5 ETH slashed
@@ -127,8 +174,9 @@ describe("ComplianceOracle", function () {
 
     it("should revert if node is not offline", async function () {
       const { oracle, teeManager, node1 } = await nodeRegisteredFixture();
-      await expect(oracle.connect(teeManager).slashOfflineNode(node1.address))
-        .to.be.revertedWith("ComplianceOracle: node not offline");
+      await expect(
+        oracle.connect(teeManager).slashOfflineNode(node1.address),
+      ).to.be.revertedWith("ComplianceOracle: node not offline");
     });
 
     it("should auto-deregister after MAX_SLASH_COUNT", async function () {
@@ -147,26 +195,43 @@ describe("ComplianceOracle", function () {
     });
   });
 
-  describe("Attestation Verification", function () {
-    it("should verify a valid attestation", async function () {
+  describe("Attestation Acceptance Recording", function () {
+    it("records manager acceptance after checking content-hash integrity", async function () {
       const { oracle, teeManager, node1 } = await nodeRegisteredFixture();
       const attestationData = ethers.toUtf8Bytes("attestation-data");
       const expectedHash = ethers.keccak256(attestationData);
-      await expect(oracle.connect(teeManager).verifyAttestation(node1.address, attestationData, expectedHash))
-        .to.emit(oracle, "AttestationVerified");
+      const receipt = await (
+        await oracle
+          .connect(teeManager)
+          .verifyAttestation(node1.address, attestationData, expectedHash)
+      ).wait();
+      const acceptedEvent = receipt.logs.find(
+        (log) => log.fragment?.name === "AttestationVerified",
+      );
+      expect(acceptedEvent).not.to.equal(undefined);
+      const attestationHash = acceptedEvent.args.attestationHash;
+      expect(await oracle.isAttestationVerified(attestationHash)).to.equal(
+        true,
+      );
     });
 
     it("should revert with mismatched hash", async function () {
       const { oracle, teeManager, node1 } = await nodeRegisteredFixture();
       const attestationData = ethers.toUtf8Bytes("attestation-data");
-      await expect(oracle.connect(teeManager).verifyAttestation(node1.address, attestationData, ethers.ZeroHash))
-        .to.be.revertedWithCustomError(oracle, "InvalidAttestation");
+      await expect(
+        oracle
+          .connect(teeManager)
+          .verifyAttestation(node1.address, attestationData, ethers.ZeroHash),
+      ).to.be.revertedWithCustomError(oracle, "InvalidAttestation");
     });
 
     it("should revert for non-existent node", async function () {
       const { oracle, teeManager, other } = await loadFixture(deployFixture);
-      await expect(oracle.connect(teeManager).verifyAttestation(other.address, "0x", ethers.ZeroHash))
-        .to.be.revertedWithCustomError(oracle, "NodeNotFound");
+      await expect(
+        oracle
+          .connect(teeManager)
+          .verifyAttestation(other.address, "0x", ethers.ZeroHash),
+      ).to.be.revertedWithCustomError(oracle, "NodeNotFound");
     });
   });
 
@@ -192,13 +257,20 @@ describe("ComplianceOracle", function () {
 
   describe("Threshold Management", function () {
     it("should propose and approve threshold update", async function () {
-      const { oracle, thresholdMgr, thresholdMgr2 } = await loadFixture(deployFixture);
-      const tx = await oracle.connect(thresholdMgr).proposeThresholdUpdate(20, 60);
+      const { oracle, thresholdMgr, thresholdMgr2 } =
+        await loadFixture(deployFixture);
+      const tx = await oracle
+        .connect(thresholdMgr)
+        .proposeThresholdUpdate(20, 60);
       const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "ThresholdChangeProposed");
+      const event = receipt.logs.find(
+        (l) => l.fragment && l.fragment.name === "ThresholdChangeProposed",
+      );
       const proposalId = event.args[0];
 
-      await oracle.connect(thresholdMgr2).approveThresholdUpdate(proposalId, 20, 60);
+      await oracle
+        .connect(thresholdMgr2)
+        .approveThresholdUpdate(proposalId, 20, 60);
       const [lowMax, mediumMax] = await oracle.getRiskThresholds();
       expect(lowMax).to.equal(20);
       expect(mediumMax).to.equal(60);
@@ -206,25 +278,32 @@ describe("ComplianceOracle", function () {
 
     it("should revert invalid thresholds (lowMax >= mediumMax)", async function () {
       const { oracle, thresholdMgr } = await loadFixture(deployFixture);
-      await expect(oracle.connect(thresholdMgr).proposeThresholdUpdate(70, 60))
-        .to.be.revertedWithCustomError(oracle, "InvalidThresholds");
+      await expect(
+        oracle.connect(thresholdMgr).proposeThresholdUpdate(70, 60),
+      ).to.be.revertedWithCustomError(oracle, "InvalidThresholds");
     });
 
     it("should revert invalid thresholds (mediumMax > 100)", async function () {
       const { oracle, thresholdMgr } = await loadFixture(deployFixture);
-      await expect(oracle.connect(thresholdMgr).proposeThresholdUpdate(20, 101))
-        .to.be.revertedWithCustomError(oracle, "InvalidThresholds");
+      await expect(
+        oracle.connect(thresholdMgr).proposeThresholdUpdate(20, 101),
+      ).to.be.revertedWithCustomError(oracle, "InvalidThresholds");
     });
 
     it("should revert duplicate vote", async function () {
       const { oracle, thresholdMgr } = await loadFixture(deployFixture);
-      const tx = await oracle.connect(thresholdMgr).proposeThresholdUpdate(20, 60);
+      const tx = await oracle
+        .connect(thresholdMgr)
+        .proposeThresholdUpdate(20, 60);
       const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "ThresholdChangeProposed");
+      const event = receipt.logs.find(
+        (l) => l.fragment && l.fragment.name === "ThresholdChangeProposed",
+      );
       const proposalId = event.args[0];
 
-      await expect(oracle.connect(thresholdMgr).approveThresholdUpdate(proposalId, 20, 60))
-        .to.be.revertedWithCustomError(oracle, "AlreadyVoted");
+      await expect(
+        oracle.connect(thresholdMgr).approveThresholdUpdate(proposalId, 20, 60),
+      ).to.be.revertedWithCustomError(oracle, "AlreadyVoted");
     });
   });
 
@@ -233,20 +312,29 @@ describe("ComplianceOracle", function () {
       const { oracle, node1 } = await nodeRegisteredFixture();
       const subjectHash = ethers.keccak256(ethers.toUtf8Bytes("subject"));
       const resultHash = ethers.keccak256(ethers.toUtf8Bytes("result"));
-      await expect(oracle.connect(node1).submitScreeningResult(subjectHash, resultHash, 25, true))
-        .to.emit(oracle, "ScreeningResultSubmitted");
+      await expect(
+        oracle
+          .connect(node1)
+          .submitScreeningResult(subjectHash, resultHash, 25, true),
+      ).to.emit(oracle, "ScreeningResultSubmitted");
     });
 
     it("should revert for unregistered node", async function () {
       const { oracle, other } = await loadFixture(deployFixture);
-      await expect(oracle.connect(other).submitScreeningResult(ethers.ZeroHash, ethers.ZeroHash, 50, true))
-        .to.be.revertedWithCustomError(oracle, "NodeNotFound");
+      await expect(
+        oracle
+          .connect(other)
+          .submitScreeningResult(ethers.ZeroHash, ethers.ZeroHash, 50, true),
+      ).to.be.revertedWithCustomError(oracle, "NodeNotFound");
     });
 
     it("should revert for invalid risk score > 100", async function () {
       const { oracle, node1 } = await nodeRegisteredFixture();
-      await expect(oracle.connect(node1).submitScreeningResult(ethers.ZeroHash, ethers.ZeroHash, 101, true))
-        .to.be.revertedWithCustomError(oracle, "InvalidRiskScore");
+      await expect(
+        oracle
+          .connect(node1)
+          .submitScreeningResult(ethers.ZeroHash, ethers.ZeroHash, 101, true),
+      ).to.be.revertedWithCustomError(oracle, "InvalidRiskScore");
     });
   });
 

@@ -40,6 +40,25 @@ func TestMemoryStoreCreateAndGet(t *testing.T) {
 	}
 }
 
+func TestMemoryStoreDoesNotLeakMutablePointers(t *testing.T) {
+	s := store.NewMemoryStore()
+	ctx := context.Background()
+	original := &models.Payment{ID: "isolated", Amount: "100", Status: models.PaymentStatusPending}
+	if err := s.Create(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	original.Amount = "999"
+	fetched, _ := s.GetByID(ctx, original.ID)
+	if fetched.Amount != "100" {
+		t.Fatalf("caller mutated stored payment through Create pointer: %q", fetched.Amount)
+	}
+	fetched.Amount = "888"
+	again, _ := s.GetByID(ctx, original.ID)
+	if again.Amount != "100" {
+		t.Fatalf("caller mutated stored payment through Get pointer: %q", again.Amount)
+	}
+}
+
 func TestMemoryStoreGetNotFound(t *testing.T) {
 	s := store.NewMemoryStore()
 	_, err := s.GetByID(context.Background(), "nonexistent")

@@ -7,9 +7,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
 
 use crate::types::Payment;
 
@@ -149,6 +148,12 @@ pub struct TransactionGraph {
     reverse_adjacency: HashMap<String, HashSet<String>>,
 }
 
+impl Default for TransactionGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TransactionGraph {
     /// Create a new empty graph.
     pub fn new() -> Self {
@@ -182,17 +187,20 @@ impl TransactionGraph {
 
         // Update or create edge
         let edge_key = (payment.sender.clone(), payment.recipient.clone());
-        let edge = self.edges.entry(edge_key.clone()).or_insert_with(|| GraphEdge {
-            source: payment.sender.clone(),
-            target: payment.recipient.clone(),
-            total_volume: 0.0,
-            transaction_count: 0,
-            currencies: HashSet::new(),
-            avg_amount: 0.0,
-            first_tx: payment.timestamp,
-            last_tx: payment.timestamp,
-            risk_indicators: Vec::new(),
-        });
+        let edge = self
+            .edges
+            .entry(edge_key.clone())
+            .or_insert_with(|| GraphEdge {
+                source: payment.sender.clone(),
+                target: payment.recipient.clone(),
+                total_volume: 0.0,
+                transaction_count: 0,
+                currencies: HashSet::new(),
+                avg_amount: 0.0,
+                first_tx: payment.timestamp,
+                last_tx: payment.timestamp,
+                risk_indicators: Vec::new(),
+            });
 
         edge.total_volume += amount;
         edge.transaction_count += 1;
@@ -206,30 +214,49 @@ impl TransactionGraph {
         }
 
         // Adjacency
-        self.adjacency.entry(payment.sender.clone()).or_default().insert(payment.recipient.clone());
-        self.reverse_adjacency.entry(payment.recipient.clone()).or_default().insert(payment.sender.clone());
+        self.adjacency
+            .entry(payment.sender.clone())
+            .or_default()
+            .insert(payment.recipient.clone());
+        self.reverse_adjacency
+            .entry(payment.recipient.clone())
+            .or_default()
+            .insert(payment.sender.clone());
     }
 
-    fn update_node(&mut self, entity: &str, amount: f64, is_sender: bool, timestamp: DateTime<Utc>) {
-        let node = self.nodes.entry(entity.to_string()).or_insert_with(|| GraphNode {
-            entity: entity.to_string(),
-            node_type: NodeType::Unknown,
-            degree: 0,
-            in_degree: 0,
-            out_degree: 0,
-            total_volume_in: 0.0,
-            total_volume_out: 0.0,
-            first_seen: timestamp,
-            last_seen: timestamp,
-            transaction_count: 0,
-            risk_score: 0.0,
-            community_id: None,
-            centrality: CentralityScores::default(),
-        });
+    fn update_node(
+        &mut self,
+        entity: &str,
+        amount: f64,
+        is_sender: bool,
+        timestamp: DateTime<Utc>,
+    ) {
+        let node = self
+            .nodes
+            .entry(entity.to_string())
+            .or_insert_with(|| GraphNode {
+                entity: entity.to_string(),
+                node_type: NodeType::Unknown,
+                degree: 0,
+                in_degree: 0,
+                out_degree: 0,
+                total_volume_in: 0.0,
+                total_volume_out: 0.0,
+                first_seen: timestamp,
+                last_seen: timestamp,
+                transaction_count: 0,
+                risk_score: 0.0,
+                community_id: None,
+                centrality: CentralityScores::default(),
+            });
 
         node.transaction_count += 1;
-        if timestamp < node.first_seen { node.first_seen = timestamp; }
-        if timestamp > node.last_seen { node.last_seen = timestamp; }
+        if timestamp < node.first_seen {
+            node.first_seen = timestamp;
+        }
+        if timestamp > node.last_seen {
+            node.last_seen = timestamp;
+        }
 
         if is_sender {
             node.out_degree += 1;
@@ -304,7 +331,11 @@ impl TransactionGraph {
 
                 let n = members.len();
                 let max_edges = n * (n - 1);
-                let density = if max_edges > 0 { internal_edges as f64 / max_edges as f64 } else { 0.0 };
+                let density = if max_edges > 0 {
+                    internal_edges as f64 / max_edges as f64
+                } else {
+                    0.0
+                };
 
                 let risk_score = self.community_risk_score(&members, density, internal_volume);
 
@@ -331,7 +362,14 @@ impl TransactionGraph {
         for start in self.nodes.keys() {
             let mut visited: HashSet<String> = HashSet::new();
             let mut path: Vec<String> = vec![start.clone()];
-            self.dfs_cycles(start, start, &mut path, &mut visited, &mut cycles, max_length);
+            self.dfs_cycles(
+                start,
+                start,
+                &mut path,
+                &mut visited,
+                &mut cycles,
+                max_length,
+            );
         }
 
         // Deduplicate cycles
@@ -359,7 +397,9 @@ impl TransactionGraph {
         cycles: &mut Vec<Vec<String>>,
         max_length: usize,
     ) {
-        if path.len() > max_length + 1 { return; }
+        if path.len() > max_length + 1 {
+            return;
+        }
 
         if let Some(neighbors) = self.adjacency.get(current) {
             for neighbor in neighbors {
@@ -384,40 +424,60 @@ impl TransactionGraph {
 
         // Fan-out detection
         for (entity, neighbors) in &self.adjacency {
-            if neighbors.len() >= 5 {
-                if let Some(node) = self.nodes.get(entity) {
-                    let total_volume: f64 = neighbors.iter()
-                        .filter_map(|n| self.edges.get(&(entity.clone(), n.clone())))
-                        .map(|e| e.total_volume)
-                        .sum();
+            if neighbors.len() >= 5 && self.nodes.contains_key(entity) {
+                let total_volume: f64 = neighbors
+                    .iter()
+                    .filter_map(|n| self.edges.get(&(entity.clone(), n.clone())))
+                    .map(|e| e.total_volume)
+                    .sum();
 
-                    patterns.push(SuspiciousPattern {
-                        pattern_type: PatternType::FanOut,
-                        severity: if neighbors.len() > 10 { PatternSeverity::High } else { PatternSeverity::Medium },
-                        entities_involved: std::iter::once(entity.clone()).chain(neighbors.iter().cloned()).collect(),
-                        total_volume,
-                        description: format!("{} sent to {} distinct entities", entity, neighbors.len()),
-                        detected_at: Utc::now(),
-                        evidence: vec![format!("Out-degree: {}", neighbors.len())],
-                    });
-                }
+                patterns.push(SuspiciousPattern {
+                    pattern_type: PatternType::FanOut,
+                    severity: if neighbors.len() > 10 {
+                        PatternSeverity::High
+                    } else {
+                        PatternSeverity::Medium
+                    },
+                    entities_involved: std::iter::once(entity.clone())
+                        .chain(neighbors.iter().cloned())
+                        .collect(),
+                    total_volume,
+                    description: format!(
+                        "{} sent to {} distinct entities",
+                        entity,
+                        neighbors.len()
+                    ),
+                    detected_at: Utc::now(),
+                    evidence: vec![format!("Out-degree: {}", neighbors.len())],
+                });
             }
         }
 
         // Fan-in detection
         for (entity, senders) in &self.reverse_adjacency {
             if senders.len() >= 5 {
-                let total_volume: f64 = senders.iter()
+                let total_volume: f64 = senders
+                    .iter()
                     .filter_map(|s| self.edges.get(&(s.clone(), entity.clone())))
                     .map(|e| e.total_volume)
                     .sum();
 
                 patterns.push(SuspiciousPattern {
                     pattern_type: PatternType::FanIn,
-                    severity: if senders.len() > 10 { PatternSeverity::High } else { PatternSeverity::Medium },
-                    entities_involved: std::iter::once(entity.clone()).chain(senders.iter().cloned()).collect(),
+                    severity: if senders.len() > 10 {
+                        PatternSeverity::High
+                    } else {
+                        PatternSeverity::Medium
+                    },
+                    entities_involved: std::iter::once(entity.clone())
+                        .chain(senders.iter().cloned())
+                        .collect(),
                     total_volume,
-                    description: format!("{} received from {} distinct entities", entity, senders.len()),
+                    description: format!(
+                        "{} received from {} distinct entities",
+                        entity,
+                        senders.len()
+                    ),
                     detected_at: Utc::now(),
                     evidence: vec![format!("In-degree: {}", senders.len())],
                 });
@@ -453,7 +513,8 @@ impl TransactionGraph {
         // Circular flow detection
         let cycles = self.detect_cycles(5);
         for cycle in &cycles {
-            let total_volume: f64 = cycle.windows(2)
+            let total_volume: f64 = cycle
+                .windows(2)
                 .filter_map(|w| self.edges.get(&(w[0].clone(), w[1].clone())))
                 .map(|e| e.total_volume)
                 .sum();
@@ -475,7 +536,9 @@ impl TransactionGraph {
     /// Compute centrality scores for all nodes.
     fn compute_centrality(&mut self) {
         let n = self.nodes.len() as f64;
-        if n <= 1.0 { return; }
+        if n <= 1.0 {
+            return;
+        }
 
         // Degree centrality
         for node in self.nodes.values_mut() {
@@ -484,9 +547,14 @@ impl TransactionGraph {
 
         // Simplified betweenness (based on being an intermediary)
         for entity in self.nodes.keys().cloned().collect::<Vec<_>>() {
-            let in_neighbors = self.reverse_adjacency.get(&entity).map(|s| s.len()).unwrap_or(0);
+            let in_neighbors = self
+                .reverse_adjacency
+                .get(&entity)
+                .map(|s| s.len())
+                .unwrap_or(0);
             let out_neighbors = self.adjacency.get(&entity).map(|s| s.len()).unwrap_or(0);
-            let betweenness = (in_neighbors * out_neighbors) as f64 / ((n - 1.0) * (n - 2.0) / 2.0).max(1.0);
+            let betweenness =
+                (in_neighbors * out_neighbors) as f64 / ((n - 1.0) * (n - 2.0) / 2.0).max(1.0);
             if let Some(node) = self.nodes.get_mut(&entity) {
                 node.centrality.betweenness_centrality = betweenness.min(1.0);
             }
@@ -494,7 +562,7 @@ impl TransactionGraph {
     }
 
     fn community_risk_score(&self, members: &[String], density: f64, volume: f64) -> f64 {
-        let mut score = 0.0;
+        let mut score: f64 = 0.0;
 
         // High density + many members = suspicious
         if density > 0.5 && members.len() > 3 {
@@ -508,7 +576,8 @@ impl TransactionGraph {
         }
 
         // Many new accounts
-        let new_accounts = members.iter()
+        let new_accounts = members
+            .iter()
             .filter_map(|m| self.nodes.get(m))
             .filter(|n| (Utc::now() - n.first_seen).num_days() < 30)
             .count();
@@ -516,7 +585,7 @@ impl TransactionGraph {
             score += 0.3;
         }
 
-        (score as f64).min(1.0)
+        score.min(1.0)
     }
 
     /// Run the full network analysis pipeline.
@@ -524,12 +593,15 @@ impl TransactionGraph {
         let communities = self.detect_communities();
         let patterns = self.detect_patterns();
 
-        let high_risk: Vec<String> = self.nodes.values()
+        let high_risk: Vec<String> = self
+            .nodes
+            .values()
             .filter(|n| n.centrality.betweenness_centrality > 0.3 || n.risk_score > 0.5)
             .map(|n| n.entity.clone())
             .collect();
 
-        let max_pattern_severity = patterns.iter()
+        let max_pattern_severity = patterns
+            .iter()
             .map(|p| match p.severity {
                 PatternSeverity::Critical => 1.0,
                 PatternSeverity::High => 0.75,
@@ -538,7 +610,9 @@ impl TransactionGraph {
             })
             .fold(0.0f64, f64::max);
 
-        let network_risk = (max_pattern_severity * 0.6 + (high_risk.len() as f64 / self.nodes.len().max(1) as f64) * 0.4).min(1.0);
+        let network_risk = (max_pattern_severity * 0.6
+            + (high_risk.len() as f64 / self.nodes.len().max(1) as f64) * 0.4)
+            .min(1.0);
 
         NetworkAnalysis {
             node_count: self.nodes.len(),
@@ -588,7 +662,9 @@ mod tests {
             .collect();
         let graph = TransactionGraph::from_payments(&payments);
         let patterns = graph.detect_patterns();
-        assert!(patterns.iter().any(|p| p.pattern_type == PatternType::FanOut));
+        assert!(patterns
+            .iter()
+            .any(|p| p.pattern_type == PatternType::FanOut));
     }
 
     #[test]
@@ -613,7 +689,10 @@ mod tests {
         ];
         let mut graph = TransactionGraph::from_payments(&payments);
         let communities = graph.detect_communities();
-        assert!(communities.len() >= 2, "Should detect at least 2 communities");
+        assert!(
+            communities.len() >= 2,
+            "Should detect at least 2 communities"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -696,11 +775,17 @@ mod tests {
 
         // max_length=2 should not find cycles of length 4
         let short_cycles = graph.detect_cycles(2);
-        assert!(short_cycles.is_empty(), "max_length=2 should not find a 4-node cycle");
+        assert!(
+            short_cycles.is_empty(),
+            "max_length=2 should not find a 4-node cycle"
+        );
 
         // max_length=4 should find the cycle
         let long_cycles = graph.detect_cycles(4);
-        assert!(!long_cycles.is_empty(), "max_length=4 should find the A->B->C->D->A cycle");
+        assert!(
+            !long_cycles.is_empty(),
+            "max_length=4 should find the A->B->C->D->A cycle"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -715,7 +800,9 @@ mod tests {
         let graph = TransactionGraph::from_payments(&payments);
         let patterns = graph.detect_patterns();
         assert!(
-            patterns.iter().any(|p| p.pattern_type == PatternType::FanIn),
+            patterns
+                .iter()
+                .any(|p| p.pattern_type == PatternType::FanIn),
             "Should detect fan-in pattern"
         );
     }
@@ -727,13 +814,13 @@ mod tests {
     #[test]
     fn structuring_detected_near_threshold() {
         // Average amount just below 10000 threshold (between 8500 and 10000)
-        let payments: Vec<Payment> = (0..5)
-            .map(|_| make_payment("alice", "bob", 9500))
-            .collect();
+        let payments: Vec<Payment> = (0..5).map(|_| make_payment("alice", "bob", 9500)).collect();
         let graph = TransactionGraph::from_payments(&payments);
         let patterns = graph.detect_patterns();
         assert!(
-            patterns.iter().any(|p| p.pattern_type == PatternType::Structuring),
+            patterns
+                .iter()
+                .any(|p| p.pattern_type == PatternType::Structuring),
             "Should detect structuring pattern for avg ~9500 near 10000 threshold"
         );
     }
@@ -752,7 +839,9 @@ mod tests {
         let graph = TransactionGraph::from_payments(&payments);
         let patterns = graph.detect_patterns();
         assert!(
-            patterns.iter().any(|p| p.pattern_type == PatternType::CircularFlow),
+            patterns
+                .iter()
+                .any(|p| p.pattern_type == PatternType::CircularFlow),
             "Should detect circular flow pattern"
         );
     }
@@ -800,7 +889,10 @@ mod tests {
         ];
         let graph = TransactionGraph::from_payments(&payments);
         assert_eq!(graph.edges.len(), 1, "Same pair should have one edge");
-        let edge = graph.edges.get(&("alice".to_string(), "bob".to_string())).unwrap();
+        let edge = graph
+            .edges
+            .get(&("alice".to_string(), "bob".to_string()))
+            .unwrap();
         assert_eq!(edge.transaction_count, 3);
         assert!((edge.total_volume - 6000.0).abs() < f64::EPSILON);
         assert!((edge.avg_amount - 2000.0).abs() < f64::EPSILON);
@@ -821,8 +913,14 @@ mod tests {
         let communities = graph.detect_communities();
         assert!(!communities.is_empty());
         for c in &communities {
-            assert!(c.density >= 0.0 && c.density <= 1.0, "density should be in [0, 1]");
-            assert!(c.risk_score >= 0.0 && c.risk_score <= 1.0, "risk_score should be in [0, 1]");
+            assert!(
+                c.density >= 0.0 && c.density <= 1.0,
+                "density should be in [0, 1]"
+            );
+            assert!(
+                c.risk_score >= 0.0 && c.risk_score <= 1.0,
+                "risk_score should be in [0, 1]"
+            );
         }
     }
 
@@ -869,7 +967,10 @@ mod tests {
         p2.timestamp = Utc::now();
 
         let graph = TransactionGraph::from_payments(&[p1.clone(), p2.clone()]);
-        let edge = graph.edges.get(&("alice".to_string(), "bob".to_string())).unwrap();
+        let edge = graph
+            .edges
+            .get(&("alice".to_string(), "bob".to_string()))
+            .unwrap();
         assert!(edge.first_tx <= edge.last_tx);
     }
 
@@ -928,7 +1029,10 @@ mod tests {
         let communities = graph.detect_communities();
         assert!(!communities.is_empty());
         // Dense graph with high volume should have elevated risk
-        let max_risk = communities.iter().map(|c| c.risk_score).fold(0.0f64, f64::max);
+        let max_risk = communities
+            .iter()
+            .map(|c| c.risk_score)
+            .fold(0.0f64, f64::max);
         assert!(
             max_risk > 0.0,
             "Dense high-volume community should have elevated risk, got {}",
@@ -996,7 +1100,9 @@ mod tests {
             .collect();
         let graph = TransactionGraph::from_payments(&payments);
         let patterns = graph.detect_patterns();
-        let fan_out = patterns.iter().find(|p| p.pattern_type == PatternType::FanOut);
+        let fan_out = patterns
+            .iter()
+            .find(|p| p.pattern_type == PatternType::FanOut);
         assert!(fan_out.is_some(), "Should detect fan-out pattern");
         assert_eq!(fan_out.unwrap().severity, PatternSeverity::High);
     }
@@ -1019,7 +1125,10 @@ mod tests {
         p2.timestamp = Utc::now() - Duration::hours(10);
         graph.add_payment(&p2);
 
-        let edge = graph.edges.get(&("alice".to_string(), "bob".to_string())).unwrap();
+        let edge = graph
+            .edges
+            .get(&("alice".to_string(), "bob".to_string()))
+            .unwrap();
         // first_tx should be the earlier timestamp
         assert!(edge.first_tx <= edge.last_tx);
         assert_eq!(edge.transaction_count, 2);
@@ -1039,7 +1148,10 @@ mod tests {
         let mut graph = TransactionGraph::from_payments(&payments);
         let analysis = graph.analyze();
         // Should have structuring pattern with High severity
-        let has_high = analysis.suspicious_patterns.iter().any(|p| p.severity == PatternSeverity::High);
+        let has_high = analysis
+            .suspicious_patterns
+            .iter()
+            .any(|p| p.severity == PatternSeverity::High);
         if has_high {
             assert!(
                 analysis.network_risk_score > 0.0,
@@ -1060,7 +1172,10 @@ mod tests {
             .collect();
         let mut graph = TransactionGraph::from_payments(&payments);
         let analysis = graph.analyze();
-        let has_medium = analysis.suspicious_patterns.iter().any(|p| p.severity == PatternSeverity::Medium);
+        let has_medium = analysis
+            .suspicious_patterns
+            .iter()
+            .any(|p| p.severity == PatternSeverity::Medium);
         assert!(has_medium, "Should detect medium severity fan-out pattern");
         assert!(
             analysis.network_risk_score > 0.0,

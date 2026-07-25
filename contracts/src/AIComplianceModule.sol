@@ -104,7 +104,7 @@ contract AIComplianceModule is AccessControl, Pausable, ReentrancyGuard {
         AppealStatus status;
         address reviewer;                // Compliance officer reviewing
         bytes32 reviewReasonHash;        // Hash of review reasoning
-        DecisionOutcome revisedOutcome;  // New outcome if overturned
+        DecisionOutcome revisedOutcome;  // Effective outcome; original until overturned
         uint256 filedAt;
         uint256 resolvedAt;
     }
@@ -387,7 +387,7 @@ contract AIComplianceModule is AccessControl, Pausable, ReentrancyGuard {
             status: AppealStatus.PENDING,
             reviewer: address(0),
             reviewReasonHash: bytes32(0),
-            revisedOutcome: DecisionOutcome.APPROVED, // placeholder
+            revisedOutcome: d.outcome,
             filedAt: block.timestamp,
             resolvedAt: 0
         });

@@ -1,12 +1,16 @@
 import { Router, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../lib/db";
 import { AuthenticatedRequest, authenticateAPIKey } from "../middleware/auth";
-import { validate, ListAuditSchema, AuditExportSchema } from "../middleware/validation";
-import { AuditService } from "../services/audit";
+import {
+  validate,
+  ListAuditSchema,
+  AuditExportSchema,
+  type ListAuditInput,
+} from "../middleware/validation";
+import { AuditError, AuditService } from "../services/audit";
 import { extractRole, requirePermission } from "../middleware/rbac";
 import { logger } from "../lib/logger";
 
-const prisma = new PrismaClient();
 const auditService = new AuditService(prisma);
 
 const router = Router();
@@ -21,9 +25,10 @@ router.get(
   validate(ListAuditSchema, "query"),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
+      const query = req.query as unknown as ListAuditInput;
       const result = await auditService.listAuditEntries({
-        ...(req.query as any),
-        businessId: req.businessId,
+        ...query,
+        businessId: req.businessId!,
       });
 
       res.json({
@@ -47,9 +52,9 @@ router.get(
   authenticateAPIKey,
   extractRole,
   requirePermission("audit:read"),
-  async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const result = await auditService.verifyChainIntegrity();
+      const result = await auditService.verifyChainIntegrity(req.businessId!);
 
       res.json({
         success: true,
@@ -68,9 +73,9 @@ router.get(
   authenticateAPIKey,
   extractRole,
   requirePermission("audit:read"),
-  async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const stats = await auditService.getAuditStats();
+      const stats = await auditService.getAuditStats(req.businessId!);
 
       res.json({
         success: true,
@@ -91,7 +96,10 @@ router.get(
   requirePermission("audit:read"),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const entry = await auditService.getAuditEntry(req.params.id);
+      const entry = await auditService.getAuditEntry(
+        req.params.id,
+        req.businessId!,
+      );
 
       if (!entry) {
         res.status(404).json({
@@ -126,7 +134,7 @@ router.post(
     try {
       const result = await auditService.generateExport({
         ...req.body,
-        businessId: req.businessId,
+        businessId: req.businessId!,
       });
 
       // Set appropriate content type
@@ -157,6 +165,12 @@ router.post(
 // ─── Error Handler ──────────────────────────────────────────────────────────
 
 function handleError(error: unknown, res: Response): void {
+  if (error instanceof AuditError) {
+    res
+      .status(error.statusCode)
+      .json({ error: error.code, message: error.message });
+    return;
+  }
   logger.error("Unhandled audit error", {
     error: (error as Error).message,
     stack: (error as Error).stack,

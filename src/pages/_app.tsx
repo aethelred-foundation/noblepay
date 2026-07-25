@@ -14,8 +14,10 @@ import { useState, useEffect } from "react";
 import { WagmiProvider } from "wagmi";
 import { wagmiConfig } from "@/config/wagmi";
 import { AppProvider, useApp } from "@/contexts/AppContext";
+import { AuthProvider } from "@/contexts/AuthContext";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ToastContainer, SearchOverlay } from "@/components/SharedComponents";
+import { NetworkAnchorGate } from "@/components/NetworkAnchorGate";
 import "../styles/globals.css";
 
 function AppInner({ Component, pageProps }: AppProps) {
@@ -64,11 +66,15 @@ export default function App(props: AppProps) {
 
   return (
     <WagmiProvider config={wagmiConfig}>
-      <QueryClientProvider client={queryClient}>
-        <AppProvider>
-          <AppInner {...props} />
-        </AppProvider>
-      </QueryClientProvider>
+      <NetworkAnchorGate>
+        <QueryClientProvider client={queryClient}>
+          <AppProvider>
+            <AuthProvider>
+              <AppInner {...props} />
+            </AuthProvider>
+          </AppProvider>
+        </QueryClientProvider>
+      </NetworkAnchorGate>
     </WagmiProvider>
   );
 }

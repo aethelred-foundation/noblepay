@@ -4,6 +4,7 @@ pragma solidity ^0.8.19;
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/interfaces/IERC3156FlashBorrower.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
@@ -124,6 +125,10 @@ contract LiquidityPool is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Maximum flash fee rate: 50 bp = 0.5%.
     uint256 public constant MAX_FLASH_FEE_RATE_BP = 50;
 
+    /// @dev Success value required from an ERC-3156 borrower callback.
+    bytes32 private constant FLASH_CALLBACK_SUCCESS =
+        keccak256("ERC3156FlashBorrower.onFlashLoan");
+
     /// @notice Minimum liquidity to prevent dust positions.
     uint256 public constant MIN_LIQUIDITY = 1000;
 
@@ -241,6 +246,8 @@ contract LiquidityPool is AccessControl, Pausable, ReentrancyGuard {
     error InvalidTickRange(int24 tickLower, int24 tickUpper);
     error TickNotAligned(int24 tick);
     error InsufficientLiquidity(uint256 requested, uint256 available);
+    error InvalidFlashLoanReceiver(address receiver);
+    error InvalidFlashLoanCallback(bytes32 returnedValue);
     error FlashLoanNotRepaid(bytes32 flashLoanId);
     error CircuitBreakerActive(bytes32 poolId);
     error CooldownNotElapsed(uint256 remaining);
@@ -513,8 +520,11 @@ contract LiquidityPool is AccessControl, Pausable, ReentrancyGuard {
 
     /**
      * @notice Initiates a flash liquidity loan (borrow + repay in same tx).
-     * @dev The borrower must repay principal + fee before the transaction ends.
-     *      Implement IFlashLoanReceiver.executeOperation in the calling contract.
+     * @dev The caller is the receiver and must implement
+     *      {IERC3156FlashBorrower-onFlashLoan}. The callback must return the
+     *      ERC-3156 success value and approve this contract to pull principal
+     *      plus fee before returning. The pre-loan token balance is checked
+     *      after collection so existing donations cannot satisfy repayment.
      * @param _poolId Pool to borrow from.
      * @param _token  Token to borrow (must be token0 or token1 of the pool).
      * @param _amount Amount to borrow.
@@ -539,6 +549,11 @@ contract LiquidityPool is AccessControl, Pausable, ReentrancyGuard {
         uint256 available = _token == pool.token0 ? pool.reserveToken0 : pool.reserveToken1;
         if (_amount > available) revert InsufficientLiquidity(_amount, available);
 
+        IERC20 loanToken = IERC20(_token);
+        uint256 balanceBefore = loanToken.balanceOf(address(this));
+        if (balanceBefore < available) revert InsufficientLiquidity(available, balanceBefore);
+        if (msg.sender.code.length == 0) revert InvalidFlashLoanReceiver(msg.sender);
+
         uint256 fee = (_amount * pool.flashFeeRateBP) / 10_000;
 
         flashLoanId = keccak256(
@@ -555,17 +570,30 @@ contract LiquidityPool is AccessControl, Pausable, ReentrancyGuard {
             repaid: false
         });
 
-        // Transfer borrowed amount to borrower
-        IERC20(_token).safeTransfer(msg.sender, _amount);
+        // Transfer first, then let the receiver use the liquidity atomically.
+        loanToken.safeTransfer(msg.sender, _amount);
 
         emit FlashLoanInitiated(flashLoanId, _poolId, msg.sender, _token, _amount, fee);
 
-        // Borrower executes their logic via callback data (off-chain coordination)
-        // Repayment must happen via repayFlashLoan before tx ends
+        bytes32 callbackResult = IERC3156FlashBorrower(msg.sender).onFlashLoan(
+            msg.sender,
+            _token,
+            _amount,
+            fee,
+            _data
+        );
+        if (callbackResult != FLASH_CALLBACK_SUCCESS) {
+            revert InvalidFlashLoanCallback(callbackResult);
+        }
 
-        // Verify repayment at the end of the call
-        uint256 balanceAfter = IERC20(_token).balanceOf(address(this));
-        uint256 expectedBalance = available + fee;
+        // ERC-3156 receivers approve repayment during the callback. Pulling an
+        // exact amount avoids relying on an unauthenticated direct transfer.
+        loanToken.safeTransferFrom(msg.sender, address(this), _amount + fee);
+
+        // Fee-on-transfer and other non-standard tokens may report a successful
+        // transfer while delivering too little, so verify the real balance too.
+        uint256 balanceAfter = loanToken.balanceOf(address(this));
+        uint256 expectedBalance = balanceBefore + fee;
         if (balanceAfter < expectedBalance) revert FlashLoanNotRepaid(flashLoanId);
 
         flashLoans[flashLoanId].repaid = true;

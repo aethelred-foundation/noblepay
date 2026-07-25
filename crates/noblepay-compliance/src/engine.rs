@@ -15,7 +15,7 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::aml::RiskScoringModel;
-use crate::attestation::{AttestationGenerator, AttestationReport};
+use crate::attestation::AttestationGenerator;
 use crate::behavioral::BehavioralEngine;
 use crate::corridor_analysis::CorridorAnalyzer;
 use crate::graph_analysis::TransactionGraph;
@@ -126,10 +126,17 @@ pub struct ComplianceEngine {
 }
 
 impl ComplianceEngine {
-    /// Initialize the engine with default configuration and pre-loaded sanctions
-    /// lists.
+    /// Initialize the local/test fixture engine. This constructor is absent
+    /// from ordinary builds so fixture sanctions and model data cannot be
+    /// selected by production runtime configuration.
+    #[cfg(any(test, feature = "mock-tee"))]
     pub async fn new() -> Self {
         let sanctions = SanctionsDatabase::with_default_lists().await;
+        Self::with_sanctions(sanctions).await
+    }
+
+    #[cfg(any(test, feature = "mock-tee"))]
+    async fn with_sanctions(sanctions: SanctionsDatabase) -> Self {
         info!(
             entries = sanctions.total_entries().await,
             "compliance engine initialized"
@@ -167,7 +174,11 @@ impl ComplianceEngine {
         let deadline = Duration::from_millis(timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
         let start = Instant::now();
 
-        let result = timeout(deadline, self.screen_payment_inner(payment, travel_rule_data)).await;
+        let result = timeout(
+            deadline,
+            self.screen_payment_inner(payment, travel_rule_data),
+        )
+        .await;
 
         self.handle_screening_result(result, payment, start)
     }
@@ -251,8 +262,7 @@ impl ComplianceEngine {
         }
 
         // ------ 2. AML risk scoring ------
-        let (aml_score, _aml_level, risk_factors) =
-            self.aml.calculate_risk(payment, None, None);
+        let (aml_score, _aml_level, risk_factors) = self.aml.calculate_risk(payment, None, None);
 
         // ------ 2b. ML risk scoring (ensemble model) ------
         let features = crate::ml_risk::FeatureVector::from_payment(payment, None);
@@ -278,12 +288,11 @@ impl ComplianceEngine {
         }
 
         // Composite risk: weighted blend of AML, ML, behavioral, and corridor
-        let composite_aml = (
-            (aml_score as f64 * 0.30)
+        let composite_aml = ((aml_score as f64 * 0.30)
             + (ml_risk_score * 0.25)
             + (behavioral_score.score as f64 * 0.25)
-            + (corridor_result.risk_score as f64 * 0.20)
-        ).min(100.0) as u8;
+            + (corridor_result.risk_score as f64 * 0.20))
+            .min(100.0) as u8;
 
         // Use the composite score instead of raw aml_score for status determination
         let aml_score = composite_aml;
@@ -352,10 +361,7 @@ impl ComplianceEngine {
     ///
     /// Each payment is screened independently; a failure in one does not affect
     /// the others.
-    pub async fn screen_batch(
-        &self,
-        requests: Vec<ScreeningRequest>,
-    ) -> BatchScreeningResponse {
+    pub async fn screen_batch(&self, requests: Vec<ScreeningRequest>) -> BatchScreeningResponse {
         let mut handles = Vec::with_capacity(requests.len());
 
         for req in &requests {
@@ -434,12 +440,19 @@ impl ComplianceEngine {
 
     /// Trigger a refresh of all sanctions lists.
     pub async fn refresh_sanctions_lists(&self) -> Result<(), ComplianceError> {
-        self.sanctions.load_ofac_list().await;
-        self.sanctions.load_uae_list().await;
-        self.sanctions.load_un_list().await;
-        self.sanctions.load_eu_list().await;
-        info!("sanctions lists refreshed");
-        Ok(())
+        #[cfg(any(test, feature = "mock-tee"))]
+        {
+            self.sanctions.load_ofac_list().await;
+            self.sanctions.load_uae_list().await;
+            self.sanctions.load_un_list().await;
+            self.sanctions.load_eu_list().await;
+            info!("sanctions lists refreshed");
+            Ok(())
+        }
+        #[cfg(not(any(test, feature = "mock-tee")))]
+        {
+            self.sanctions.refresh_configured().await
+        }
     }
 
     /// Get a reference to the sanctions database (for health checks).
@@ -476,7 +489,10 @@ impl ComplianceEngine {
     }
 
     /// Analyze a payment corridor for risk.
-    pub fn analyze_corridor(&self, payment: &Payment) -> crate::corridor_analysis::CorridorAnalysisResult {
+    pub fn analyze_corridor(
+        &self,
+        payment: &Payment,
+    ) -> crate::corridor_analysis::CorridorAnalysisResult {
         let mut corridor = self.corridor.lock().unwrap();
         corridor.analyze_payment(payment)
     }
@@ -517,7 +533,10 @@ mod tests {
     #[tokio::test]
     async fn clean_payment_passes() {
         let engine = ComplianceEngine::new().await;
-        let result = engine.screen_payment(&clean_payment(), None, None).await.unwrap();
+        let result = engine
+            .screen_payment(&clean_payment(), None, None)
+            .await
+            .unwrap();
         assert!(result.sanctions_clear);
         assert_ne!(result.status, ComplianceStatus::Blocked);
         assert!(!result.attestation.is_empty());
@@ -561,8 +580,14 @@ mod tests {
     #[tokio::test]
     async fn metrics_are_recorded() {
         let engine = ComplianceEngine::new().await;
-        engine.screen_payment(&clean_payment(), None, None).await.unwrap();
-        engine.screen_payment(&clean_payment(), None, None).await.unwrap();
+        engine
+            .screen_payment(&clean_payment(), None, None)
+            .await
+            .unwrap();
+        engine
+            .screen_payment(&clean_payment(), None, None)
+            .await
+            .unwrap();
 
         let m = engine.metrics();
         assert_eq!(m.total_screened, 2);
@@ -627,7 +652,14 @@ mod tests {
     async fn build_behavioral_profiles_then_score() {
         let engine = ComplianceEngine::new().await;
         let payments: Vec<Payment> = (0..10)
-            .map(|i| Payment::test_payment("profiled-sender", &format!("r{}", i % 3), (i + 1) * 1000, "USD"))
+            .map(|i| {
+                Payment::test_payment(
+                    "profiled-sender",
+                    &format!("r{}", i % 3),
+                    (i + 1) * 1000,
+                    "USD",
+                )
+            })
             .collect();
         engine.build_behavioral_profiles(&payments);
         let payment = Payment::test_payment("profiled-sender", "r0", 5000, "USD");
@@ -700,7 +732,10 @@ mod tests {
     #[test]
     fn metrics_record_passed() {
         let m = ComplianceMetrics::default();
-        m.record(ComplianceStatus::Passed, std::time::Duration::from_millis(10));
+        m.record(
+            ComplianceStatus::Passed,
+            std::time::Duration::from_millis(10),
+        );
         let snap = m.snapshot();
         assert_eq!(snap.total_screened, 1);
         assert_eq!(snap.total_passed, 1);
@@ -711,7 +746,10 @@ mod tests {
     #[test]
     fn metrics_record_flagged() {
         let m = ComplianceMetrics::default();
-        m.record(ComplianceStatus::Flagged, std::time::Duration::from_millis(10));
+        m.record(
+            ComplianceStatus::Flagged,
+            std::time::Duration::from_millis(10),
+        );
         let snap = m.snapshot();
         assert_eq!(snap.total_flagged, 1);
     }
@@ -719,7 +757,10 @@ mod tests {
     #[test]
     fn metrics_record_blocked() {
         let m = ComplianceMetrics::default();
-        m.record(ComplianceStatus::Blocked, std::time::Duration::from_millis(10));
+        m.record(
+            ComplianceStatus::Blocked,
+            std::time::Duration::from_millis(10),
+        );
         let snap = m.snapshot();
         assert_eq!(snap.total_blocked, 1);
     }
@@ -736,8 +777,14 @@ mod tests {
     #[test]
     fn metrics_avg_duration_computed() {
         let m = ComplianceMetrics::default();
-        m.record(ComplianceStatus::Passed, std::time::Duration::from_millis(100));
-        m.record(ComplianceStatus::Passed, std::time::Duration::from_millis(200));
+        m.record(
+            ComplianceStatus::Passed,
+            std::time::Duration::from_millis(100),
+        );
+        m.record(
+            ComplianceStatus::Passed,
+            std::time::Duration::from_millis(200),
+        );
         let snap = m.snapshot();
         assert_eq!(snap.total_screened, 2);
         // Average should be around 150ms
@@ -777,15 +824,11 @@ mod tests {
         let engine = ComplianceEngine::new().await;
         // Use an extremely short timeout (1ms) — may or may not timeout
         // depending on system speed. We just verify the plumbing works.
-        let result = engine
-            .screen_payment(&clean_payment(), None, Some(1))
-            .await;
+        let result = engine.screen_payment(&clean_payment(), None, Some(1)).await;
         // Either Ok or Timeout error — both are valid outcomes
         match &result {
             Ok(_) => { /* fast enough */ }
-            Err(ComplianceError::Timeout(ms)) => {
-                assert!(*ms >= 0, "timeout duration should be >= 0");
-            }
+            Err(ComplianceError::Timeout(_)) => { /* deadline elapsed as permitted */ }
             Err(e) => panic!("unexpected error: {e}"),
         }
     }
@@ -799,10 +842,7 @@ mod tests {
         let engine = ComplianceEngine::new().await;
         // Recipient is sanctioned
         let payment = Payment::test_payment("clean-sender", "BLOCKED PERSON ALPHA", 50_000, "USD");
-        let result = engine
-            .screen_payment(&payment, None, None)
-            .await
-            .unwrap();
+        let result = engine.screen_payment(&payment, None, None).await.unwrap();
         assert!(!result.sanctions_clear);
         assert_eq!(result.status, ComplianceStatus::Blocked);
         assert_eq!(result.aml_risk_score, 100);
@@ -818,14 +858,12 @@ mod tests {
         // Large payment without travel rule data — should be flagged
         // (travel_rule_compliant will be false for large payments without data)
         let payment = Payment::test_payment("sender", "recipient", 500_000, "USD");
-        let result = engine
-            .screen_payment(&payment, None, None)
-            .await
-            .unwrap();
+        let result = engine.screen_payment(&payment, None, None).await.unwrap();
         // Without travel rule data, above-threshold payments are not compliant
         // This should trigger at least Flagged status
         assert!(
-            result.status == ComplianceStatus::Flagged || result.status == ComplianceStatus::Blocked,
+            result.status == ComplianceStatus::Flagged
+                || result.status == ComplianceStatus::Blocked,
             "Large payment without travel rule data should be flagged or blocked, got {:?}",
             result.status
         );
@@ -905,12 +943,11 @@ mod tests {
     #[tokio::test]
     async fn handle_screening_result_ok_ok() {
         let engine = ComplianceEngine::new().await;
-        let cr = engine.screen_payment_inner(&clean_payment(), None).await.unwrap();
-        let result = engine.handle_screening_result(
-            Ok(Ok(cr)),
-            &clean_payment(),
-            Instant::now(),
-        );
+        let cr = engine
+            .screen_payment_inner(&clean_payment(), None)
+            .await
+            .unwrap();
+        let result = engine.handle_screening_result(Ok(Ok(cr)), &clean_payment(), Instant::now());
         assert!(result.is_ok());
         let m = engine.metrics();
         assert!(m.total_screened > 0);
@@ -920,11 +957,8 @@ mod tests {
     async fn handle_screening_result_ok_err() {
         let engine = ComplianceEngine::new().await;
         let inner_err = ComplianceError::AmlError("test error".into());
-        let result = engine.handle_screening_result(
-            Ok(Err(inner_err)),
-            &clean_payment(),
-            Instant::now(),
-        );
+        let result =
+            engine.handle_screening_result(Ok(Err(inner_err)), &clean_payment(), Instant::now());
         assert!(result.is_err());
         let m = engine.metrics();
         assert_eq!(m.total_errors, 1);
@@ -937,11 +971,7 @@ mod tests {
         let elapsed = timeout(Duration::from_nanos(0), std::future::pending::<()>())
             .await
             .unwrap_err();
-        let result = engine.handle_screening_result(
-            Err(elapsed),
-            &clean_payment(),
-            Instant::now(),
-        );
+        let result = engine.handle_screening_result(Err(elapsed), &clean_payment(), Instant::now());
         match result {
             Err(ComplianceError::Timeout(ms)) => {
                 assert!(ms <= 100);
@@ -1021,7 +1051,12 @@ mod tests {
     async fn extremely_high_value_may_trigger_block_via_aml() {
         let engine = ComplianceEngine::new().await;
         // Massive payment: should produce very high AML, ML, and behavioral scores
-        let payment = Payment::test_payment("unknown-sender-xyz", "unknown-recipient-abc", 100_000_000, "USD");
+        let payment = Payment::test_payment(
+            "unknown-sender-xyz",
+            "unknown-recipient-abc",
+            100_000_000,
+            "USD",
+        );
         let result = engine.screen_payment(&payment, None, None).await.unwrap();
         assert!(
             result.aml_risk_score > 0,
@@ -1108,9 +1143,17 @@ mod tests {
         assert!(batch.results[0].result.is_some());
         // Second and third should be errors
         assert!(!batch.results[1].success);
-        assert!(batch.results[1].error.as_ref().unwrap().contains("timed out"));
+        assert!(batch.results[1]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("timed out"));
         assert!(!batch.results[2].success);
-        assert!(batch.results[2].error.as_ref().unwrap().contains("task join error"));
+        assert!(batch.results[2]
+            .error
+            .as_ref()
+            .unwrap()
+            .contains("task join error"));
     }
 
     #[test]

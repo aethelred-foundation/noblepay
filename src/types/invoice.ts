@@ -11,12 +11,12 @@
 export type InvoiceStatus =
   | "Draft"
   | "Issued"
-  | "Accepted"
   | "Financed"
   | "Paid"
   | "Overdue"
   | "Disputed"
-  | "Cancelled";
+  | "Cancelled"
+  | "WrittenOff";
 
 /** An invoice record for cross-border trade financing */
 export interface Invoice {
@@ -26,14 +26,14 @@ export interface Invoice {
   invoiceNumber: string;
   /** Issuer wallet address */
   issuer: string;
-  /** Issuer business name */
-  issuerName: string;
   /** Payer wallet address */
   payer: string;
   /** Payer business name */
   payerName: string;
   /** Invoice amount */
   amount: number;
+  outstandingAmount: number;
+  financedAmount: number;
   /** Currency symbol */
   currency: string;
   /** Invoice status */
@@ -48,14 +48,9 @@ export interface Invoice {
   daysUntilDue: number;
   /** Description of goods/services */
   description: string;
-  /** Associated payment ID, if settled on-chain */
-  paymentId?: string;
-  /** Whether this invoice has been tokenized as an NFT */
-  tokenized: boolean;
-  /** NFT token ID, if tokenized */
-  tokenId?: string;
-  /** IPFS hash of invoice document */
-  documentHash?: string;
+  settlementReference: string | null;
+  discountRate: number | null;
+  creditScore: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -64,12 +59,7 @@ export interface Invoice {
 
 /** Financing request status */
 export type FinancingStatus =
-  | "Pending"
-  | "Approved"
-  | "Funded"
-  | "Repaid"
-  | "Defaulted"
-  | "Rejected";
+  "PENDING" | "APPROVED" | "FUNDED" | "REPAID" | "DEFAULTED" | "REJECTED";
 
 /** A financing request against an invoice */
 export interface FinancingRequest {
@@ -77,32 +67,16 @@ export interface FinancingRequest {
   id: string;
   /** Invoice being financed */
   invoiceId: string;
-  /** Invoice number for display */
-  invoiceNumber: string;
-  /** Borrower wallet address */
-  borrower: string;
-  /** Requested financing amount */
-  requestedAmount: number;
-  /** Approved financing amount */
-  approvedAmount: number;
-  /** Advance rate as percentage (e.g. 80 = 80% of invoice value) */
-  advanceRate: number;
-  /** Interest rate (annualized percentage) */
-  interestRate: number;
-  /** Financing fee (flat, USD) */
-  fee: number;
+  /** Requested financing amount. */
+  amount: number;
+  discountRate: number | null;
+  netProceeds: number | null;
+  factor: string | null;
+  termDays: number;
   /** Financing status */
   status: FinancingStatus;
-  /** Borrower credit score at time of request */
-  creditScore: number;
-  /** Request timestamp (Unix ms) */
-  requestedAt: number;
-  /** Funding timestamp (Unix ms), 0 if not funded */
-  fundedAt: number;
-  /** Repayment due date (Unix ms) */
-  repaymentDueAt: number;
-  /** Amount repaid so far */
-  amountRepaid: number;
+  externalReference: string | null;
+  createdAt: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -111,30 +85,15 @@ export interface FinancingRequest {
 
 /** Credit score for invoice financing eligibility */
 export interface CreditScore {
-  /** Business wallet address */
-  address: string;
-  /** Business name */
-  businessName: string;
-  /** Overall credit score (300-850) */
-  score: number;
+  businessId: string;
+  /** Overall credit score, null until enough invoices have matured. */
+  score: number | null;
   /** Score grade */
-  grade: "AAA" | "AA" | "A" | "BBB" | "BB" | "B" | "CCC" | "D";
-  /** Maximum financing amount eligible (USD) */
-  maxFinancingAmount: number;
-  /** Maximum advance rate percentage */
-  maxAdvanceRate: number;
-  /** Base interest rate offered */
-  baseInterestRate: number;
-  /** Number of invoices used for scoring */
-  invoicesScored: number;
-  /** On-time payment rate (0-100) */
-  onTimePaymentRate: number;
-  /** Average days to pay */
-  avgDaysToPay: number;
-  /** Total financing volume to date (USD) */
-  totalFinancingVolume: number;
-  /** Default count */
-  defaultCount: number;
+  grade: "AAA" | "AA" | "A" | "BBB" | "BB" | "B" | "CCC" | "D" | "UNRATED";
+  sampleSize: number;
+  factors: Array<{ name: string; value: number; description: string }>;
+  history: Array<{ date: string; score: number }>;
+  methodology: string;
   /** Last updated timestamp (Unix ms) */
   updatedAt: number;
 }
@@ -145,27 +104,20 @@ export interface CreditScore {
 
 /** Aggregated invoice analytics for dashboard display */
 export interface InvoiceAnalytics {
-  /** Total invoices issued */
-  totalIssued: number;
+  totalReceivables: number;
   /** Total outstanding amount (USD) */
   totalOutstanding: number;
   /** Total overdue amount (USD) */
-  totalOverdue: number;
+  overdueAmount: number;
+  overdueCount: number;
   /** Total financed amount (USD) */
   totalFinanced: number;
   /** Average days to payment */
   avgDaysToPay: number;
-  /** On-time payment rate (0-100) */
-  onTimeRate: number;
-  /** Default rate (0-100) */
-  defaultRate: number;
-  /** Invoice volume by month */
-  monthlyVolume: {
-    month: string;
-    issued: number;
-    paid: number;
-    financed: number;
-  }[];
-  /** Analytics generation timestamp (Unix ms) */
-  generatedAt: number;
+  financingUtilization: number;
+  agingBuckets: Array<{ range: string; amount: number; count: number }>;
+  byCurrency: Record<
+    string,
+    { total: number; financed: number; count: number }
+  >;
 }

@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -20,80 +22,118 @@ type Server struct {
 	logger     *zap.Logger
 	cfg        *config.Config
 	indexer    *services.BlockchainIndexer
+	compliance *services.ComplianceProxy
 }
 
-// New creates and configures a new Server.
-func New(cfg *config.Config, logger *zap.Logger) *Server {
+// New creates a server without terminating the host process on setup errors.
+func New(cfg *config.Config, logger *zap.Logger) (*Server, error) {
+	if cfg.Environment != "test" {
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return nil, fmt.Errorf("GATEWAY_API_KEY is required outside test mode")
+		}
+		if strings.TrimSpace(cfg.WebhookSecret) == "" {
+			return nil, fmt.Errorf("WEBHOOK_SECRET is required outside test mode")
+		}
+		if cfg.IndexerConfirmations == 0 {
+			return nil, fmt.Errorf("INDEXER_CONFIRMATIONS must be at least 1 outside test mode")
+		}
+	}
 	var paymentStore store.PaymentStore
 	var eventStore store.EventStore
 
 	if cfg.StorePath != "" {
-		fs, err := store.NewFileStore(cfg.StorePath)
+		fileStore, err := store.NewFileStore(cfg.StorePath)
 		if err != nil {
-			logger.Fatal("failed to initialise file store", zap.Error(err))
+			return nil, fmt.Errorf("initialise durable store: %w", err)
 		}
-		paymentStore = fs
-		eventStore = fs
+		paymentStore = fileStore
+		eventStore = fileStore
 		logger.Info("store: file-backed durable store active", zap.String("path", cfg.StorePath))
+	} else if cfg.Environment == "test" {
+		memoryStore := store.NewMemoryStore()
+		paymentStore = memoryStore
+		eventStore = memoryStore
 	} else {
-		ms := store.NewMemoryStore()
-		paymentStore = ms
-		eventStore = ms
-		logger.Info("store: in-memory store active (data will not survive restarts)")
+		return nil, fmt.Errorf("durable STORE_PATH is required outside test mode")
 	}
 
-	// Services
-	complianceProxy := services.NewComplianceProxy(cfg.ComplianceURL, logger)
-	paymentSvc := services.NewPaymentService(paymentStore, complianceProxy, logger)
-	indexer := services.NewBlockchainIndexer(eventStore, logger)
-	settlementSvc := services.NewSettlementService(paymentStore, eventStore, logger)
+	complianceProxy := services.NewAuthenticatedComplianceProxy(
+		cfg.ComplianceAPIURL, cfg.ComplianceAPIKey, cfg.ComplianceTimeout,
+		cfg.ComplianceMaxAge, logger,
+	)
+	paymentService := services.NewPaymentQueryService(paymentStore, logger)
 
-	// Handlers
-	healthH := handlers.NewHealthHandler()
-	paymentH := handlers.NewPaymentHandler(paymentSvc)
-	webhookH := handlers.NewWebhookHandler(indexer, settlementSvc, logger, cfg.WebhookSecret)
+	var indexer *services.BlockchainIndexer
+	if cfg.Environment == "test" && cfg.ChainRPCURL == "" {
+		indexer = services.NewBlockchainIndexer(eventStore, logger)
+	} else {
+		indexer = services.NewAnchoredConfirmedRPCBlockchainIndexer(
+			eventStore, cfg.ChainRPCURL, cfg.NoblePayAddress,
+			cfg.IndexerStartBlock, cfg.IndexerConfirmations,
+			cfg.ChainID, cfg.NetworkAnchorBlock, cfg.NetworkAnchorHash,
+			cfg.IndexerPollInterval, logger,
+		)
+	}
+	settlementService := services.NewSettlementService(paymentStore, eventStore, logger)
 
-	// Router
-	r := chi.NewRouter()
+	ready := func() error {
+		if err := indexer.Ready(); err != nil {
+			return err
+		}
+		if cfg.Environment != "test" {
+			ctx, cancel := context.WithTimeout(context.Background(), cfg.ComplianceTimeout)
+			defer cancel()
+			if err := complianceProxy.Ready(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	healthHandler := handlers.NewReadinessHealthHandler(ready)
+	paymentHandler := handlers.NewPaymentHandler(paymentService)
+	webhookHandler := handlers.NewWebhookHandler(indexer, settlementService, logger, cfg.WebhookSecret)
 
-	// Global middleware
-	rateLimiter := handlers.NewRateLimiter(cfg.RateLimitRPS)
-	r.Use(handlers.RequestLogger(logger))
-	r.Use(rateLimiter.Middleware)
-
-	// Health endpoints (no auth)
-	r.Get("/healthz", healthH.Liveness)
-	r.Get("/readyz", healthH.Readiness)
-
-	// API routes (with auth)
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Use(handlers.APIKeyAuth(cfg.APIKey))
-
-		r.Post("/payments", paymentH.Submit)
-		r.Get("/payments", paymentH.List)
-		r.Get("/payments/{id}", paymentH.GetByID)
-		r.Post("/payments/{id}/cancel", paymentH.Cancel)
-
-		r.Post("/webhooks/events", webhookH.HandleEvent)
+	router := chi.NewRouter()
+	rateLimiter, err := handlers.NewRateLimiterWithTrustedProxies(cfg.RateLimitRPS, cfg.TrustedProxyCIDRs)
+	if err != nil {
+		return nil, fmt.Errorf("configure trusted proxies: %w", err)
+	}
+	router.Use(handlers.RequestLogger(logger))
+	router.Use(rateLimiter.Middleware)
+	router.Use(handlers.LimitRequestBody(1 << 20))
+	router.Get("/healthz", healthHandler.Liveness)
+	router.Get("/readyz", healthHandler.Readiness)
+	router.Route("/api/v1", func(router chi.Router) {
+		router.Use(handlers.APIKeyAuth(cfg.APIKey))
+		router.Group(func(reads chi.Router) {
+			reads.Use(handlers.RequireProjectionReady(indexer.Ready))
+			reads.Get("/payments", paymentHandler.List)
+			reads.Get("/payments/{id}", paymentHandler.GetByID)
+		})
+		router.Post("/webhooks/events", webhookHandler.HandleEvent)
 	})
 
 	return &Server{
 		httpServer: &http.Server{
-			Addr:         ":" + cfg.Port,
-			Handler:      r,
-			ReadTimeout:  10 * time.Second,
-			WriteTimeout: 10 * time.Second,
-			IdleTimeout:  60 * time.Second,
+			Addr: ":" + cfg.Port, Handler: router,
+			ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+			WriteTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second,
+			MaxHeaderBytes: 16 << 10,
 		},
-		logger:  logger,
-		cfg:     cfg,
-		indexer: indexer,
-	}
+		logger: logger, cfg: cfg, indexer: indexer, compliance: complianceProxy,
+	}, nil
 }
 
-// Start begins listening and serving requests, and starts the blockchain indexer.
+// Start validates external dependencies before listening.
 func (s *Server) Start(ctx context.Context) error {
-	s.indexer.Start(ctx)
+	if s.cfg.Environment != "test" {
+		if err := s.compliance.Ready(ctx); err != nil {
+			return fmt.Errorf("compliance dependency is not ready: %w", err)
+		}
+	}
+	if err := s.indexer.Start(ctx); err != nil {
+		return fmt.Errorf("chain indexer failed to start: %w", err)
+	}
 	s.logger.Info("server starting", zap.String("addr", s.httpServer.Addr))
 	return s.httpServer.ListenAndServe()
 }

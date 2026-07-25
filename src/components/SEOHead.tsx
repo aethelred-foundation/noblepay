@@ -1,4 +1,5 @@
 import Head from "next/head";
+import { PUBLIC_SITE_URL } from "@/config/site";
 
 interface SEOHeadProps {
   title: string;
@@ -12,14 +13,13 @@ interface SEOHeadProps {
  */
 export function SEOHead({ title, description, path = "" }: SEOHeadProps) {
   const fullTitle = `${title} | NoblePay`;
-  const baseUrl = "https://noblepay.aethelred.network";
-  const ogImage = `${baseUrl}/og-image.svg`;
+  const ogImage = `${PUBLIC_SITE_URL}/og-image.svg`;
 
   return (
     <Head>
       <title>{fullTitle}</title>
       <meta name="description" content={description} />
-      <link rel="canonical" href={`${baseUrl}${path}`} />
+      <link rel="canonical" href={`${PUBLIC_SITE_URL}${path}`} />
 
       {/* Open Graph */}
       <meta property="og:title" content={fullTitle} />
@@ -27,7 +27,7 @@ export function SEOHead({ title, description, path = "" }: SEOHeadProps) {
       <meta property="og:type" content="website" />
       <meta property="og:site_name" content="NoblePay" />
       <meta property="og:image" content={ogImage} />
-      <meta property="og:url" content={`${baseUrl}${path}`} />
+      <meta property="og:url" content={`${PUBLIC_SITE_URL}${path}`} />
 
       {/* Twitter Card */}
       <meta name="twitter:card" content="summary_large_image" />

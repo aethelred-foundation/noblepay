@@ -74,7 +74,9 @@ const bytecode = `0x${readFileSync(
   "utf8",
 ).trim()}`;
 if (bytecode.length < 4) {
-  console.error("No creation bytecode in scripts/artifacts/SealSettlementGate.bin");
+  console.error(
+    "No creation bytecode in scripts/artifacts/SealSettlementGate.bin",
+  );
   process.exit(2);
 }
 
@@ -114,7 +116,9 @@ let GATE_ADDRESS = process.env.GATE_ADDRESS;
 // lags just-committed state (e.g. right after a deploy) and would under-shoot.
 // WRITE_GAS/DEPLOY_GAS override the estimate entirely if ever needed.
 const WRITE_GAS = process.env.WRITE_GAS ? BigInt(process.env.WRITE_GAS) : null;
-const DEPLOY_GAS = process.env.DEPLOY_GAS ? BigInt(process.env.DEPLOY_GAS) : null;
+const DEPLOY_GAS = process.env.DEPLOY_GAS
+  ? BigInt(process.env.DEPLOY_GAS)
+  : null;
 const FLOOR_WRITE = 800_000n;
 const FLOOR_DEPLOY = 6_000_000n;
 const withHeadroom = (estimate, floor) => {
@@ -238,7 +242,9 @@ async function main() {
     return;
   }
 
-  step(`clear(payer, payee, ${JOB_ID}) — verify seal via ISeal + record clearance`);
+  step(
+    `clear(payer, payee, ${JOB_ID}) — verify seal via ISeal + record clearance`,
+  );
   await write("clear", [PAYER, PAYEE, JOB_ID]);
   const after = await read("isCleared", [PAYER, PAYEE]);
   if (!after) fail("corridor not cleared after clear()");

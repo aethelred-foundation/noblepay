@@ -1,13 +1,41 @@
-import { PrismaClient, Prisma } from "@prisma/client";
-import crypto from "crypto";
-import { logger } from "../lib/logger";
+import {
+  Prisma,
+  PrismaClient,
+  type SpendingPolicy as StoredPolicy,
+  type TreasuryProposal as StoredProposal,
+  type YieldStrategy as StoredStrategy,
+} from "@prisma/client";
 import { AuditService } from "./audit";
 
-// ─── Types ──────────────────────────────────────────────────────────────────
+export type ProposalStatus =
+  "PENDING" | "APPROVED" | "EXECUTED" | "REJECTED" | "EXPIRED";
+export type ProposalType =
+  "TRANSFER" | "POLICY_CHANGE" | "YIELD_ALLOCATION" | "EMERGENCY";
+export type SpendingCategory =
+  | "OPERATIONS"
+  | "PAYROLL"
+  | "MARKETING"
+  | "DEVELOPMENT"
+  | "COMPLIANCE"
+  | "INFRASTRUCTURE"
+  | "OTHER";
 
-export type ProposalStatus = "PENDING" | "APPROVED" | "EXECUTED" | "REJECTED" | "CANCELLED" | "EXPIRED";
-export type ProposalType = "TRANSFER" | "BUDGET_ALLOCATION" | "YIELD_STRATEGY" | "SIGNER_ROTATION" | "POLICY_CHANGE" | "EMERGENCY";
-export type SpendingCategory = "OPERATIONS" | "PAYROLL" | "MARKETING" | "DEVELOPMENT" | "COMPLIANCE" | "INFRASTRUCTURE" | "OTHER";
+const SPENDING_CATEGORIES: SpendingCategory[] = [
+  "OPERATIONS",
+  "PAYROLL",
+  "MARKETING",
+  "DEVELOPMENT",
+  "COMPLIANCE",
+  "INFRASTRUCTURE",
+  "OTHER",
+];
+
+const PROPOSAL_TYPES: ProposalType[] = [
+  "TRANSFER",
+  "POLICY_CHANGE",
+  "YIELD_ALLOCATION",
+  "EMERGENCY",
+];
 
 export interface CreateProposalInput {
   title: string;
@@ -22,63 +50,33 @@ export interface CreateProposalInput {
 }
 
 export interface SpendingPolicy {
-  category: SpendingCategory;
+  id: string;
+  category: string;
   dailyLimit: string;
-  weeklyLimit: string;
+  weeklyLimit: null;
   monthlyLimit: string;
   requiresApproval: boolean;
   minApprovals: number;
+  active: boolean;
+  updatedAt: Date;
+  dataSource: "DATABASE_POLICY";
 }
 
 export interface YieldStrategy {
   id: string;
   protocol: string;
+  name: string;
   allocation: string;
   currency: string;
   currentAPY: number;
-  riskLevel: "LOW" | "MEDIUM" | "HIGH";
+  riskLevel: string;
   active: boolean;
+  totalYieldEarned: string;
+  lastHarvestAt: Date | null;
+  dataSource: "DATABASE_STRATEGY";
 }
 
-export interface TreasuryOverview {
-  totalAUM: string;
-  allocations: Record<string, string>;
-  yieldEarned: string;
-  pendingProposals: number;
-  activeStrategies: number;
-  signerCount: number;
-  monthlySpend: Record<SpendingCategory, string>;
-}
-
-export interface ApprovalThreshold {
-  minAmount: string;
-  maxAmount: string;
-  requiredApprovals: number;
-  timelockHours: number;
-}
-
-// ─── Constants ──────────────────────────────────────────────────────────────
-
-const APPROVAL_THRESHOLDS: ApprovalThreshold[] = [
-  { minAmount: "0", maxAmount: "10000", requiredApprovals: 2, timelockHours: 0 },
-  { minAmount: "10000", maxAmount: "100000", requiredApprovals: 3, timelockHours: 6 },
-  { minAmount: "100000", maxAmount: "1000000", requiredApprovals: 4, timelockHours: 24 },
-  { minAmount: "1000000", maxAmount: "999999999", requiredApprovals: 5, timelockHours: 48 },
-];
-
-const DEFAULT_SPENDING_POLICIES: SpendingPolicy[] = [
-  { category: "OPERATIONS", dailyLimit: "50000", weeklyLimit: "200000", monthlyLimit: "500000", requiresApproval: false, minApprovals: 0 },
-  { category: "PAYROLL", dailyLimit: "500000", weeklyLimit: "500000", monthlyLimit: "2000000", requiresApproval: true, minApprovals: 2 },
-  { category: "MARKETING", dailyLimit: "10000", weeklyLimit: "50000", monthlyLimit: "150000", requiresApproval: true, minApprovals: 2 },
-  { category: "DEVELOPMENT", dailyLimit: "25000", weeklyLimit: "100000", monthlyLimit: "300000", requiresApproval: true, minApprovals: 2 },
-  { category: "COMPLIANCE", dailyLimit: "100000", weeklyLimit: "300000", monthlyLimit: "1000000", requiresApproval: true, minApprovals: 3 },
-  { category: "INFRASTRUCTURE", dailyLimit: "20000", weeklyLimit: "80000", monthlyLimit: "250000", requiresApproval: true, minApprovals: 2 },
-  { category: "OTHER", dailyLimit: "5000", weeklyLimit: "20000", monthlyLimit: "50000", requiresApproval: true, minApprovals: 3 },
-];
-
-// ─── Service ────────────────────────────────────────────────────────────────
-
-interface StoredProposal {
+export interface TreasuryProposalRecord {
   id: string;
   title: string;
   description: string;
@@ -93,601 +91,610 @@ interface StoredProposal {
   requiredApprovals: number;
   currentApprovals: number;
   approvers: string[];
-  rejectors: string[];
-  timelockHours: number;
   executeAfter: Date | null;
   createdAt: Date;
   expiresAt: Date;
+  executedAt: Date | null;
   metadata: Record<string, unknown>;
+  dataSource: "DATABASE_WORKFLOW";
 }
 
+export interface TreasuryOverview {
+  totalAUM: string;
+  allocations: Record<string, string>;
+  yieldEarned: string;
+  pendingProposals: number;
+  activeStrategies: number;
+  signerCount: number;
+  monthlySpend: Record<SpendingCategory, string>;
+  valuationScope: "RECORDED_YIELD_ALLOCATIONS_ONLY";
+  dataSource: "DATABASE_LEDGER";
+  calculatedAt: Date;
+}
+
+export interface TreasuryAnalytics {
+  period: "day" | "week" | "month" | "quarter";
+  businessId: string;
+  totalInflows: null;
+  totalOutflows: string;
+  netChange: null;
+  avgDailySpend: string;
+  topCategories: Array<{
+    category: SpendingCategory;
+    amount: string;
+    percentage: number;
+  }>;
+  yieldGenerated: string;
+  projectedMonthlyYield: null;
+  burnRate: string;
+  runwayDays: null;
+  dataSource: "DATABASE_LEDGER";
+}
+
+function metadataObject(
+  value: Prisma.JsonValue | null,
+): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function proposalCategory(
+  metadata: Record<string, unknown>,
+): SpendingCategory | null {
+  const category = metadata.category;
+  return typeof category === "string" &&
+    SPENDING_CATEGORIES.includes(category as SpendingCategory)
+    ? (category as SpendingCategory)
+    : null;
+}
+
+function proposalRecord(proposal: StoredProposal): TreasuryProposalRecord {
+  const metadata = metadataObject(proposal.metadata);
+  return {
+    id: proposal.id,
+    title: proposal.title,
+    description: proposal.description,
+    type: proposal.type,
+    amount: proposal.amount?.toString() ?? null,
+    currency: proposal.currency,
+    recipient: proposal.recipient,
+    category: proposalCategory(metadata),
+    status: proposal.status,
+    proposer: proposal.createdBy,
+    businessId: proposal.businessId,
+    requiredApprovals: proposal.requiredSigs,
+    currentApprovals: proposal.currentSigs,
+    approvers: proposal.approvedBy,
+    executeAfter: proposal.timelockUntil,
+    createdAt: proposal.createdAt,
+    expiresAt: proposal.expiresAt,
+    executedAt: proposal.executedAt,
+    metadata,
+    dataSource: "DATABASE_WORKFLOW",
+  };
+}
+
+function policyRecord(policy: StoredPolicy): SpendingPolicy {
+  return {
+    id: policy.id,
+    category: policy.category,
+    dailyLimit: policy.dailyLimit.toString(),
+    weeklyLimit: null,
+    monthlyLimit: policy.monthlyLimit.toString(),
+    requiresApproval: policy.requiresMultiSig,
+    minApprovals: policy.approvalThreshold,
+    active: policy.isActive,
+    updatedAt: policy.updatedAt,
+    dataSource: "DATABASE_POLICY",
+  };
+}
+
+function strategyRecord(strategy: StoredStrategy): YieldStrategy {
+  return {
+    id: strategy.id,
+    protocol: strategy.protocol,
+    name: strategy.name,
+    allocation: strategy.allocatedAmount.toString(),
+    currency: strategy.currency,
+    currentAPY: strategy.apy.toNumber(),
+    riskLevel: strategy.riskLevel,
+    active: strategy.isActive,
+    totalYieldEarned: strategy.totalYieldEarned.toString(),
+    lastHarvestAt: strategy.lastHarvestAt,
+    dataSource: "DATABASE_STRATEGY",
+  };
+}
+
+/** Treasury workflow backed exclusively by Prisma persistence. */
 export class TreasuryService {
-  private spendingPolicies: SpendingPolicy[] = DEFAULT_SPENDING_POLICIES;
-  private yieldStrategies: YieldStrategy[] = [];
-  private proposals: Map<string, StoredProposal> = new Map();
-  private persistenceEnabled: boolean = false;
-
   constructor(
-    private prisma: PrismaClient,
-    private auditService: AuditService,
-  ) {
-    this.initializeYieldStrategies();
-  }
+    private readonly prisma: PrismaClient,
+    private readonly auditService: AuditService,
+  ) {}
 
-  private initializeYieldStrategies(): void {
-    this.yieldStrategies = [
-      { id: "ys-001", protocol: "Aethelred Staking", allocation: "5000000", currency: "AET", currentAPY: 8.5, riskLevel: "LOW", active: true },
-      { id: "ys-002", protocol: "USDC Lending Pool", allocation: "2000000", currency: "USDC", currentAPY: 4.2, riskLevel: "LOW", active: true },
-      { id: "ys-003", protocol: "AED Stability Module", allocation: "1000000", currency: "AED", currentAPY: 3.8, riskLevel: "LOW", active: true },
-      { id: "ys-004", protocol: "Liquidity Mining", allocation: "500000", currency: "AET", currentAPY: 12.1, riskLevel: "MEDIUM", active: false },
-    ];
-  }
-
-  /**
-   * Get a comprehensive overview of the treasury state.
-   */
   async getOverview(businessId: string): Promise<TreasuryOverview> {
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-    const allocations: Record<string, string> = {
-      AET: "15000000",
-      USDC: "8500000",
-      USDT: "3200000",
-      AED: "12000000",
-    };
-
-    const totalAUM = Object.values(allocations).reduce(
-      (sum, val) => sum + parseFloat(val),
-      0,
-    );
-
-    const activeStrategies = this.yieldStrategies.filter((s) => s.active).length;
-
-    const yieldEarned = this.yieldStrategies
-      .filter((s) => s.active)
-      .reduce((sum, s) => {
-        const monthlyYield = (parseFloat(s.allocation) * s.currentAPY) / 100 / 12;
-        return sum + monthlyYield;
-      }, 0);
-
-    const monthlySpend: Record<SpendingCategory, string> = {
-      OPERATIONS: "125000",
-      PAYROLL: "450000",
-      MARKETING: "35000",
-      DEVELOPMENT: "180000",
-      COMPLIANCE: "95000",
-      INFRASTRUCTURE: "42000",
-      OTHER: "12000",
-    };
-
-    logger.info("Treasury overview generated", { businessId, totalAUM: totalAUM.toString() });
+    const [strategies, proposals] = await Promise.all([
+      this.prisma.yieldStrategy.findMany({ where: { isActive: true } }),
+      this.prisma.treasuryProposal.findMany({ where: { businessId } }),
+    ]);
+    const allocations: Record<string, string> = {};
+    let allocated = new Prisma.Decimal(0);
+    let earned = new Prisma.Decimal(0);
+    for (const strategy of strategies) {
+      const current = new Prisma.Decimal(allocations[strategy.currency] ?? 0);
+      allocations[strategy.currency] = current
+        .add(strategy.allocatedAmount)
+        .toString();
+      allocated = allocated.add(strategy.allocatedAmount);
+      earned = earned.add(strategy.totalYieldEarned);
+    }
+    const monthlySpend = Object.fromEntries(
+      SPENDING_CATEGORIES.map((category) => [category, "0"]),
+    ) as Record<SpendingCategory, string>;
+    const signers = new Set<string>();
+    for (const proposal of proposals) {
+      proposal.approvedBy.forEach((signer) => signers.add(signer));
+      if (
+        proposal.status === "EXECUTED" &&
+        proposal.executedAt &&
+        proposal.executedAt >= startOfMonth &&
+        proposal.amount
+      ) {
+        const category = proposalCategory(metadataObject(proposal.metadata));
+        if (category) {
+          monthlySpend[category] = new Prisma.Decimal(monthlySpend[category])
+            .add(proposal.amount)
+            .toString();
+        }
+      }
+    }
 
     return {
-      totalAUM: totalAUM.toFixed(2),
+      totalAUM: allocated.toString(),
       allocations,
-      yieldEarned: yieldEarned.toFixed(2),
-      pendingProposals: 0,
-      activeStrategies,
-      signerCount: 5,
+      yieldEarned: earned.toString(),
+      pendingProposals: proposals.filter(
+        (proposal) => proposal.status === "PENDING",
+      ).length,
+      activeStrategies: strategies.length,
+      signerCount: signers.size,
       monthlySpend,
+      valuationScope: "RECORDED_YIELD_ALLOCATIONS_ONLY",
+      dataSource: "DATABASE_LEDGER",
+      calculatedAt: now,
     };
   }
 
-  /**
-   * Create a new treasury proposal requiring multi-sig approval.
-   */
+  async listProposals(
+    businessId: string,
+    status?: ProposalStatus,
+    pagination?: { page: number; limit: number },
+  ): Promise<TreasuryProposalRecord[]> {
+    const proposals = await this.prisma.treasuryProposal.findMany({
+      where: { businessId, status },
+      orderBy: { createdAt: "desc" },
+      skip: pagination ? (pagination.page - 1) * pagination.limit : undefined,
+      take: pagination?.limit,
+    });
+    return proposals.map(proposalRecord);
+  }
+
   async createProposal(
     input: CreateProposalInput,
     proposer: string,
     businessId: string,
-  ): Promise<Record<string, unknown>> {
-    const threshold = this.getApprovalThreshold(input.amount || "0");
-
-    const proposalId =
-      "prop-" +
-      crypto
-        .createHash("sha256")
-        .update(`${proposer}:${input.title}:${Date.now()}`)
-        .digest("hex")
-        .slice(0, 16);
-
-    const timelockHours = input.timelockHours ?? threshold.timelockHours;
-    const executeAfter = timelockHours > 0
-      ? new Date(Date.now() + timelockHours * 60 * 60 * 1000)
+  ): Promise<TreasuryProposalRecord> {
+    this.validateProposal(input);
+    const policy = input.category
+      ? await this.prisma.spendingPolicy.findFirst({
+          where: { category: input.category, isActive: true },
+        })
       : null;
-
-    const proposal: StoredProposal = {
-      id: proposalId,
-      title: input.title,
-      description: input.description,
-      type: input.type,
-      amount: input.amount || null,
-      currency: input.currency || null,
-      recipient: input.recipient || null,
-      category: input.category || null,
-      status: "PENDING" as ProposalStatus,
-      proposer,
-      businessId,
-      requiredApprovals: threshold.requiredApprovals,
-      currentApprovals: 0,
-      approvers: [] as string[],
-      rejectors: [] as string[],
-      timelockHours,
-      executeAfter,
-      createdAt: new Date(),
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
-      metadata: input.metadata || {},
+    if (input.amount && !policy) {
+      throw new TreasuryError(
+        "POLICY_NOT_FOUND",
+        "An active durable spending policy is required for monetary proposals",
+        409,
+      );
+    }
+    const requiredApprovals = policy?.requiresMultiSig
+      ? policy.approvalThreshold
+      : 1;
+    const timelockHours = input.timelockHours ?? 0;
+    const now = new Date();
+    const metadata: Prisma.JsonObject = {
+      ...(input.metadata as Prisma.JsonObject | undefined),
+      ...(input.category ? { category: input.category } : {}),
     };
 
-    // Store proposal for state tracking (in-memory + Prisma for durability)
-    this.proposals.set(proposalId, proposal);
-
+    let proposal: StoredProposal;
     try {
-      await this.prisma.treasuryProposal.create({
+      proposal = await this.prisma.treasuryProposal.create({
         data: {
-          id: proposalId,
-          type: input.type as any,
-          title: input.title,
-          description: input.description,
-          amount: input.amount ? parseFloat(input.amount) : null,
-          currency: input.currency || null,
-          recipient: input.recipient || null,
-          status: "PENDING" as any,
-          requiredSigs: threshold.requiredApprovals,
+          type: input.type,
+          title: input.title.trim(),
+          description: input.description.trim(),
+          amount: input.amount ? new Prisma.Decimal(input.amount) : null,
+          currency: input.currency?.trim().toUpperCase() || null,
+          recipient: input.recipient?.trim() || null,
+          status: "PENDING",
+          requiredSigs: requiredApprovals,
           currentSigs: 0,
           signers: [],
           approvedBy: [],
-          timelockUntil: executeAfter,
+          timelockUntil:
+            timelockHours > 0
+              ? new Date(now.getTime() + timelockHours * 3_600_000)
+              : null,
           createdBy: proposer,
           businessId,
-          expiresAt: proposal.expiresAt,
-          metadata: (input.metadata || {}) as any,
+          expiresAt: new Date(now.getTime() + 7 * 86_400_000),
+          metadata,
         },
       });
-      this.persistenceEnabled = true;
-    } catch (err) {
-      if (process.env.NODE_ENV === "test") {
-        // In test mode, allow in-memory fallback
-        logger.warn("Failed to persist proposal to database (test mode), using in-memory only");
-      } else {
-        // In production, treasury proposals MUST be durable — fail closed
-        this.proposals.delete(proposalId);
-        throw new TreasuryError(
-          "PERSISTENCE_FAILURE",
-          "Failed to persist treasury proposal — refusing to operate without durable state",
-          503,
-        );
-      }
+    } catch (error) {
+      throw new TreasuryError(
+        "PERSISTENCE_FAILURE",
+        "Failed to persist the treasury proposal",
+        503,
+        error,
+      );
     }
-
     await this.auditService.createAuditEntry({
       eventType: "SYSTEM_EVENT",
       actor: proposer,
-      description: `Treasury proposal created: ${input.title} (${proposalId})`,
+      description: `Treasury proposal created: ${proposal.title} (${proposal.id})`,
       severity: "MEDIUM",
-      metadata: { proposalId, type: input.type, amount: input.amount },
+      businessId,
+      metadata: {
+        proposalId: proposal.id,
+        type: proposal.type,
+        amount: proposal.amount?.toString(),
+      },
     });
-
-    logger.info("Treasury proposal created", {
-      proposalId,
-      type: input.type,
-      amount: input.amount,
-      requiredApprovals: threshold.requiredApprovals,
-    });
-
-    return proposal as unknown as Record<string, unknown>;
+    return proposalRecord(proposal);
   }
 
-  /**
-   * Approve a treasury proposal. Returns updated proposal state.
-   */
   async approveProposal(
     proposalId: string,
     signer: string,
-    callerBusinessId?: string,
-  ): Promise<{ approved: boolean; remainingApprovals: number; status: ProposalStatus }> {
-    // Try to load from in-memory first, then fall back to Prisma
-    let proposal = this.proposals.get(proposalId);
-
-    if (!proposal) {
-      // Attempt to restore from Prisma
-      try {
-        const dbProposal = await this.prisma.treasuryProposal.findUnique({
-          where: { id: proposalId },
-        });
-        if (dbProposal) {
-          proposal = {
-            id: dbProposal.id,
-            title: dbProposal.title,
-            description: dbProposal.description,
-            type: dbProposal.type as ProposalType,
-            amount: dbProposal.amount?.toString() || null,
-            currency: dbProposal.currency,
-            recipient: dbProposal.recipient,
-            category: null,
-            status: dbProposal.status as ProposalStatus,
-            proposer: dbProposal.createdBy,
-            businessId: (dbProposal as any).businessId || dbProposal.createdBy,
-            requiredApprovals: dbProposal.requiredSigs,
-            currentApprovals: dbProposal.currentSigs,
-            approvers: dbProposal.approvedBy,
-            rejectors: [],
-            timelockHours: 0,
-            executeAfter: dbProposal.timelockUntil,
-            createdAt: dbProposal.createdAt,
-            expiresAt: dbProposal.expiresAt,
-            metadata: (dbProposal.metadata as Record<string, unknown>) || {},
-          };
-          this.proposals.set(proposalId, proposal);
-        }
-      } catch (err) {
-        if (process.env.NODE_ENV !== "test") {
-          logger.error("Failed to restore proposal from database", { error: (err as Error).message });
-          throw new TreasuryError(
-            "PERSISTENCE_FAILURE",
-            "Database unavailable — cannot verify proposal state",
-            503,
-          );
-        }
+    businessId: string,
+  ): Promise<{
+    approved: boolean;
+    remainingApprovals: number;
+    status: ProposalStatus;
+  }> {
+    type ApprovalResult =
+      { expired: true } | { expired: false; proposal: StoredProposal };
+    let result: ApprovalResult;
+    try {
+      result = await this.prisma.$transaction(
+        async (transaction) => {
+          const proposal = await transaction.treasuryProposal.findFirst({
+            where: { id: proposalId, businessId },
+          });
+          if (!proposal) {
+            throw new TreasuryError(
+              "PROPOSAL_NOT_FOUND",
+              "Proposal not found",
+              404,
+            );
+          }
+          if (new Date() > proposal.expiresAt) {
+            await transaction.treasuryProposal.update({
+              where: { id: proposal.id },
+              data: { status: "EXPIRED" },
+            });
+            return { expired: true } as const;
+          }
+          if (proposal.status !== "PENDING") {
+            throw new TreasuryError(
+              "INVALID_STATE",
+              `Proposal is in ${proposal.status} state, expected PENDING`,
+              409,
+            );
+          }
+          if (proposal.approvedBy.includes(signer)) {
+            throw new TreasuryError(
+              "DUPLICATE_APPROVAL",
+              "This signer has already approved the proposal",
+              409,
+            );
+          }
+          const approvedBy = [...proposal.approvedBy, signer];
+          const approved = approvedBy.length >= proposal.requiredSigs;
+          const updated = await transaction.treasuryProposal.update({
+            where: { id: proposal.id },
+            data: {
+              approvedBy,
+              currentSigs: approvedBy.length,
+              status: approved ? "APPROVED" : "PENDING",
+            },
+          });
+          return { expired: false, proposal: updated } as const;
+        },
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      );
+    } catch (error) {
+      if (error instanceof TreasuryError) throw error;
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2034"
+      ) {
+        throw new TreasuryError(
+          "APPROVAL_CONFLICT",
+          "The proposal changed concurrently; refresh and retry",
+          409,
+        );
       }
-    }
-
-    if (!proposal) {
       throw new TreasuryError(
-        "PROPOSAL_NOT_FOUND",
-        "Proposal not found",
-        404,
+        "PERSISTENCE_FAILURE",
+        "Failed to persist the treasury approval",
+        503,
+        error,
       );
     }
-
-    // Verify caller belongs to the same business as the proposal creator
-    if (callerBusinessId && proposal.businessId && callerBusinessId !== proposal.businessId) {
-      throw new TreasuryError(
-        "FORBIDDEN",
-        "You do not have permission to approve this proposal",
-        403,
-      );
-    }
-
-    // Verify proposal has not expired
-    if (new Date() > proposal.expiresAt) {
-      proposal.status = "EXPIRED" as ProposalStatus;
+    if (result.expired) {
       throw new TreasuryError(
         "PROPOSAL_EXPIRED",
         "Proposal has expired and can no longer be approved",
         409,
       );
     }
-
-    // Verify proposal is in PENDING state
-    if (proposal.status !== "PENDING") {
-      throw new TreasuryError(
-        "INVALID_STATE",
-        `Proposal is in ${proposal.status} state, expected PENDING`,
-        409,
-      );
-    }
-
-    // Check caller hasn't already approved (by signer identity, not business)
-    if (proposal.approvers.includes(signer)) {
-      throw new TreasuryError(
-        "DUPLICATE_APPROVAL",
-        `Signer ${signer} has already approved this proposal`,
-        409,
-      );
-    }
-
-    // Compute new state without mutating yet
-    const newApprovers = [...proposal.approvers, signer];
-    const newApprovalCount = newApprovers.length;
-    const approved = newApprovalCount >= proposal.requiredApprovals;
-    const newStatus = approved ? "APPROVED" : proposal.status;
-
-    // Persist to database FIRST — fail closed before mutating in-memory state
-    try {
-      await this.prisma.treasuryProposal.update({
-        where: { id: proposalId },
-        data: {
-          currentSigs: newApprovalCount,
-          approvedBy: newApprovers,
-          status: newStatus,
-        },
-      });
-    } catch (err) {
-      if (process.env.NODE_ENV !== "test") {
-        logger.error("Failed to persist treasury approval to database", { error: (err as Error).message });
-        throw new TreasuryError(
-          "PERSISTENCE_FAILURE",
-          "Failed to persist treasury approval — refusing to operate without durable state",
-          503,
-        );
-      }
-    }
-
-    // Only mutate in-memory state AFTER successful persistence
-    proposal.approvers = newApprovers;
-    proposal.currentApprovals = newApprovalCount;
-    proposal.status = newStatus;
-
+    const proposal = result.proposal;
     await this.auditService.createAuditEntry({
       eventType: "SYSTEM_EVENT",
       actor: signer,
-      description: `Treasury proposal ${proposalId} approved by ${signer} (${proposal.currentApprovals}/${proposal.requiredApprovals})`,
+      description: `Treasury proposal ${proposal.id} approved by ${signer}`,
       severity: "MEDIUM",
-      metadata: { proposalId, approvals: proposal.currentApprovals, required: proposal.requiredApprovals },
+      businessId,
+      metadata: {
+        proposalId: proposal.id,
+        approvals: proposal.currentSigs,
+        required: proposal.requiredSigs,
+      },
     });
-
-    logger.info("Proposal approval recorded", {
-      proposalId, signer,
-      approvals: proposal.currentApprovals,
-      required: proposal.requiredApprovals,
-      approved,
-    });
-
     return {
-      approved,
-      remainingApprovals: Math.max(0, proposal.requiredApprovals - proposal.currentApprovals),
+      approved: proposal.status === "APPROVED",
+      remainingApprovals: Math.max(
+        0,
+        proposal.requiredSigs - proposal.currentSigs,
+      ),
       status: proposal.status,
     };
   }
 
-  /**
-   * Execute an approved proposal after timelock expires.
-   */
   async executeProposal(
-    proposalId: string,
-    executor: string,
-    callerBusinessId?: string,
-  ): Promise<{ success: boolean; txHash?: string; error?: string }> {
-    // Try to load from in-memory first, then fall back to Prisma
-    let proposal = this.proposals.get(proposalId);
-
-    if (!proposal) {
-      try {
-        const dbProposal = await this.prisma.treasuryProposal.findUnique({
-          where: { id: proposalId },
-        });
-        if (dbProposal) {
-          proposal = {
-            id: dbProposal.id,
-            title: dbProposal.title,
-            description: dbProposal.description,
-            type: dbProposal.type as ProposalType,
-            amount: dbProposal.amount?.toString() || null,
-            currency: dbProposal.currency,
-            recipient: dbProposal.recipient,
-            category: null,
-            status: dbProposal.status as ProposalStatus,
-            proposer: dbProposal.createdBy,
-            businessId: (dbProposal as any).businessId || dbProposal.createdBy,
-            requiredApprovals: dbProposal.requiredSigs,
-            currentApprovals: dbProposal.currentSigs,
-            approvers: dbProposal.approvedBy,
-            rejectors: [],
-            timelockHours: 0,
-            executeAfter: dbProposal.timelockUntil,
-            createdAt: dbProposal.createdAt,
-            expiresAt: dbProposal.expiresAt,
-            metadata: (dbProposal.metadata as Record<string, unknown>) || {},
-          };
-          this.proposals.set(proposalId, proposal);
-        }
-      } catch (err) {
-        if (process.env.NODE_ENV !== "test") {
-          logger.error("Failed to restore proposal from database", { error: (err as Error).message });
-          throw new TreasuryError(
-            "PERSISTENCE_FAILURE",
-            "Database unavailable — cannot verify proposal state",
-            503,
-          );
-        }
-      }
-    }
-
-    if (!proposal) {
-      throw new TreasuryError(
-        "PROPOSAL_NOT_FOUND",
-        "Proposal not found",
-        404,
-      );
-    }
-
-    // Verify caller belongs to the same business as the proposal creator
-    if (callerBusinessId && proposal.businessId && callerBusinessId !== proposal.businessId) {
-      throw new TreasuryError(
-        "FORBIDDEN",
-        "You do not have permission to execute this proposal",
-        403,
-      );
-    }
-
-    // Verify proposal has not expired
-    if (new Date() > proposal.expiresAt) {
-      proposal.status = "EXPIRED" as ProposalStatus;
-      throw new TreasuryError(
-        "PROPOSAL_EXPIRED",
-        "Proposal has expired and can no longer be executed",
-        409,
-      );
-    }
-
-    // Verify proposal status is APPROVED
-    if (proposal.status !== "APPROVED") {
-      throw new TreasuryError(
-        "INVALID_STATE",
-        `Proposal is in ${proposal.status} state, expected APPROVED`,
-        409,
-      );
-    }
-
-    // Verify proposal has enough approvals
-    if (proposal.currentApprovals < proposal.requiredApprovals) {
-      throw new TreasuryError(
-        "INSUFFICIENT_APPROVALS",
-        `Proposal requires ${proposal.requiredApprovals} approvals but has ${proposal.currentApprovals}`,
-        409,
-      );
-    }
-
-    // Verify timelock has passed
-    if (proposal.executeAfter && new Date() < proposal.executeAfter) {
-      throw new TreasuryError(
-        "TIMELOCK_ACTIVE",
-        `Proposal timelock has not expired. Executable after ${proposal.executeAfter.toISOString()}`,
-        409,
-      );
-    }
-
-    const txHash =
-      "0x" +
-      crypto
-        .createHash("sha256")
-        .update(`execute:${proposalId}:${Date.now()}`)
-        .digest("hex");
-
-    // Persist to database FIRST — fail closed before mutating in-memory state
-    try {
-      await this.prisma.treasuryProposal.update({
-        where: { id: proposalId },
-        data: {
-          status: "EXECUTED",
-          executedAt: new Date(),
-        },
-      });
-    } catch (err) {
-      if (process.env.NODE_ENV !== "test") {
-        logger.error("Failed to persist treasury execution to database", { error: (err as Error).message });
-        throw new TreasuryError(
-          "PERSISTENCE_FAILURE",
-          "Failed to persist treasury execution — refusing to operate without durable state",
-          503,
-        );
-      }
-    }
-
-    // Only mutate in-memory state AFTER successful persistence
-    proposal.status = "EXECUTED";
-
-    await this.auditService.createAuditEntry({
-      eventType: "SYSTEM_EVENT",
-      actor: executor,
-      description: `Treasury proposal ${proposalId} executed`,
-      severity: "HIGH",
-      metadata: { proposalId, txHash },
-    });
-
-    logger.info("Proposal executed", { proposalId, executor, txHash });
-
-    return { success: true, txHash };
-  }
-
-  /**
-   * Validate a spending request against the configured policies.
-   */
-  validateSpendingPolicy(
-    amount: string,
-    category: SpendingCategory,
-    periodSpend: { daily: string; weekly: string; monthly: string },
-  ): { allowed: boolean; reason?: string } {
-    const policy = this.spendingPolicies.find((p) => p.category === category);
-    if (!policy) {
-      return { allowed: false, reason: `No spending policy defined for category: ${category}` };
-    }
-
-    const amountNum = parseFloat(amount);
-
-    if (parseFloat(periodSpend.daily) + amountNum > parseFloat(policy.dailyLimit)) {
-      return { allowed: false, reason: `Daily spending limit exceeded for ${category}` };
-    }
-
-    if (parseFloat(periodSpend.weekly) + amountNum > parseFloat(policy.weeklyLimit)) {
-      return { allowed: false, reason: `Weekly spending limit exceeded for ${category}` };
-    }
-
-    if (parseFloat(periodSpend.monthly) + amountNum > parseFloat(policy.monthlyLimit)) {
-      return { allowed: false, reason: `Monthly spending limit exceeded for ${category}` };
-    }
-
-    return { allowed: true };
-  }
-
-  /**
-   * Get the approval threshold for a given amount.
-   */
-  private getApprovalThreshold(amount: string): ApprovalThreshold {
-    const amountNum = parseFloat(amount) || 0;
-    return (
-      APPROVAL_THRESHOLDS.find(
-        (t) => amountNum >= parseFloat(t.minAmount) && amountNum < parseFloat(t.maxAmount),
-      ) || APPROVAL_THRESHOLDS[APPROVAL_THRESHOLDS.length - 1]
+    _proposalId: string,
+    _executor: string,
+    _businessId?: string,
+  ): Promise<never> {
+    throw new TreasuryError(
+      "TREASURY_EXECUTION_UNAVAILABLE",
+      "Treasury execution is disabled until an on-chain transaction receipt verifier is configured",
+      501,
     );
   }
 
-  /**
-   * Get active yield strategies.
-   */
-  getYieldStrategies(): YieldStrategy[] {
-    return this.yieldStrategies;
-  }
-
-  /**
-   * Get current spending policies.
-   */
-  getSpendingPolicies(): SpendingPolicy[] {
-    return this.spendingPolicies;
-  }
-
-  /**
-   * Update a spending policy for a category.
-   */
-  updateSpendingPolicy(category: SpendingCategory, updates: Partial<SpendingPolicy>): SpendingPolicy {
-    const index = this.spendingPolicies.findIndex((p) => p.category === category);
-    if (index === -1) {
-      throw new TreasuryError("POLICY_NOT_FOUND", `No policy found for category: ${category}`, 404);
+  async validateSpendingPolicy(
+    amount: string,
+    category: SpendingCategory,
+    periodSpend: { daily: string; monthly: string },
+  ): Promise<{ allowed: boolean; reason?: string }> {
+    const policy = await this.prisma.spendingPolicy.findFirst({
+      where: { category, isActive: true },
+    });
+    if (!policy) {
+      return {
+        allowed: false,
+        reason: `No active spending policy is defined for ${category}`,
+      };
     }
-
-    this.spendingPolicies[index] = { ...this.spendingPolicies[index], ...updates, category };
-    logger.info("Spending policy updated", { category, updates });
-    return this.spendingPolicies[index];
+    const requested = new Prisma.Decimal(amount);
+    if (
+      new Prisma.Decimal(periodSpend.daily).add(requested).gt(policy.dailyLimit)
+    ) {
+      return {
+        allowed: false,
+        reason: `Daily spending limit exceeded for ${category}`,
+      };
+    }
+    if (
+      new Prisma.Decimal(periodSpend.monthly)
+        .add(requested)
+        .gt(policy.monthlyLimit)
+    ) {
+      return {
+        allowed: false,
+        reason: `Monthly spending limit exceeded for ${category}`,
+      };
+    }
+    return { allowed: true };
   }
 
-  /**
-   * Calculate treasury analytics for reporting.
-   */
-  async getAnalytics(businessId: string, period: "day" | "week" | "month" | "quarter"): Promise<Record<string, unknown>> {
-    const periodMultiplier = { day: 1, week: 7, month: 30, quarter: 90 };
-    const days = periodMultiplier[period];
+  async getYieldStrategies(pagination?: {
+    page: number;
+    limit: number;
+  }): Promise<YieldStrategy[]> {
+    const strategies = await this.prisma.yieldStrategy.findMany({
+      orderBy: { createdAt: "desc" },
+      skip: pagination ? (pagination.page - 1) * pagination.limit : undefined,
+      take: pagination?.limit,
+    });
+    return strategies.map(strategyRecord);
+  }
 
+  async getSpendingPolicies(pagination?: {
+    page: number;
+    limit: number;
+  }): Promise<SpendingPolicy[]> {
+    const policies = await this.prisma.spendingPolicy.findMany({
+      orderBy: { category: "asc" },
+      skip: pagination ? (pagination.page - 1) * pagination.limit : undefined,
+      take: pagination?.limit,
+    });
+    return policies.map(policyRecord);
+  }
+
+  async updateSpendingPolicy(
+    category: SpendingCategory,
+    updates: Partial<
+      Pick<
+        SpendingPolicy,
+        | "dailyLimit"
+        | "monthlyLimit"
+        | "requiresApproval"
+        | "minApprovals"
+        | "active"
+      >
+    >,
+  ): Promise<SpendingPolicy> {
+    const policy = await this.prisma.spendingPolicy.findFirst({
+      where: { category },
+    });
+    if (!policy) {
+      throw new TreasuryError(
+        "POLICY_NOT_FOUND",
+        `No policy found for category: ${category}`,
+        404,
+      );
+    }
+    const updated = await this.prisma.spendingPolicy.update({
+      where: { id: policy.id },
+      data: {
+        dailyLimit: updates.dailyLimit,
+        monthlyLimit: updates.monthlyLimit,
+        requiresMultiSig: updates.requiresApproval,
+        approvalThreshold: updates.minApprovals,
+        isActive: updates.active,
+      },
+    });
+    return policyRecord(updated);
+  }
+
+  async getAnalytics(
+    businessId: string,
+    period: "day" | "week" | "month" | "quarter",
+  ): Promise<TreasuryAnalytics> {
+    const days = { day: 1, week: 7, month: 30, quarter: 90 }[period];
+    const start = new Date(Date.now() - days * 86_400_000);
+    const [proposals, strategies] = await Promise.all([
+      this.prisma.treasuryProposal.findMany({
+        where: {
+          businessId,
+          status: "EXECUTED",
+          executedAt: { gte: start },
+        },
+      }),
+      this.prisma.yieldStrategy.findMany({ where: { isActive: true } }),
+    ]);
+    let outflows = new Prisma.Decimal(0);
+    const categories: Record<SpendingCategory, Prisma.Decimal> =
+      Object.fromEntries(
+        SPENDING_CATEGORIES.map((category) => [
+          category,
+          new Prisma.Decimal(0),
+        ]),
+      ) as Record<SpendingCategory, Prisma.Decimal>;
+    for (const proposal of proposals) {
+      if (!proposal.amount) continue;
+      outflows = outflows.add(proposal.amount);
+      const category = proposalCategory(metadataObject(proposal.metadata));
+      if (category)
+        categories[category] = categories[category].add(proposal.amount);
+    }
+    const yieldGenerated = strategies.reduce(
+      (sum, strategy) => sum.add(strategy.totalYieldEarned),
+      new Prisma.Decimal(0),
+    );
     return {
       period,
       businessId,
-      totalInflows: "2450000",
-      totalOutflows: "1890000",
-      netChange: "560000",
-      avgDailySpend: (1890000 / days).toFixed(2),
-      topCategories: [
-        { category: "PAYROLL", amount: "450000", percentage: 23.8 },
-        { category: "OPERATIONS", amount: "325000", percentage: 17.2 },
-        { category: "DEVELOPMENT", amount: "280000", percentage: 14.8 },
-      ],
-      yieldGenerated: "45200",
-      projectedMonthlyYield: "52000",
-      burnRate: (1890000 / days).toFixed(2),
-      runwayDays: Math.floor(38700000 / (1890000 / days)),
+      totalInflows: null,
+      totalOutflows: outflows.toString(),
+      netChange: null,
+      avgDailySpend: outflows.div(days).toString(),
+      topCategories: Object.entries(categories)
+        .filter(([, amount]) => amount.gt(0))
+        .map(([category, amount]) => ({
+          category: category as SpendingCategory,
+          amount: amount.toString(),
+          percentage: outflows.gt(0)
+            ? amount.div(outflows).mul(100).toNumber()
+            : 0,
+        }))
+        .sort((left, right) => Number(right.amount) - Number(left.amount)),
+      yieldGenerated: yieldGenerated.toString(),
+      projectedMonthlyYield: null,
+      burnRate: outflows.div(days).toString(),
+      runwayDays: null,
+      dataSource: "DATABASE_LEDGER",
     };
   }
-}
 
-// ─── Error Class ────────────────────────────────────────────────────────────
+  private validateProposal(input: CreateProposalInput): void {
+    if (!input.title?.trim() || !input.description?.trim()) {
+      throw new TreasuryError(
+        "INVALID_PROPOSAL",
+        "Proposal title and description are required",
+      );
+    }
+    if (!PROPOSAL_TYPES.includes(input.type)) {
+      throw new TreasuryError(
+        "INVALID_PROPOSAL_TYPE",
+        "Proposal type is invalid",
+      );
+    }
+    if (input.category && !SPENDING_CATEGORIES.includes(input.category)) {
+      throw new TreasuryError(
+        "INVALID_SPENDING_CATEGORY",
+        "Spending category is invalid",
+      );
+    }
+    if (input.amount) {
+      let amount: Prisma.Decimal;
+      try {
+        amount = new Prisma.Decimal(input.amount);
+      } catch {
+        throw new TreasuryError("INVALID_AMOUNT", "Proposal amount is invalid");
+      }
+      // Decimal.js treats positive zero as `isPositive()`. Monetary proposals
+      // require a value strictly greater than zero.
+      if (amount.lte(0) || !input.currency || !input.category) {
+        throw new TreasuryError(
+          "INVALID_MONETARY_PROPOSAL",
+          "Positive amount, currency, and spending category are required",
+        );
+      }
+    }
+    if (
+      input.timelockHours !== undefined &&
+      (!Number.isInteger(input.timelockHours) ||
+        input.timelockHours < 0 ||
+        input.timelockHours > 720)
+    ) {
+      throw new TreasuryError(
+        "INVALID_TIMELOCK",
+        "Timelock must be between 0 and 720 hours",
+      );
+    }
+  }
+}
 
 export class TreasuryError extends Error {
   constructor(
     public code: string,
     message: string,
     public statusCode: number = 400,
+    options?: unknown,
   ) {
     super(message);
+    if (options !== undefined) {
+      (this as Error & { cause?: unknown }).cause = options;
+    }
     this.name = "TreasuryError";
   }
 }

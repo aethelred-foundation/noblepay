@@ -12,9 +12,11 @@ import {
   CreatePaymentSchema,
   ListPaymentsSchema,
   BatchPaymentSchema,
+  ReconcilePaymentSchema,
   CreateBusinessSchema,
   UpdateBusinessSchema,
   ComplianceScreeningSchema,
+  TravelRuleAuthorizationSchema,
   ReviewDecisionSchema,
   ListAuditSchema,
   AuditExportSchema,
@@ -217,6 +219,37 @@ describe("Validation Middleware", () => {
     });
   });
 
+  describe("ReconcilePaymentSchema", () => {
+    const reconciliation = {
+      txHash: VALID_BYTES32,
+      recipient: VALID_ETH_ADDRESS_2,
+      amount: "10.5",
+      currency: "USDC",
+      purposeHash: VALID_BYTES32,
+    };
+
+    it("accepts a single-payment receipt without an explicit payment ID", () => {
+      expect(ReconcilePaymentSchema.safeParse(reconciliation).success).toBe(
+        true,
+      );
+    });
+
+    it("retains a batch payment ID and rejects malformed identifiers", () => {
+      const valid = ReconcilePaymentSchema.safeParse({
+        ...reconciliation,
+        paymentId: VALID_BYTES32,
+      });
+      expect(valid.success).toBe(true);
+      if (valid.success) expect(valid.data.paymentId).toBe(VALID_BYTES32);
+      expect(
+        ReconcilePaymentSchema.safeParse({
+          ...reconciliation,
+          paymentId: "0x1234",
+        }).success,
+      ).toBe(false);
+    });
+  });
+
   // ─── CreateBusinessSchema ──────────────────────────────────────────────────
 
   describe("CreateBusinessSchema", () => {
@@ -226,7 +259,11 @@ describe("Validation Middleware", () => {
       businessName: "Test Corp",
       jurisdiction: "UAE",
       businessType: "Fintech",
+      complianceOfficer: VALID_ETH_ADDRESS_2,
       contactEmail: "test@example.com",
+      txHash: VALID_BYTES32,
+      challengeId: "550e8400-e29b-41d4-a716-446655440000",
+      signature: `0x${"a".repeat(130)}`,
     };
 
     it("should accept valid business data", () => {
@@ -256,14 +293,14 @@ describe("Validation Middleware", () => {
   describe("UpdateBusinessSchema", () => {
     it("should accept partial updates", () => {
       const result = UpdateBusinessSchema.safeParse({
-        businessName: "New Name",
+        businessType: "Payments",
       });
       expect(result.success).toBe(true);
     });
 
-    it("should accept empty object", () => {
+    it("should reject empty updates", () => {
       const result = UpdateBusinessSchema.safeParse({});
-      expect(result.success).toBe(true);
+      expect(result.success).toBe(false);
     });
 
     it("should reject invalid email", () => {
@@ -313,11 +350,49 @@ describe("Validation Middleware", () => {
 
   // ─── ReviewDecisionSchema ──────────────────────────────────────────────────
 
+  describe("TravelRuleAuthorizationSchema", () => {
+    const authorization = {
+      paymentId: "550e8400-e29b-41d4-a716-446655440000",
+      challengeId: "550e8400-e29b-41d4-a716-446655440001",
+      signature: "0x1234",
+      data: {
+        originatorName: "Acme Trading LLC",
+        originatorAccount: "AE-ORIGINATOR-001",
+        originatorAddress: "1 Test Street, Dubai, AE",
+        beneficiaryName: "Example Beneficiary Ltd",
+        beneficiaryAccount: "GB-BENEFICIARY-002",
+      },
+    };
+
+    it("accepts bounded even-byte contract-wallet signatures", () => {
+      expect(
+        TravelRuleAuthorizationSchema.safeParse(authorization).success,
+      ).toBe(true);
+      expect(
+        TravelRuleAuthorizationSchema.safeParse({
+          ...authorization,
+          signature: `0x${"12".repeat(16_384)}`,
+        }).success,
+      ).toBe(true);
+    });
+
+    it("rejects odd-length, empty, and oversized signatures", () => {
+      for (const signature of ["0x", "0x123", `0x${"12".repeat(16_385)}`]) {
+        expect(
+          TravelRuleAuthorizationSchema.safeParse({
+            ...authorization,
+            signature,
+          }).success,
+        ).toBe(false);
+      }
+    });
+  });
+
   describe("ReviewDecisionSchema", () => {
     it("should accept valid review decision", () => {
       const result = ReviewDecisionSchema.safeParse({
-        decision: "approve",
-        reason: "Cleared after investigation",
+        decision: "escalate",
+        reason: "Requires governed resolution",
         reviewerAddress: VALID_ETH_ADDRESS,
       });
       expect(result.success).toBe(true);
@@ -325,11 +400,23 @@ describe("Validation Middleware", () => {
 
     it("should reject missing reason", () => {
       const result = ReviewDecisionSchema.safeParse({
-        decision: "approve",
+        decision: "escalate",
         reviewerAddress: VALID_ETH_ADDRESS,
       });
       expect(result.success).toBe(false);
     });
+
+    it.each(["approve", "reject"])(
+      "rejects unsupported off-chain %s decisions",
+      (decision) => {
+        expect(
+          ReviewDecisionSchema.safeParse({
+            decision,
+            reason: "Requires an on-chain governance transaction",
+          }).success,
+        ).toBe(false);
+      },
+    );
 
     it("should reject invalid decision value", () => {
       const result = ReviewDecisionSchema.safeParse({
@@ -381,6 +468,38 @@ describe("Validation Middleware", () => {
         to: "2024-03-31T23:59:59Z",
       });
       expect(result.success).toBe(false);
+    });
+
+    it("rejects reversed and over-93-day export ranges", () => {
+      expect(
+        AuditExportSchema.safeParse({
+          from: "2024-04-01T00:00:00Z",
+          to: "2024-03-31T23:59:59Z",
+        }).success,
+      ).toBe(false);
+      expect(
+        AuditExportSchema.safeParse({
+          from: "2024-01-01T00:00:00Z",
+          to: "2024-12-31T23:59:59Z",
+        }).success,
+      ).toBe(false);
+    });
+
+    it("rejects unknown event types and unknown request fields", () => {
+      expect(
+        AuditExportSchema.safeParse({
+          from: "2024-01-01T00:00:00Z",
+          to: "2024-01-02T00:00:00Z",
+          eventTypes: ["NOT_AN_EVENT"],
+        }).success,
+      ).toBe(false);
+      expect(
+        AuditExportSchema.safeParse({
+          from: "2024-01-01T00:00:00Z",
+          to: "2024-01-02T00:00:00Z",
+          unbounded: true,
+        }).success,
+      ).toBe(false);
     });
   });
 });

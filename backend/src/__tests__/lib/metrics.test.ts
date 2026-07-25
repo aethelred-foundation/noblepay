@@ -21,7 +21,7 @@ describe("Metrics module", () => {
     expect(metrics.paymentTotal).toBeDefined();
 
     // Verify it's a Counter with correct name
-    const metricObj = (metrics.paymentTotal as any);
+    const metricObj = metrics.paymentTotal as any;
     expect(metricObj.name).toBe("noblepay_payment_total");
   });
 
@@ -29,7 +29,7 @@ describe("Metrics module", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.paymentAmount).toBeDefined();
 
-    const metricObj = (metrics.paymentAmount as any);
+    const metricObj = metrics.paymentAmount as any;
     expect(metricObj.name).toBe("noblepay_payment_amount");
   });
 
@@ -37,7 +37,7 @@ describe("Metrics module", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.screeningDuration).toBeDefined();
 
-    const metricObj = (metrics.screeningDuration as any);
+    const metricObj = metrics.screeningDuration as any;
     expect(metricObj.name).toBe("noblepay_screening_duration_seconds");
   });
 
@@ -45,7 +45,7 @@ describe("Metrics module", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.compliancePassRate).toBeDefined();
 
-    const metricObj = (metrics.compliancePassRate as any);
+    const metricObj = metrics.compliancePassRate as any;
     expect(metricObj.name).toBe("noblepay_compliance_pass_rate");
   });
 
@@ -53,7 +53,7 @@ describe("Metrics module", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.flaggedPayments).toBeDefined();
 
-    const metricObj = (metrics.flaggedPayments as any);
+    const metricObj = metrics.flaggedPayments as any;
     expect(metricObj.name).toBe("noblepay_flagged_payments");
   });
 
@@ -61,7 +61,7 @@ describe("Metrics module", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.activeBusinesses).toBeDefined();
 
-    const metricObj = (metrics.activeBusinesses as any);
+    const metricObj = metrics.activeBusinesses as any;
     expect(metricObj.name).toBe("noblepay_active_businesses");
   });
 
@@ -69,7 +69,7 @@ describe("Metrics module", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.httpRequestDuration).toBeDefined();
 
-    const metricObj = (metrics.httpRequestDuration as any);
+    const metricObj = metrics.httpRequestDuration as any;
     expect(metricObj.name).toBe("noblepay_http_request_duration_seconds");
   });
 
@@ -77,23 +77,15 @@ describe("Metrics module", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.httpRequestTotal).toBeDefined();
 
-    const metricObj = (metrics.httpRequestTotal as any);
+    const metricObj = metrics.httpRequestTotal as any;
     expect(metricObj.name).toBe("noblepay_http_requests_total");
-  });
-
-  it("should export teeNodesActive gauge", () => {
-    const metrics = require("../../lib/metrics");
-    expect(metrics.teeNodesActive).toBeDefined();
-
-    const metricObj = (metrics.teeNodesActive as any);
-    expect(metricObj.name).toBe("noblepay_tee_nodes_active");
   });
 
   it("should export teeAttestationFailures counter", () => {
     const metrics = require("../../lib/metrics");
     expect(metrics.teeAttestationFailures).toBeDefined();
 
-    const metricObj = (metrics.teeAttestationFailures as any);
+    const metricObj = metrics.teeAttestationFailures as any;
     expect(metricObj.name).toBe("noblepay_tee_attestation_failures_total");
   });
 
@@ -102,7 +94,11 @@ describe("Metrics module", () => {
 
     expect(() => {
       metrics.paymentTotal.inc({ status: "completed", currency: "USDC" });
-      metrics.httpRequestTotal.inc({ method: "GET", route: "/test", status_code: "200" });
+      metrics.httpRequestTotal.inc({
+        method: "GET",
+        route: "/test",
+        status_code: "200",
+      });
       metrics.teeAttestationFailures.inc();
     }).not.toThrow();
   });
@@ -113,7 +109,10 @@ describe("Metrics module", () => {
     expect(() => {
       metrics.paymentAmount.observe({ currency: "USDC" }, 100);
       metrics.screeningDuration.observe({ result: "passed" }, 0.5);
-      metrics.httpRequestDuration.observe({ method: "GET", route: "/test", status_code: "200" }, 0.1);
+      metrics.httpRequestDuration.observe(
+        { method: "GET", route: "/test", status_code: "200" },
+        0.1,
+      );
     }).not.toThrow();
   });
 
@@ -124,7 +123,6 @@ describe("Metrics module", () => {
       metrics.compliancePassRate.set(0.95);
       metrics.flaggedPayments.set(5);
       metrics.activeBusinesses.set({ tier: "STANDARD" }, 10);
-      metrics.teeNodesActive.set(3);
     }).not.toThrow();
   });
 
@@ -141,7 +139,9 @@ describe("Metrics module", () => {
     expect(names).toContain("noblepay_active_businesses");
     expect(names).toContain("noblepay_http_request_duration_seconds");
     expect(names).toContain("noblepay_http_requests_total");
-    expect(names).toContain("noblepay_tee_nodes_active");
+    // There is no authoritative TEE-node registry in this service. Do not
+    // regress to publishing an invented capacity gauge from local state.
+    expect(names).not.toContain("noblepay_tee_nodes_active");
     expect(names).toContain("noblepay_tee_attestation_failures_total");
   });
 });

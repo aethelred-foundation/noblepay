@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/aethelred/noblepay-gateway/internal/models"
@@ -41,9 +42,10 @@ func (ss *SettlementService) Reconcile(ctx context.Context, paymentID string) (*
 		PaymentID: paymentID,
 	}
 
-	// Look for a matching settlement event.
+	// A settlement is recognized only by the exact canonical NoblePay event
+	// topic. Human-readable webhook labels are never settlement evidence.
 	for _, evt := range events {
-		if evt.EventType == "transfer_complete" {
+		if strings.EqualFold(evt.EventType, PaymentSettledTopic) {
 			record.Settled = true
 			record.SettledAt = evt.Timestamp
 			record.OnChainTx = evt.TxHash
@@ -51,17 +53,19 @@ func (ss *SettlementService) Reconcile(ctx context.Context, paymentID string) (*
 		}
 	}
 
-	if !record.Settled && payment.Status == models.PaymentStatusCompleted {
-		record.Discrepancy = "payment marked completed but no on-chain settlement event found"
+	if !record.Settled && (payment.Status == models.PaymentStatusSettled || payment.Status == models.PaymentStatusCompleted) {
+		record.Discrepancy = "payment marked settled but no canonical PaymentSettled event found"
 		ss.logger.Warn("settlement discrepancy detected",
 			zap.String("payment_id", paymentID),
 			zap.String("discrepancy", record.Discrepancy),
 		)
 	}
 
-	if record.Settled && payment.Status != models.PaymentStatusCompleted {
-		// Auto-update payment status.
-		payment.Status = models.PaymentStatusCompleted
+	if record.Settled && payment.Status != models.PaymentStatusSettled {
+		// This fallback supports stores populated before atomic projection was
+		// introduced. New canonical events update the read model atomically.
+		payment.Status = models.PaymentStatusSettled
+		payment.SettlementTxHash = record.OnChainTx
 		payment.TxHash = record.OnChainTx
 		payment.UpdatedAt = time.Now().UTC()
 		if err := ss.paymentStore.Update(ctx, payment); err != nil {

@@ -71,14 +71,6 @@ export const httpRequestTotal = new client.Counter({
   registers: [register],
 });
 
-// ─── TEE Metrics ────────────────────────────────────────────────────────────
-
-export const teeNodesActive = new client.Gauge({
-  name: "noblepay_tee_nodes_active",
-  help: "Number of active TEE nodes",
-  registers: [register],
-});
-
 export const teeAttestationFailures = new client.Counter({
   name: "noblepay_tee_attestation_failures_total",
   help: "Total TEE attestation failures",

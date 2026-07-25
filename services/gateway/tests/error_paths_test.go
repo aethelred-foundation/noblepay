@@ -23,7 +23,7 @@ import (
 func TestSubmitPaymentInternalError(t *testing.T) {
 	logger := zap.NewNop()
 	mockStore := &failingPaymentStore{createErr: errMockStore}
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(mockStore, compliance, logger)
 	h := handlers.NewPaymentHandler(svc)
 
@@ -42,7 +42,7 @@ func TestSubmitPaymentInternalError(t *testing.T) {
 func TestGetByIDInternalError(t *testing.T) {
 	logger := zap.NewNop()
 	mockStore := &failingPaymentStore{getErr: errMockStore}
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(mockStore, compliance, logger)
 	h := handlers.NewPaymentHandler(svc)
 
@@ -122,7 +122,7 @@ func TestWebhookHandleEventIndexError(t *testing.T) {
 func TestPaymentServiceSubmitStoreError(t *testing.T) {
 	logger := zap.NewNop()
 	mockStore := &failingPaymentStore{createErr: errMockStore}
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(mockStore, compliance, logger)
 
 	_, err := svc.Submit(context.Background(), &models.SubmitPaymentRequest{
@@ -186,10 +186,10 @@ func TestSettlementReconcileUpdateError(t *testing.T) {
 	memEventStore := store.NewMemoryStore()
 	ctx := context.Background()
 
-	// Save a transfer_complete event for the payment the mock store returns
+	// Save the exact canonical PaymentSettled topic for the mocked payment.
 	memEventStore.SaveEvent(ctx, &models.BlockchainEvent{
 		TxHash:    "0xsettled",
-		EventType: "transfer_complete",
+		EventType: services.PaymentSettledTopic,
 		PaymentID: "test-id",
 		Timestamp: time.Now().UTC(),
 	})
@@ -212,22 +212,22 @@ func TestSettlementReconcileAlreadyCompleted(t *testing.T) {
 	memStore := store.NewMemoryStore()
 	ctx := context.Background()
 
-	// Create a completed payment
+	// Create an already-settled payment.
 	payment := &models.Payment{
 		ID:        "pay-already-complete",
 		Amount:    "1000",
 		Currency:  "USDC",
-		Status:    models.PaymentStatusCompleted,
+		Status:    models.PaymentStatusSettled,
 		TxHash:    "0xprevious",
 		CreatedAt: time.Now().UTC(),
 		UpdatedAt: time.Now().UTC(),
 	}
 	memStore.Create(ctx, payment)
 
-	// Add a transfer_complete event
+	// Add the exact canonical PaymentSettled topic.
 	memStore.SaveEvent(ctx, &models.BlockchainEvent{
 		TxHash:    "0xprevious",
-		EventType: "transfer_complete",
+		EventType: services.PaymentSettledTopic,
 		PaymentID: "pay-already-complete",
 		Timestamp: time.Now().UTC(),
 	})
@@ -240,7 +240,7 @@ func TestSettlementReconcileAlreadyCompleted(t *testing.T) {
 	if !record.Settled {
 		t.Error("expected settled=true")
 	}
-	// No discrepancy: settled AND completed
+	// No discrepancy: the projected state and canonical event agree.
 	if record.Discrepancy != "" {
 		t.Errorf("expected no discrepancy, got %q", record.Discrepancy)
 	}

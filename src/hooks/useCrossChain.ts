@@ -1,339 +1,269 @@
-/**
- * Cross-Chain Hooks — Custom React hooks for NoblePay cross-chain operations.
- *
- * Provides typed hooks for cross-chain transfers, chain status,
- * relay node management, and routing.
- */
-
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ApiError, apiRequest } from "@/lib/api";
 import type {
   ChainInfo,
   CrossChainTransfer,
-  RouteOption,
   RelayNode,
+  TransferStatus,
 } from "@/types/crosschain";
 
-// ---------------------------------------------------------------------------
-// Mock Data
-// ---------------------------------------------------------------------------
+interface ApiChain {
+  id: string;
+  chainId: number;
+  name: string;
+  rpcUrl: string;
+  explorer: string;
+  avgBlockTime: number;
+  nativeToken: string;
+  supportedTokens: string[];
+  status: "ONLINE" | "OFFLINE";
+  currentGasPrice: string | null;
+}
 
-const MOCK_CHAINS: ChainInfo[] = [
-  {
-    chainId: 7001,
-    name: "Aethelred Mainnet",
-    symbol: "AETH",
-    rpcUrl: "https://rpc.aethelred.network",
-    explorerUrl: "https://explorer.aethelred.network",
-    status: "Online",
-    avgBlockTime: 2.0,
-    gasPrice: 0.5,
-    routerAddress: "0xrouter001",
-    supportedTokens: ["USDC", "USDT", "AETHEL", "AED"],
-    logoPath: "/chains/aethelred.svg",
-  },
-  {
-    chainId: 1,
-    name: "Ethereum",
-    symbol: "ETH",
-    rpcUrl: "https://eth.llamarpc.com",
-    explorerUrl: "https://etherscan.io",
-    status: "Online",
-    avgBlockTime: 12.0,
-    gasPrice: 25,
-    routerAddress: "0xrouter002",
-    supportedTokens: ["USDC", "USDT"],
-    logoPath: "/chains/ethereum.svg",
-  },
-  {
-    chainId: 137,
-    name: "Polygon",
-    symbol: "MATIC",
-    rpcUrl: "https://polygon-rpc.com",
-    explorerUrl: "https://polygonscan.com",
-    status: "Online",
-    avgBlockTime: 2.0,
-    gasPrice: 30,
-    routerAddress: "0xrouter003",
-    supportedTokens: ["USDC", "USDT"],
-    logoPath: "/chains/polygon.svg",
-  },
-  {
-    chainId: 42161,
-    name: "Arbitrum One",
-    symbol: "ARB",
-    rpcUrl: "https://arb1.arbitrum.io/rpc",
-    explorerUrl: "https://arbiscan.io",
-    status: "Online",
-    avgBlockTime: 0.3,
-    gasPrice: 0.1,
-    routerAddress: "0xrouter004",
-    supportedTokens: ["USDC", "USDT"],
-    logoPath: "/chains/arbitrum.svg",
-  },
-  {
-    chainId: 56,
-    name: "BNB Chain",
-    symbol: "BNB",
-    rpcUrl: "https://bsc-dataseed.binance.org",
-    explorerUrl: "https://bscscan.com",
-    status: "Degraded",
-    avgBlockTime: 3.0,
-    gasPrice: 3,
-    routerAddress: "0xrouter005",
-    supportedTokens: ["USDC", "USDT"],
-    logoPath: "/chains/bnb.svg",
-  },
-];
+interface ApiTransferStep {
+  step: number;
+  name: string;
+  status: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
+  txHash: string | null;
+  timestamp: string | null;
+  details: string;
+}
 
-const MOCK_TRANSFERS: CrossChainTransfer[] = [
-  {
-    id: "xfer-001",
-    sourceChainId: 1,
-    destChainId: 7001,
-    sourceChainName: "Ethereum",
-    destChainName: "Aethelred Mainnet",
-    sender: "0x1234567890abcdef1234567890abcdef12345678",
-    recipient: "0xabcdef1234567890abcdef1234567890abcdef12",
-    tokenSymbol: "USDC",
-    amount: 100_000,
-    status: "Completed",
-    steps: [
-      {
-        index: 0,
-        description: "Lock tokens on Ethereum",
-        chainId: 1,
-        status: "Completed",
-        txHash: "0xeth001",
-        startedAt: Date.now() - 3600_000,
-        completedAt: Date.now() - 3300_000,
-      },
-      {
-        index: 1,
-        description: "Relay proof to Aethelred",
-        chainId: 7001,
-        status: "Completed",
-        txHash: "0xaeth001",
-        startedAt: Date.now() - 3300_000,
-        completedAt: Date.now() - 3000_000,
-      },
-      {
-        index: 2,
-        description: "Mint tokens on Aethelred",
-        chainId: 7001,
-        status: "Completed",
-        txHash: "0xaeth002",
-        startedAt: Date.now() - 3000_000,
-        completedAt: Date.now() - 2700_000,
-      },
-    ],
-    estimatedTime: 900,
-    bridgeFee: 12.5,
-    relayNodeId: "relay-001",
-    initiatedAt: Date.now() - 3600_000,
-    completedAt: Date.now() - 2700_000,
-  },
-  {
-    id: "xfer-002",
-    sourceChainId: 7001,
-    destChainId: 137,
-    sourceChainName: "Aethelred Mainnet",
-    destChainName: "Polygon",
-    sender: "0x1234567890abcdef1234567890abcdef12345678",
-    recipient: "0x2345678901abcdef2345678901abcdef23456789",
-    tokenSymbol: "USDC",
-    amount: 50_000,
-    status: "Relaying",
-    steps: [
-      {
-        index: 0,
-        description: "Lock tokens on Aethelred",
-        chainId: 7001,
-        status: "Completed",
-        txHash: "0xaeth003",
-        startedAt: Date.now() - 600_000,
-        completedAt: Date.now() - 300_000,
-      },
-      {
-        index: 1,
-        description: "Relay proof to Polygon",
-        chainId: 137,
-        status: "InProgress",
-        startedAt: Date.now() - 300_000,
-      },
-      {
-        index: 2,
-        description: "Mint tokens on Polygon",
-        chainId: 137,
-        status: "Pending",
-      },
-    ],
-    estimatedTime: 600,
-    bridgeFee: 5.0,
-    relayNodeId: "relay-002",
-    initiatedAt: Date.now() - 600_000,
-    completedAt: 0,
-  },
-];
+interface ApiTransfer {
+  id: string;
+  sourceChain: string;
+  destinationChain: string;
+  token: string;
+  amount: string;
+  sender: string;
+  recipient: string;
+  status:
+    | "INITIATED"
+    | "RELAYING"
+    | "CONFIRMING"
+    | "COMPLETED"
+    | "FAILED"
+    | "STUCK"
+    | "RECOVERED";
+  steps: ApiTransferStep[];
+  bridgeFee: string | null;
+  estimatedTime: number | null;
+  createdAt: string;
+  completedAt: string | null;
+}
 
-const MOCK_RELAY_NODES: RelayNode[] = [
-  {
-    id: "relay-001",
-    name: "Aethelred Relay Alpha",
-    operator: "0xop001",
-    supportedChains: [7001, 1, 137, 42161],
-    status: "Active",
-    totalRelayed: 12_450,
-    successRate: 99.8,
-    avgRelayTime: 45,
-    stakedCollateral: 500_000,
-    uptime: 99.95,
-    lastActiveAt: Date.now() - 30_000,
-  },
-  {
-    id: "relay-002",
-    name: "Gulf Bridge Node",
-    operator: "0xop002",
-    supportedChains: [7001, 1, 56],
-    status: "Active",
-    totalRelayed: 8_320,
-    successRate: 99.5,
-    avgRelayTime: 52,
-    stakedCollateral: 350_000,
-    uptime: 99.8,
-    lastActiveAt: Date.now() - 15_000,
-  },
-  {
-    id: "relay-003",
-    name: "Asia Pacific Relay",
-    operator: "0xop003",
-    supportedChains: [7001, 137, 56],
-    status: "Syncing",
-    totalRelayed: 5_100,
-    successRate: 99.2,
-    avgRelayTime: 60,
-    stakedCollateral: 250_000,
-    uptime: 98.5,
-    lastActiveAt: Date.now() - 120_000,
-  },
-];
+interface ApiRelayNode {
+  id: string;
+  address: string;
+  chains: string[];
+  stake: string;
+  uptime: null;
+  successRate: number;
+  relayedCount: number;
+  avgLatency: number;
+  status: "ACTIVE" | "INACTIVE" | "SLASHED";
+}
 
-// ---------------------------------------------------------------------------
-// useCrossChain — transfers, chains, relay nodes, and routing
-// ---------------------------------------------------------------------------
+function titleCaseStatus(value: ApiChain["status"]): ChainInfo["status"] {
+  if (value === "ONLINE") return "Online";
+  return "Offline";
+}
+
+function mapTransferStatus(value: ApiTransfer["status"]): TransferStatus {
+  const statuses: Record<ApiTransfer["status"], TransferStatus> = {
+    INITIATED: "Initiated",
+    RELAYING: "Relaying",
+    CONFIRMING: "DestPending",
+    COMPLETED: "Completed",
+    FAILED: "Failed",
+    STUCK: "Failed",
+    RECOVERED: "Refunded",
+  };
+  return statuses[value];
+}
+
+function mapChain(chain: ApiChain): ChainInfo {
+  return {
+    chainId: chain.chainId,
+    name: chain.name,
+    symbol: chain.nativeToken,
+    rpcUrl: chain.rpcUrl,
+    explorerUrl: chain.explorer,
+    status: titleCaseStatus(chain.status),
+    avgBlockTime: chain.avgBlockTime,
+    gasPrice:
+      chain.currentGasPrice === null ? null : Number(chain.currentGasPrice),
+    routerAddress: "",
+    supportedTokens: chain.supportedTokens,
+    logoPath: "",
+  };
+}
+
+function mapTransfer(
+  transfer: ApiTransfer,
+  chainById: Map<string, ApiChain>,
+): CrossChainTransfer {
+  const source = chainById.get(transfer.sourceChain);
+  const destination = chainById.get(transfer.destinationChain);
+  const sourceChainId = source?.chainId ?? (Number(transfer.sourceChain) || 0);
+  const destinationChainId =
+    destination?.chainId ?? (Number(transfer.destinationChain) || 0);
+
+  return {
+    id: transfer.id,
+    sourceChainId,
+    destChainId: destinationChainId,
+    sourceChainName: source?.name || transfer.sourceChain,
+    destChainName: destination?.name || transfer.destinationChain,
+    sender: transfer.sender,
+    recipient: transfer.recipient,
+    tokenSymbol: transfer.token,
+    amount: Number(transfer.amount),
+    status: mapTransferStatus(transfer.status),
+    steps: transfer.steps.map((step) => ({
+      index: step.step,
+      description: step.details || step.name,
+      chainId: step.step === 0 ? sourceChainId : destinationChainId,
+      status:
+        step.status === "IN_PROGRESS"
+          ? "InProgress"
+          : step.status === "PENDING"
+            ? "Pending"
+            : step.status === "COMPLETED"
+              ? "Completed"
+              : "Failed",
+      txHash: step.txHash || undefined,
+      startedAt: step.timestamp ? Date.parse(step.timestamp) : undefined,
+      completedAt:
+        step.status === "COMPLETED" && step.timestamp
+          ? Date.parse(step.timestamp)
+          : undefined,
+    })),
+    estimatedTime: transfer.estimatedTime,
+    bridgeFee: transfer.bridgeFee === null ? null : Number(transfer.bridgeFee),
+    relayNodeId: "",
+    initiatedAt: Date.parse(transfer.createdAt),
+    completedAt: transfer.completedAt ? Date.parse(transfer.completedAt) : 0,
+  };
+}
+
+function mapRelay(node: ApiRelayNode, chains: ApiChain[]): RelayNode {
+  const chainIds = new Map(chains.map((chain) => [chain.id, chain.chainId]));
+  return {
+    id: node.id,
+    name: node.id,
+    operator: node.address,
+    supportedChains: node.chains
+      .map((chain) => chainIds.get(chain) ?? Number(chain))
+      .filter((chain): chain is number => Number.isFinite(chain)),
+    status: node.status === "ACTIVE" ? "Active" : "Offline",
+    totalRelayed: node.relayedCount,
+    successRate: node.successRate,
+    avgRelayTime: node.avgLatency / 1000,
+    stakedCollateral: Number(node.stake),
+    uptime: node.uptime,
+    lastActiveAt: null,
+  };
+}
 
 export function useCrossChain() {
-  const [chains, setChains] = useState<ChainInfo[]>([]);
-  const [transfers, setTransfers] = useState<CrossChainTransfer[]>([]);
-  const [relayNodes, setRelayNodes] = useState<RelayNode[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const chainsQuery = useQuery({
+    queryKey: ["crosschain", "chains"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiChain[]>("/v1/crosschain/chains", { signal }),
+  });
+  const transfersQuery = useQuery({
+    queryKey: ["crosschain", "transfers"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiTransfer[]>("/v1/crosschain/transfers", { signal }),
+  });
+  const relaysQuery = useQuery({
+    queryKey: ["crosschain", "relays"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiRelayNode[]>("/v1/crosschain/relays", { signal }),
+  });
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setChains(MOCK_CHAINS);
-      setTransfers(MOCK_TRANSFERS);
-      setRelayNodes(MOCK_RELAY_NODES);
-      setIsLoading(false);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, []);
+  const chainById = useMemo(
+    () => new Map((chainsQuery.data || []).map((chain) => [chain.id, chain])),
+    [chainsQuery.data],
+  );
+  const chains = useMemo(
+    () => (chainsQuery.data || []).map(mapChain),
+    [chainsQuery.data],
+  );
+  const transfers = useMemo(
+    () =>
+      (transfersQuery.data || []).map((transfer) =>
+        mapTransfer(transfer, chainById),
+      ),
+    [chainById, transfersQuery.data],
+  );
+  const relayNodes = useMemo(
+    () =>
+      (relaysQuery.data || []).map((node) =>
+        mapRelay(node, chainsQuery.data || []),
+      ),
+    [chainsQuery.data, relaysQuery.data],
+  );
 
   const getRouteOptions = useCallback(
     (
-      sourceChainId: number,
-      destChainId: number,
+      _sourceChainId: number,
+      _destChainId: number,
       _amount: number,
-    ): RouteOption[] => {
-      const source = chains.find((c) => c.chainId === sourceChainId);
-      const dest = chains.find((c) => c.chainId === destChainId);
-      if (!source || !dest) return [];
-
-      return [
-        {
-          id: "route-direct",
-          name: "Direct Bridge",
-          path: [sourceChainId, destChainId],
-          estimatedTime: 600,
-          totalFeeUsd: 12.5,
-          fees: { bridgeFee: 8.0, gasFee: 3.5, relayFee: 1.0 },
-          slippage: 0.05,
-          recommended: true,
-        },
-        {
-          id: "route-multihop",
-          name: "Multi-Hop via Aethelred",
-          path: [sourceChainId, 7001, destChainId],
-          estimatedTime: 1200,
-          totalFeeUsd: 8.0,
-          fees: { bridgeFee: 4.0, gasFee: 2.5, relayFee: 1.5 },
-          slippage: 0.1,
-          recommended: false,
-        },
-      ];
-    },
-    [chains],
+      _tokenSymbol?: string,
+    ) =>
+      Promise.reject(
+        new ApiError(
+          "Route discovery is disabled until a signed bridge quote provider is configured.",
+          { status: 503, code: "ROUTE_QUOTE_UNAVAILABLE" },
+        ),
+      ),
+    [],
   );
 
   const initiateTransfer = useCallback(
-    (params: {
+    (_params: {
       sourceChainId: number;
       destChainId: number;
       recipient: string;
       tokenSymbol: string;
       amount: number;
       routeId: string;
-    }) => {
-      const source = chains.find((c) => c.chainId === params.sourceChainId);
-      const dest = chains.find((c) => c.chainId === params.destChainId);
-      if (!source || !dest) return;
-
-      const newTransfer: CrossChainTransfer = {
-        id: `xfer-${String(Date.now()).slice(-6)}`,
-        sourceChainId: params.sourceChainId,
-        destChainId: params.destChainId,
-        sourceChainName: source.name,
-        destChainName: dest.name,
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: params.recipient,
-        tokenSymbol: params.tokenSymbol,
-        amount: params.amount,
-        status: "Initiated",
-        steps: [
-          {
-            index: 0,
-            description: `Lock tokens on ${source.name}`,
-            chainId: params.sourceChainId,
-            status: "InProgress",
-            startedAt: Date.now(),
-          },
-          {
-            index: 1,
-            description: `Relay proof to ${dest.name}`,
-            chainId: params.destChainId,
-            status: "Pending",
-          },
-          {
-            index: 2,
-            description: `Mint tokens on ${dest.name}`,
-            chainId: params.destChainId,
-            status: "Pending",
-          },
-        ],
-        estimatedTime: 600,
-        bridgeFee: 12.5,
-        relayNodeId: "relay-001",
-        initiatedAt: Date.now(),
-        completedAt: 0,
-      };
-      setTransfers((prev) => [newTransfer, ...prev]);
-    },
-    [chains],
+    }) =>
+      Promise.reject(
+        new ApiError(
+          "Cross-chain transfers are disabled until both chain receipts can be verified.",
+          { status: 501, code: "BRIDGE_EXECUTION_UNAVAILABLE" },
+        ),
+      ),
+    [],
   );
+
+  const refetch = useCallback(async () => {
+    await Promise.all([
+      chainsQuery.refetch(),
+      transfersQuery.refetch(),
+      relaysQuery.refetch(),
+    ]);
+  }, [chainsQuery, relaysQuery, transfersQuery]);
+
+  const error = transfersQuery.error || relaysQuery.error || null;
 
   return {
     chains,
     transfers,
     relayNodes,
-    isLoading,
+    isLoading: transfersQuery.isLoading || relaysQuery.isLoading,
+    chainsLoading: chainsQuery.isLoading,
+    isMutating: false,
+    error,
+    chainsError: chainsQuery.error || null,
+    mutationsEnabled: false,
+    mutationReason:
+      "Bridge quotes and execution are disabled until signed quotes and both-chain receipts can be verified.",
+    refetch,
     getRouteOptions,
     initiateTransfer,
   };

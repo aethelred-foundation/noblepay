@@ -1,13 +1,3 @@
-import {
-  createMockPrisma,
-  resetAllMocks,
-} from "../setup";
-
-const mockPrisma = createMockPrisma();
-jest.mock("@prisma/client", () => ({
-  PrismaClient: jest.fn(() => mockPrisma),
-}));
-
 const mockLiquidityService = {
   getPools: jest.fn(),
   getPool: jest.fn(),
@@ -17,236 +7,225 @@ const mockLiquidityService = {
   requestFlashLiquidity: jest.fn(),
   getAnalytics: jest.fn(),
 };
+let authenticated = true;
 
-const mockAuditService = { createAuditEntry: jest.fn() };
-
-jest.mock("../../services/liquidity", () => ({
-  LiquidityService: jest.fn(() => mockLiquidityService),
-  LiquidityError: class LiquidityError extends Error {
-    code: string;
-    statusCode: number;
-    constructor(code: string, message: string, statusCode: number) {
+jest.mock("../../lib/db", () => ({ prisma: {} }));
+jest.mock("../../services/audit", () => ({ AuditService: jest.fn() }));
+jest.mock("../../services/liquidity", () => {
+  class LiquidityError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode = 400,
+    ) {
       super(message);
-      this.code = code;
-      this.statusCode = statusCode;
-      this.name = "LiquidityError";
     }
+  }
+  return {
+    LiquidityService: jest.fn(() => mockLiquidityService),
+    LiquidityError,
+  };
+});
+jest.mock("../../middleware/auth", () => ({
+  authenticateAPIKey: (
+    req: { businessId?: string },
+    _res: unknown,
+    next: () => void,
+  ) => {
+    if (authenticated) req.businessId = "business-1";
+    next();
   },
 }));
-
-jest.mock("../../services/audit", () => ({
-  AuditService: jest.fn(() => mockAuditService),
-}));
-
-jest.mock("../../middleware/auth", () => ({
-  authenticateAPIKey: jest.fn((_req: any, _res: any, next: any) => next()),
-}));
-
 jest.mock("../../middleware/rbac", () => ({
-  extractRole: jest.fn((_req: any, _res: any, next: any) => next()),
-  requireRole: jest.fn(() => (_req: any, _res: any, next: any) => next()),
-  requirePermission: jest.fn(() => (_req: any, _res: any, next: any) => next()),
+  extractRole: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireRole: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requirePermission: () => (_req: unknown, _res: unknown, next: () => void) =>
+    next(),
 }));
 
 import express from "express";
 import request from "supertest";
-import liquidityRouter from "../../routes/liquidity";
+import router from "../../routes/liquidity";
 import { LiquidityError } from "../../services/liquidity";
 
 const app = express();
 app.use(express.json());
-app.use("/v1/liquidity", liquidityRouter);
+app.use("/v1/liquidity", router);
 
-beforeEach(() => {
-  resetAllMocks();
-});
+describe("liquidity routes", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authenticated = true;
+  });
 
-describe("Liquidity Routes", () => {
-  describe("GET /v1/liquidity/pools", () => {
-    it("should return all pools", async () => {
-      mockLiquidityService.getPools.mockReturnValue([
-        { id: "pool-1", pair: "USDC/AED", totalLiquidity: "1000000" },
-      ]);
+  it("passes validated pagination and status to durable pool reads", async () => {
+    mockLiquidityService.getPools.mockResolvedValue([{ id: "pool-1" }]);
 
-      const res = await request(app).get("/v1/liquidity/pools");
+    const response = await request(app).get(
+      "/v1/liquidity/pools?status=ACTIVE&page=2&limit=10",
+    );
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
-
-    it("should filter by status", async () => {
-      mockLiquidityService.getPools.mockReturnValue([]);
-
-      await request(app).get("/v1/liquidity/pools?status=ACTIVE");
-
-      expect(mockLiquidityService.getPools).toHaveBeenCalledWith("ACTIVE");
-    });
-
-    it("should handle LiquidityError", async () => {
-      mockLiquidityService.getPools.mockImplementation(() => {
-        throw new LiquidityError("POOL_ERROR", "Error", 400);
-      });
-
-      const res = await request(app).get("/v1/liquidity/pools");
-
-      expect(res.status).toBe(400);
-    });
-
-    it("should return 500 on unexpected error", async () => {
-      mockLiquidityService.getPools.mockImplementation(() => {
-        throw new Error("crash");
-      });
-
-      const res = await request(app).get("/v1/liquidity/pools");
-
-      expect(res.status).toBe(500);
+    expect(response.status).toBe(200);
+    expect(mockLiquidityService.getPools).toHaveBeenCalledWith("ACTIVE", {
+      page: 2,
+      limit: 10,
     });
   });
 
-  describe("GET /v1/liquidity/pools/:id", () => {
-    it("should return a pool by ID", async () => {
-      mockLiquidityService.getPool.mockReturnValue({
-        id: "pool-1",
-        pair: "USDC/AED",
-      });
+  it("rejects unknown query keys and out-of-range pagination", async () => {
+    const [unknown, oversized] = await Promise.all([
+      request(app).get("/v1/liquidity/pools?unexpected=true"),
+      request(app).get("/v1/liquidity/pools?limit=101"),
+    ]);
 
-      const res = await request(app).get("/v1/liquidity/pools/pool-1");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.id).toBe("pool-1");
-    });
-
-    it("should return 500 on error", async () => {
-      mockLiquidityService.getPool.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/liquidity/pools/pool-1");
-
-      expect(res.status).toBe(500);
-    });
+    expect(unknown.status).toBe(400);
+    expect(oversized.status).toBe(400);
+    expect(mockLiquidityService.getPools).not.toHaveBeenCalled();
   });
 
-  describe("POST /v1/liquidity/pools/:id/add", () => {
-    it("should add liquidity to a pool", async () => {
-      mockLiquidityService.addLiquidity.mockResolvedValue({
-        id: "pos-1",
-        poolId: "pool-1",
-        amount: "50000",
-      });
+  it("returns one durable pool snapshot by opaque ID", async () => {
+    mockLiquidityService.getPool.mockResolvedValue({ id: "pool-1" });
 
-      const res = await request(app)
-        .post("/v1/liquidity/pools/pool-1/add")
-        .send({ amount: "50000", provider: "0xprovider" });
+    const response = await request(app).get("/v1/liquidity/pools/pool-1");
 
-      expect(res.status).toBe(201);
-      expect(res.body.data.id).toBe("pos-1");
-    });
-
-    it("should return 500 on error", async () => {
-      mockLiquidityService.addLiquidity.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/liquidity/pools/pool-1/add").send({ amount: "50000" });
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(200);
+    expect(mockLiquidityService.getPool).toHaveBeenCalledWith("pool-1");
   });
 
-  describe("POST /v1/liquidity/pools/:id/remove", () => {
-    it("should remove liquidity from a pool", async () => {
-      mockLiquidityService.removeLiquidity.mockResolvedValue({
-        returned: "25000",
-        fees: "50",
-      });
+  it("validates mutation bodies before returning fail-closed service errors", async () => {
+    mockLiquidityService.addLiquidity.mockRejectedValue(
+      new LiquidityError(
+        "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+        "Receipt verifier unavailable",
+        501,
+      ),
+    );
 
-      const res = await request(app)
-        .post("/v1/liquidity/pools/pool-1/remove")
-        .send({ positionId: "pos-1", amount: "25000" });
+    const invalid = await request(app)
+      .post("/v1/liquidity/pools/pool-1/add")
+      .send({ amountA: "1e6", amountB: "2", extra: true });
+    const valid = await request(app)
+      .post("/v1/liquidity/pools/pool-1/add")
+      .send({ amountA: "1", amountB: "2" });
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.returned).toBe("25000");
-    });
-
-    it("should return 500 on error", async () => {
-      mockLiquidityService.removeLiquidity.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/liquidity/pools/pool-1/remove").send({ positionId: "pos-1" });
-
-      expect(res.status).toBe(500);
-    });
+    expect(invalid.status).toBe(400);
+    expect(valid.status).toBe(501);
+    expect(valid.body.error).toBe("ONCHAIN_SETTLEMENT_UNAVAILABLE");
+    expect(mockLiquidityService.addLiquidity).toHaveBeenCalledWith(
+      { poolId: "pool-1", amountA: "1", amountB: "2" },
+      "business-1",
+      "business-1",
+    );
   });
 
-  describe("GET /v1/liquidity/positions", () => {
-    it("should return all positions", async () => {
-      mockLiquidityService.getPositions.mockReturnValue([
-        { id: "pos-1", poolId: "pool-1" },
-      ]);
+  it("passes the authenticated tenant and bounded position query", async () => {
+    const provider = "0x1111111111111111111111111111111111111111";
+    mockLiquidityService.getPositions.mockResolvedValue([]);
 
-      const res = await request(app).get("/v1/liquidity/positions");
+    const response = await request(app).get(
+      `/v1/liquidity/positions?provider=${provider}&limit=5`,
+    );
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
-
-    it("should filter by provider", async () => {
-      mockLiquidityService.getPositions.mockReturnValue([]);
-
-      await request(app).get("/v1/liquidity/positions?provider=0xprovider");
-
-      expect(mockLiquidityService.getPositions).toHaveBeenCalledWith("0xprovider", undefined);
-    });
-
-    it("should return 500 on error", async () => {
-      mockLiquidityService.getPositions.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/liquidity/positions");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(200);
+    expect(mockLiquidityService.getPositions).toHaveBeenCalledWith(
+      "business-1",
+      provider,
+      { page: 1, limit: 5 },
+    );
   });
 
-  describe("POST /v1/liquidity/flash", () => {
-    it("should request flash liquidity", async () => {
-      mockLiquidityService.requestFlashLiquidity.mockResolvedValue({
-        id: "flash-1",
-        amount: "100000",
-        fee: "100",
-      });
+  it("passes valid removal and flash requests through fail-closed guards", async () => {
+    mockLiquidityService.removeLiquidity.mockRejectedValueOnce(
+      new LiquidityError(
+        "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+        "Receipt verifier unavailable",
+        501,
+      ),
+    );
+    mockLiquidityService.requestFlashLiquidity.mockRejectedValueOnce(
+      new LiquidityError(
+        "FLASH_LIQUIDITY_UNAVAILABLE",
+        "Atomic verifier unavailable",
+        501,
+      ),
+    );
 
-      const res = await request(app)
-        .post("/v1/liquidity/flash")
-        .send({ poolId: "pool-1", amount: "100000" });
+    const removal = await request(app)
+      .post("/v1/liquidity/pools/pool-1/remove")
+      .send({ positionId: "position-1", percentage: 50 });
+    const flash = await request(app)
+      .post("/v1/liquidity/flash")
+      .send({ poolId: "pool-1", amount: "100" });
 
-      expect(res.status).toBe(201);
-      expect(res.body.data.id).toBe("flash-1");
-    });
-
-    it("should return 500 on error", async () => {
-      mockLiquidityService.requestFlashLiquidity.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/liquidity/flash").send({ poolId: "pool-1", amount: "100000" });
-
-      expect(res.status).toBe(500);
-    });
+    expect(removal.status).toBe(501);
+    expect(flash.status).toBe(501);
+    expect(mockLiquidityService.removeLiquidity).toHaveBeenCalledWith(
+      { positionId: "position-1", percentage: 50 },
+      "business-1",
+      "business-1",
+    );
+    expect(mockLiquidityService.requestFlashLiquidity).toHaveBeenCalledWith(
+      "pool-1",
+      "100",
+      "business-1",
+    );
   });
 
-  describe("GET /v1/liquidity/analytics", () => {
-    it("should return liquidity analytics", async () => {
-      mockLiquidityService.getAnalytics.mockReturnValue({
-        totalLiquidity: "5000000",
-        activePools: 3,
-      });
+  it("returns tenant-scoped liquidity analytics", async () => {
+    mockLiquidityService.getAnalytics.mockResolvedValue({ totalTVL: "1000" });
 
-      const res = await request(app).get("/v1/liquidity/analytics");
+    const response = await request(app).get("/v1/liquidity/analytics");
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.totalLiquidity).toBe("5000000");
-    });
+    expect(response.status).toBe(200);
+    expect(mockLiquidityService.getAnalytics).toHaveBeenCalledWith(
+      "business-1",
+    );
+  });
 
-    it("should return 500 on error", async () => {
-      mockLiquidityService.getAnalytics.mockImplementation(() => { throw new Error("crash"); });
+  it.each([
+    [
+      "add",
+      "post",
+      "/v1/liquidity/pools/pool-1/add",
+      { amountA: "1", amountB: "2" },
+    ],
+    [
+      "remove",
+      "post",
+      "/v1/liquidity/pools/pool-1/remove",
+      { positionId: "position-1", percentage: 50 },
+    ],
+    ["positions", "get", "/v1/liquidity/positions", undefined],
+    [
+      "flash",
+      "post",
+      "/v1/liquidity/flash",
+      { poolId: "pool-1", amount: "100" },
+    ],
+    ["analytics", "get", "/v1/liquidity/analytics", undefined],
+  ])(
+    "rejects %s without tenant identity",
+    async (_name, method, path, body) => {
+      authenticated = false;
+      const operation = request(app)[method as "get" | "post"](path);
+      if (body) operation.send(body);
 
-      const res = await request(app).get("/v1/liquidity/analytics");
+      const response = await operation;
 
-      expect(res.status).toBe(500);
-    });
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe("UNAUTHORIZED");
+    },
+  );
+
+  it("redacts unexpected pool service failures", async () => {
+    mockLiquidityService.getPool.mockRejectedValue(
+      new Error("database secret-value"),
+    );
+
+    const response = await request(app).get("/v1/liquidity/pools/pool-1");
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).toBe("INTERNAL_ERROR");
+    expect(JSON.stringify(response.body)).not.toContain("secret-value");
   });
 });

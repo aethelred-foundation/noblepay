@@ -1,14 +1,15 @@
 {
   "name": "@aethelred/noblepay",
   "version": "1.0.0",
-  "description": "NoblePay \u2014 Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
+  "description": "NoblePay — Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
   "private": true,
   "scripts": {
-    "dev": "next dev -p ${PORT:-3002}",
+    "dev": "next dev -p ${PORT:-3008}",
     "build": "next build --webpack",
-    "start": "next start -p 3002",
+    "start": "next start -p ${PORT:-3008}",
+    "start:standalone": "node scripts/start-standalone-smoke.mjs",
     "lint": "eslint src/ --ext .ts,.tsx,.js,.jsx --max-warnings=-1",
-    "lint:fix": "next lint --fix",
+    "lint:fix": "eslint src/ --ext .ts,.tsx,.js,.jsx --fix",
     "type-check": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -23,14 +24,15 @@
     "analyze": "cross-env ANALYZE=true next build",
     "postbuild": "next-sitemap",
     "validate": "npm run type-check && npm run lint && npm run test",
-    "validate:frontend": "npm run type-check && npm run lint && npm run build && npm run test:ci",
+    "validate:frontend": "npm run type-check && npm run lint && npm run build && npm run test:e2e && npm run test:ci",
     "validate:backend": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx prisma generate && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx prisma validate && test -f prisma/migrations/migration_lock.toml && test -f prisma/migrations/20260316_init/migration.sql && echo 'Migration artifacts verified' && npx tsc --noEmit && npx jest --runInBand --forceExit --detectOpenHandles",
-    "validate:contracts": "cd contracts && npx hardhat compile && npx hardhat test",
-    "validate:gateway": "cd services/gateway && go vet ./... && go test ./...",
-    "validate:compliance": "cd crates/noblepay-compliance && cargo check && cargo test && cargo test --features mock-tee",
+    "test:deployment-governance": "node scripts/test-deployment-governance.mjs",
+    "validate:contracts": "cd contracts && npx hardhat clean && npx hardhat compile && node ../scripts/deploy-devnet-core.mjs --verify-artifacts && node ../scripts/test-deployment-governance.mjs && npx hardhat test",
+    "validate:gateway": "cd services/gateway && GOTOOLCHAIN=go1.25.12 go vet ./... && GOTOOLCHAIN=go1.25.12 go test ./... -race -count=1 -timeout 300s && GOTOOLCHAIN=go1.25.12 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...",
+    "validate:compliance": "cd crates/noblepay-compliance && cargo fmt --all -- --check && cargo clippy --locked --all-targets --all-features -- -D warnings && cargo test --locked --all-features && cargo test --locked --no-default-features && cargo test --locked --doc --all-features && cargo audit --deny warnings",
+    "validate:dependencies": "npm audit --audit-level=moderate && (cd backend && npm audit --audit-level=moderate) && (cd contracts && npm audit --audit-level=moderate)",
     "validate:security": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx jest --runInBand --forceExit --detectOpenHandles src/__tests__/security/exploit-simulations.test.ts",
-    "validate:ecosystem": "cd packages/ecosystem-contracts && npx tsc --noEmit && npx jest",
-    "validate:all": "npm run validate:frontend && npm run validate:backend && npm run validate:contracts && npm run validate:gateway && npm run validate:compliance && npm run validate:security && npm run validate:ecosystem",
+    "validate:all": "npm run validate:dependencies && npm run validate:frontend && npm run validate:backend && npm run validate:contracts && npm run validate:gateway && npm run validate:compliance && npm run validate:security",
     "prerelease": "npm run validate:all",
     "check:boundary": "node scripts/check-conformance-boundary.mjs"
   },
@@ -45,17 +47,17 @@
     "clsx": "^2.1.0",
     "date-fns": "^3.3.1",
     "lucide-react": "^0.311.0",
-    "next": "^16.2.0",
+    "next": "^16.2.11",
     "next-sitemap": "^4.2.3",
-    "postcss": "^8.4.33",
+    "postcss": "^8.5.10",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-hook-form": "^7.49.3",
     "recharts": "^2.10.3",
-    "sharp": "^0.33.1",
+    "sharp": "0.35.3",
     "tailwind-merge": "^2.2.0",
     "tailwindcss": "^3.4.1",
-    "uuid": "^9.0.0",
+    "uuid": "^11.1.1",
     "viem": "^2.17.0",
     "wagmi": "^2.12.0",
     "zod": "^3.22.4"
@@ -75,8 +77,8 @@
     "@typescript-eslint/eslint-plugin": "^8.57.1",
     "@typescript-eslint/parser": "^8.57.1",
     "cross-env": "^7.0.3",
-    "eslint": "^8.57.0",
-    "eslint-config-next": "14.2.29",
+    "eslint": "^8.57.1",
+    "eslint-config-next": "15.5.21",
     "eslint-plugin-jest-dom": "^5.1.0",
     "eslint-plugin-testing-library": "^6.2.0",
     "husky": "^8.0.3",
@@ -85,7 +87,7 @@
     "lint-staged": "^15.2.0",
     "msw": "^2.1.2",
     "prettier": "^3.2.4",
-    "ts-jest": "^29.1.1",
+    "ts-jest": "^29.4.11",
     "typescript": "^5.3.3"
   },
   "lint-staged": {
@@ -98,12 +100,17 @@
     ]
   },
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=24.18.0",
     "npm": ">=10.0.0"
   },
   "overrides": {
     "serialize-javascript": ">=7.0.3",
     "@tootallnate/once": ">=3.0.1",
-    "ws": "^8.21.1"
+    "ws": "^8.21.1",
+    "axios": "^1.18.0",
+    "postcss": "^8.5.10",
+    "uuid": "^11.1.1",
+    "yaml": "^2.8.3",
+    "sharp": "0.35.3"
   }
 }

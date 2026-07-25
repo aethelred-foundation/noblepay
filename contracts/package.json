@@ -12,9 +12,29 @@
   "author": "Aethelred Foundation",
   "license": "MIT",
   "type": "commonjs",
+  "engines": {
+    "node": ">=24.18.0",
+    "npm": ">=10.0.0"
+  },
   "devDependencies": {
-    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@nomicfoundation/hardhat-toolbox": "^6.1.2",
     "@openzeppelin/contracts": "^4.9.6",
-    "hardhat": "^2.28.6"
+    "hardhat": "^2.29.0"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0",
+    "cookie": "0.7.2",
+    "diff": "8.0.3",
+    "lodash": "4.18.1",
+    "serialize-javascript": "7.0.7",
+    "tmp": "0.2.7",
+    "undici": "6.27.0",
+    "uuid": "11.1.1",
+    "ethjs-unit": {
+      "bn.js": "4.12.3"
+    },
+    "number-to-bn": {
+      "bn.js": "4.12.3"
+    }
   }
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/access/AccessControlEnumerable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 
 /**
@@ -38,7 +38,7 @@ import "@openzeppelin/contracts/security/Pausable.sol";
  *   - PREMIUM:    $500K/day  |  $5M/month
  *   - ENTERPRISE: $5M/day    |  $50M/month
  */
-contract BusinessRegistry is AccessControl, Pausable {
+contract BusinessRegistry is AccessControlEnumerable, Pausable {
 
     // ──────────────────────────────────────────────────────────────
     // Roles
@@ -380,7 +380,7 @@ contract BusinessRegistry is AccessControl, Pausable {
     function isBusinessActive(address _business) external view returns (bool) {
         Business storage biz = businesses[_business];
         if (biz.kycStatus != KYCStatus.VERIFIED) return false;
-        if (biz.lastVerified + REVERIFICATION_INTERVAL < block.timestamp) return false;
+        if (biz.lastVerified + REVERIFICATION_INTERVAL <= block.timestamp) return false;
         return true;
     }
 

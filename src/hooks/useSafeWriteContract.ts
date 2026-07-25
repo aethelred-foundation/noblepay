@@ -1,8 +1,14 @@
 "use client";
 
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import { useAccount, usePublicClient, useWriteContract } from "wagmi";
+import { activeNetworkAnchor } from "@/config/chains";
 import { bufferGasLimit } from "@/lib/gas";
+import {
+  Eip1193Provider,
+  verifyPublicClientNetworkAnchor,
+  verifyWalletNetworkAnchor,
+} from "@/lib/network-anchor";
 
 /**
  * Drop-in replacement for wagmi's `useWriteContract` that buffers the gas
@@ -31,11 +37,15 @@ type WriteParams = {
 export function useSafeWriteContract() {
   const wagmi = useWriteContract();
   const publicClient = usePublicClient();
-  const address = useAccount()?.address;
+  const { address, connector } = useAccount();
+  const [networkError, setNetworkError] = useState<Error | null>(null);
 
   type WCArgs = Parameters<typeof wagmi.writeContract>;
   type WCAArgs = Parameters<typeof wagmi.writeContractAsync>;
-  const rawWrite = wagmi.writeContract as unknown as (p: WriteParams, o?: WCArgs[1]) => void;
+  const rawWrite = wagmi.writeContract as unknown as (
+    p: WriteParams,
+    o?: WCArgs[1],
+  ) => void;
   const rawWriteAsync = wagmi.writeContractAsync as unknown as (
     p: WriteParams,
     o?: WCAArgs[1],
@@ -52,7 +62,9 @@ export function useSafeWriteContract() {
           args: params.args,
           value: params.value,
           account: params.account ?? address,
-        } as Parameters<NonNullable<typeof publicClient>["estimateContractGas"]>[0]);
+        } as Parameters<
+          NonNullable<typeof publicClient>["estimateContractGas"]
+        >[0]);
         return bufferGasLimit(est);
       } catch {
         return undefined; // let the plain write surface the real failure
@@ -61,28 +73,94 @@ export function useSafeWriteContract() {
     [publicClient, address],
   );
 
+  const verifySigningProvider = useCallback(async () => {
+    if (!connector) {
+      throw new Error("Wallet transaction blocked: no wallet is connected");
+    }
+    const provider = await connector.getProvider();
+    if (
+      !provider ||
+      typeof (provider as Partial<Eip1193Provider>).request !== "function"
+    ) {
+      throw new Error(
+        "Wallet transaction blocked: connected wallet has no EIP-1193 provider",
+      );
+    }
+    await verifyWalletNetworkAnchor(
+      provider as Eip1193Provider,
+      activeNetworkAnchor,
+    );
+  }, [connector]);
+
+  const prepare = useCallback(
+    async (params: WriteParams): Promise<WriteParams> => {
+      if (!activeNetworkAnchor || !publicClient) {
+        throw new Error(
+          "Wallet transaction blocked: public RPC network anchor cannot be verified",
+        );
+      }
+      await verifyPublicClientNetworkAnchor(
+        publicClient as unknown as Eip1193Provider,
+        activeNetworkAnchor,
+      );
+      const gas = await estimate(params);
+      // This is deliberately the final asynchronous preflight before the
+      // wallet prompt/send. Do not replace it with the configured public RPC.
+      await verifySigningProvider();
+      setNetworkError(null);
+      return gas === undefined ? params : { ...params, gas };
+    },
+    [estimate, publicClient, verifySigningProvider],
+  );
+
   // Fire-and-forget: estimate asynchronously, then submit with the gas
   // limit. The caller's void-returning `writeContract(params)` contract is
   // preserved; the result surfaces via the hook's `data`/`error` as usual.
   const writeContract = useCallback(
     (params: WriteParams, options?: WCArgs[1]) => {
       void (async () => {
-        const gas = await estimate(params);
-        const p = gas === undefined ? params : { ...params, gas };
+        const p = await prepare(params);
         return options === undefined ? rawWrite(p) : rawWrite(p, options);
-      })();
+      })().catch((error: unknown) => {
+        const normalized =
+          error instanceof Error ? error : new Error("Wallet preflight failed");
+        setNetworkError(normalized);
+        const onError = (options as { onError?: (cause: Error) => void })
+          ?.onError;
+        onError?.(normalized);
+      });
     },
-    [rawWrite, estimate],
+    [rawWrite, prepare],
   );
 
   const writeContractAsync = useCallback(
     async (params: WriteParams, options?: WCAArgs[1]) => {
-      const gas = await estimate(params);
-      const p = gas === undefined ? params : { ...params, gas };
-      return options === undefined ? rawWriteAsync(p) : rawWriteAsync(p, options);
+      try {
+        const p = await prepare(params);
+        return options === undefined
+          ? rawWriteAsync(p)
+          : rawWriteAsync(p, options);
+      } catch (error) {
+        const normalized =
+          error instanceof Error ? error : new Error("Wallet preflight failed");
+        setNetworkError(normalized);
+        throw normalized;
+      }
     },
-    [rawWriteAsync, estimate],
+    [rawWriteAsync, prepare],
   );
 
-  return { ...wagmi, writeContract, writeContractAsync };
+  const reset = useCallback(() => {
+    setNetworkError(null);
+    wagmi.reset();
+  }, [wagmi]);
+
+  return {
+    ...wagmi,
+    error: networkError ?? wagmi.error,
+    isError: networkError !== null || wagmi.isError,
+    reset,
+    writeContract,
+    writeContractAsync,
+  };
 }

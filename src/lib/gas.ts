@@ -9,10 +9,10 @@
  * path in the app hits this; read-only views don't (no gas), which is
  * why the app *looks* like it works until you click an action.
  *
- * Until the chain-side estimator is fixed, we buffer the estimate before
- * it becomes the gas limit. The chain's block gas limit is ~4.29e9 and
- * unused gas is refunded (capped at half the limit), so over-providing on
- * the testnet is safe and cheap.
+ * Until the selected network's estimator is independently verified, we apply
+ * conservative bounded headroom before the estimate becomes the gas limit.
+ * Operators must revalidate these bounds against the activated network; the
+ * wallet still presents the transaction's maximum fee exposure to the user.
  */
 
 /** Multiply the (under-reported) estimate to cover the real cost. */

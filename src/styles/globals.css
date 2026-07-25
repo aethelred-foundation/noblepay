@@ -26,8 +26,15 @@ html {
 }
 
 body {
-  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-    'Helvetica Neue', Arial, sans-serif;
+  font-family:
+    "Inter",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    "Helvetica Neue",
+    Arial,
+    sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   background-color: #0f172a;
@@ -79,57 +86,108 @@ body {
 
 /* Modal / overlay enter & exit */
 @keyframes modal-overlay-in {
-  from { opacity: 0; }
-  to   { opacity: 1; }
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
 }
 
 @keyframes modal-content-in {
-  from { opacity: 0; transform: scale(0.95) translateY(10px); }
-  to   { opacity: 1; transform: scale(1)    translateY(0); }
+  from {
+    opacity: 0;
+    transform: scale(0.95) translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
 }
 
 @keyframes modal-overlay-out {
-  from { opacity: 1; }
-  to   { opacity: 0; }
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
 }
 
 @keyframes modal-content-out {
-  from { opacity: 1; transform: scale(1); }
-  to   { opacity: 0; transform: scale(0.95); }
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.95);
+  }
 }
 
 /* Drawer slide */
 @keyframes drawer-in {
-  from { transform: translateX(100%); }
-  to   { transform: translateX(0); }
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
 }
 
 @keyframes drawer-out {
-  from { transform: translateX(0); }
-  to   { transform: translateX(100%); }
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
 }
 
 /* Toast */
 @keyframes toast-in {
-  from { transform: translateX(100%); opacity: 0; }
-  to   { transform: translateX(0);    opacity: 1; }
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
 }
 
 @keyframes toast-out {
-  from { transform: translateX(0);    opacity: 1; }
-  to   { transform: translateX(100%); opacity: 0; }
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
 }
 
 /* Animated number count-up */
 @keyframes countUp {
-  from { opacity: 0; transform: translateY(5px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateY(5px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Glow pulse (brand red) */
 @keyframes glow-pulse {
-  0%, 100% { box-shadow: 0 0 5px rgba(220, 38, 38, 0.3); }
-  50%      { box-shadow: 0 0 20px rgba(220, 38, 38, 0.6); }
+  0%,
+  100% {
+    box-shadow: 0 0 5px rgba(220, 38, 38, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 20px rgba(220, 38, 38, 0.6);
+  }
 }
 
 .glow-pulse {
@@ -138,14 +196,26 @@ body {
 
 /* Live dot */
 @keyframes live-dot {
-  0%, 100% { transform: scale(1);   opacity: 1; }
-  50%      { transform: scale(1.5); opacity: 0.5; }
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 0.5;
+  }
 }
 
 /* Pulse slow */
 @keyframes pulse-slow {
-  0%, 100% { opacity: 1; }
-  50%      { opacity: 0.7; }
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.7;
+  }
 }
 
 .animate-pulse-slow {
@@ -154,8 +224,16 @@ body {
 
 /* Slide in from top (new payment feed) */
 @keyframes slide-in-top {
-  from { transform: translateY(-20px); opacity: 0; max-height: 0; }
-  to   { transform: translateY(0);     opacity: 1; max-height: 200px; }
+  from {
+    transform: translateY(-20px);
+    opacity: 0;
+    max-height: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+    max-height: 200px;
+  }
 }
 
 .slide-in-top {
@@ -164,8 +242,12 @@ body {
 
 /* Skeleton loading (dark) */
 @keyframes skeleton-loading {
-  0%   { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
 }
 
 /* ==========================================================================
@@ -174,9 +256,18 @@ body {
 
 /* Payment flow animation — shows payment progressing through stages */
 @keyframes payment-flow {
-  0%   { background-position: 0% 50%; opacity: 0.6; }
-  50%  { background-position: 100% 50%; opacity: 1; }
-  100% { background-position: 200% 50%; opacity: 0.6; }
+  0% {
+    background-position: 0% 50%;
+    opacity: 0.6;
+  }
+  50% {
+    background-position: 100% 50%;
+    opacity: 1;
+  }
+  100% {
+    background-position: 200% 50%;
+    opacity: 0.6;
+  }
 }
 
 .payment-flow {
@@ -192,10 +283,20 @@ body {
 
 /* Compliance scan animation — sweep effect for screening indicator */
 @keyframes compliance-scan {
-  0%   { transform: translateX(-100%); opacity: 0; }
-  20%  { opacity: 1; }
-  80%  { opacity: 1; }
-  100% { transform: translateX(100%); opacity: 0; }
+  0% {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+  20% {
+    opacity: 1;
+  }
+  80% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(100%);
+    opacity: 0;
+  }
 }
 
 .compliance-scan {
@@ -204,7 +305,7 @@ body {
 }
 
 .compliance-scan::after {
-  content: '';
+  content: "";
   position: absolute;
   top: 0;
   left: 0;
@@ -269,7 +370,7 @@ body {
 }
 
 .status-active::before {
-  content: '';
+  content: "";
   position: absolute;
   width: 8px;
   height: 8px;
@@ -294,11 +395,15 @@ body {
 }
 
 .card-shadow {
-  box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.2), 0 1px 2px -1px rgb(0 0 0 / 0.15);
+  box-shadow:
+    0 1px 3px 0 rgb(0 0 0 / 0.2),
+    0 1px 2px -1px rgb(0 0 0 / 0.15);
 }
 
 .card-shadow-hover:hover {
-  box-shadow: 0 4px 12px -1px rgb(0 0 0 / 0.3), 0 2px 6px -2px rgb(0 0 0 / 0.2);
+  box-shadow:
+    0 4px 12px -1px rgb(0 0 0 / 0.3),
+    0 2px 6px -2px rgb(0 0 0 / 0.2);
 }
 
 /* ==========================================================================
@@ -316,14 +421,15 @@ body {
    ========================================================================== */
 
 .code-block {
-  font-family: 'JetBrains Mono', 'Fira Code', Consolas, Monaco,
-    'Andale Mono', 'Ubuntu Mono', monospace;
+  font-family:
+    "JetBrains Mono", "Fira Code", Consolas, Monaco, "Andale Mono",
+    "Ubuntu Mono", monospace;
   font-size: 0.875rem;
   line-height: 1.5;
 }
 
 .hash-display {
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-family: "JetBrains Mono", "Fira Code", monospace;
   font-size: 0.75rem;
   letter-spacing: 0.025em;
 }
@@ -358,7 +464,9 @@ body {
   white-space: nowrap;
   opacity: 0;
   visibility: hidden;
-  transition: opacity 0.2s, visibility 0.2s;
+  transition:
+    opacity 0.2s,
+    visibility 0.2s;
   z-index: 50;
 }
 

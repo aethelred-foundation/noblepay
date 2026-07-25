@@ -1,537 +1,501 @@
-import { createMockPrisma, resetAllMocks } from "../setup";
-import { CrossChainService, CrossChainError } from "../../services/crosschain";
-import { AuditService } from "../../services/audit";
+import { Prisma } from "@prisma/client";
+import { CrossChainService } from "../../services/crosschain";
+import type { AuditService } from "../../services/audit";
 
-let prisma: ReturnType<typeof createMockPrisma>;
-let auditService: AuditService;
-let crossChainService: CrossChainService;
+const wallet = "0x1111111111111111111111111111111111111111";
 
-beforeEach(() => {
-  resetAllMocks();
-  prisma = createMockPrisma();
-  auditService = new AuditService(prisma);
-  jest.spyOn(auditService, "createAuditEntry").mockResolvedValue({} as any);
-  crossChainService = new CrossChainService(prisma, auditService);
-});
+const chainConfig = [
+  {
+    id: "aethelred",
+    chainId: 7332,
+    name: "Aethelred Testnet",
+    type: "EVM",
+    rpcUrl: "https://rpc.aethelred.example",
+    explorer: "https://explorer.aethelred.example",
+    avgBlockTime: 2,
+    finality: 12,
+    nativeToken: "AETHEL",
+    supportedTokens: ["USDC", "USDT"],
+  },
+  {
+    id: "ethereum",
+    chainId: 11155111,
+    name: "Ethereum Sepolia",
+    type: "EVM",
+    rpcUrl: "https://rpc.ethereum.example",
+    explorer: "https://explorer.ethereum.example",
+    avgBlockTime: 12,
+    finality: 12,
+    nativeToken: "ETH",
+    supportedTokens: ["USDC"],
+  },
+];
 
-describe("CrossChainService", () => {
-  // ─── getChains ─────────────────────────────────────────────────────────────
+function transfer(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "transfer-1",
+    sourceChain: "aethelred",
+    destChain: "ethereum",
+    currency: "USDC",
+    amount: new Prisma.Decimal("250"),
+    sender: wallet,
+    recipient: "0x2222222222222222222222222222222222222222",
+    status: "COMPLETED",
+    sourceTxHash: "0xsource",
+    destTxHash: "0xdest",
+    bridgeFee: new Prisma.Decimal("1.5"),
+    estimatedTime: 90,
+    relayNode: "relay-1",
+    initiatedAt: new Date("2026-07-21T11:00:00.000Z"),
+    completedAt: new Date("2026-07-21T11:01:30.000Z"),
+    metadata: { steps: [] },
+    ...overrides,
+  };
+}
 
-  describe("getChains", () => {
-    it("should return all supported chains", () => {
-      const chains = crossChainService.getChains();
-      expect(chains.length).toBeGreaterThan(0);
-      const ids = chains.map((c) => c.id);
-      expect(ids).toContain("aethelred-mainnet");
-      expect(ids).toContain("ethereum-mainnet");
-    });
+function setup(chainProbe = jest.fn()) {
+  const prisma = {
+    business: { findUnique: jest.fn() },
+    crossChainTransfer: { findMany: jest.fn(), findFirst: jest.fn() },
+    relayNode: { findMany: jest.fn(), count: jest.fn() },
+  };
+  const service = new CrossChainService(
+    prisma as never,
+    {} as AuditService,
+    chainProbe as never,
+  );
+  return { prisma, service, chainProbe };
+}
 
-    it("should include chain properties", () => {
-      const chains = crossChainService.getChains();
-      const eth = chains.find((c) => c.id === "ethereum-mainnet");
-      expect(eth).toBeDefined();
-      expect(eth!.chainId).toBe(1);
-      expect(eth!.type).toBe("EVM");
-      expect(eth!.supportedTokens).toContain("USDC");
-    });
-  });
+describe("CrossChainService production behavior", () => {
+  const originalEnv = process.env;
 
-  // ─── getRoutes ─────────────────────────────────────────────────────────────
-
-  describe("getRoutes", () => {
-    it("should return routes between two chains", () => {
-      const routes = crossChainService.getRoutes(
-        "aethelred-mainnet",
-        "ethereum-mainnet",
-        "USDC",
-        "10000",
-      );
-
-      expect(routes.length).toBeGreaterThan(0);
-      expect(routes[0]).toHaveProperty("path");
-      expect(routes[0]).toHaveProperty("estimatedFee");
-      expect(routes[0]).toHaveProperty("hops");
-    });
-
-    it("should include multi-hop route when not via Aethelred", () => {
-      const routes = crossChainService.getRoutes(
-        "ethereum-mainnet",
-        "polygon-mainnet",
-        "USDC",
-        "10000",
-      );
-
-      const multiHop = routes.find((r) => r.hops === 2);
-      expect(multiHop).toBeDefined();
-      expect(multiHop!.path).toContain("aethelred-mainnet");
-    });
-
-    it("should sort routes by fee (cheapest first)", () => {
-      const routes = crossChainService.getRoutes(
-        "ethereum-mainnet",
-        "polygon-mainnet",
-        "USDC",
-        "10000",
-      );
-
-      for (let i = 1; i < routes.length; i++) {
-        expect(parseFloat(routes[i - 1].estimatedFee)).toBeLessThanOrEqual(
-          parseFloat(routes[i].estimatedFee),
-        );
-      }
-    });
-
-    it("should throw CHAIN_NOT_FOUND for unsupported chain", () => {
-      expect(() =>
-        crossChainService.getRoutes(
-          "unsupported-chain",
-          "ethereum-mainnet",
-          "USDC",
-          "1000",
-        ),
-      ).toThrow(CrossChainError);
-    });
-  });
-
-  // ─── initiateTransfer ──────────────────────────────────────────────────────
-
-  describe("initiateTransfer", () => {
-    const baseTransfer = {
-      sourceChain: "aethelred-mainnet",
-      destinationChain: "ethereum-mainnet",
-      token: "USDC",
-      amount: "10000",
-      recipient: "0xrecipient",
+  beforeEach(() => {
+    process.env = {
+      ...originalEnv,
+      NODE_ENV: "test",
+      CROSSCHAIN_CHAINS_JSON: JSON.stringify(chainConfig),
     };
+  });
 
-    it("should initiate a transfer with correct structure", async () => {
-      const transfer = await crossChainService.initiateTransfer(
-        baseTransfer,
-        "0xsender",
-        "biz-1",
-      );
+  afterEach(() => {
+    process.env = originalEnv;
+  });
 
-      expect(transfer.id).toMatch(/^xc-/);
-      expect(transfer.status).toBe("INITIATED");
-      expect(transfer.steps).toHaveLength(4);
-      expect(transfer.steps[0].status).toBe("IN_PROGRESS");
-      expect(transfer.sourceTxHash).toMatch(/^0x/);
-      expect(transfer.bridgeFee).toBeDefined();
-      expect(auditService.createAuditEntry).toHaveBeenCalled();
-    });
+  it("reports chain health only after probing each configured RPC", async () => {
+    const { service, chainProbe } = setup();
+    chainProbe
+      .mockResolvedValueOnce({ chainId: 7332, gasPrice: 12n })
+      .mockRejectedValueOnce(new Error("RPC down"));
 
-    it("should include metadata when provided", async () => {
-      const transfer = await crossChainService.initiateTransfer(
-        {
-          ...baseTransfer,
-          metadata: { reference: "inv-123", memo: "payment" },
-        },
-        "0xsender",
-        "biz-1",
-      );
+    const chains = await service.getChains();
 
-      expect(transfer.metadata).toEqual({ reference: "inv-123", memo: "payment" });
-    });
+    expect(chains).toEqual([
+      expect.objectContaining({
+        id: "aethelred",
+        status: "ONLINE",
+        currentGasPrice: "12",
+      }),
+      expect.objectContaining({
+        id: "ethereum",
+        status: "OFFLINE",
+        currentGasPrice: null,
+      }),
+    ]);
+    expect(chainProbe).toHaveBeenCalledTimes(2);
+  });
 
-    it("should throw for unsupported chain", async () => {
-      await expect(
-        crossChainService.initiateTransfer(
-          { ...baseTransfer, sourceChain: "unsupported" },
-          "0xsender",
-          "biz-1",
-        ),
-      ).rejects.toThrow(CrossChainError);
+  it("marks a chain offline when the RPC reports the wrong chain ID", async () => {
+    const { service, chainProbe } = setup();
+    chainProbe
+      .mockResolvedValueOnce({ chainId: 1, gasPrice: 12n })
+      .mockResolvedValueOnce({ chainId: 11155111, gasPrice: null });
+
+    const chains = await service.getChains();
+
+    expect(chains[0]).toMatchObject({ id: "aethelred", status: "OFFLINE" });
+    expect(chains[1]).toMatchObject({
+      id: "ethereum",
+      status: "ONLINE",
+      currentGasPrice: null,
     });
   });
 
-  // ─── getTransfer ───────────────────────────────────────────────────────────
+  it("never fabricates a route when no signed quote provider exists", async () => {
+    const { service, chainProbe } = setup();
+    chainProbe.mockImplementation(async (chain: { chainId: number }) => ({
+      chainId: chain.chainId,
+      gasPrice: 1n,
+    }));
 
-  describe("getTransfer", () => {
-    it("should return transfer by ID", async () => {
-      const created = await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      const transfer = crossChainService.getTransfer(created.id);
-      expect(transfer.id).toBe(created.id);
-    });
-
-    it("should throw TRANSFER_NOT_FOUND for unknown transfer", () => {
-      expect(() =>
-        crossChainService.getTransfer("nonexistent"),
-      ).toThrow(CrossChainError);
+    await expect(
+      service.getRoutes("aethelred", "ethereum", "USDC", "100"),
+    ).rejects.toMatchObject({
+      code: "ROUTE_QUOTE_UNAVAILABLE",
+      statusCode: 503,
     });
   });
 
-  // ─── listTransfers ─────────────────────────────────────────────────────────
-
-  describe("listTransfers", () => {
-    it("should return all transfers", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      const transfers = crossChainService.listTransfers();
-      expect(transfers).toHaveLength(1);
-    });
-
-    it("should sort by createdAt descending with multiple transfers", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "polygon-mainnet",
-          token: "USDC",
-          amount: "3000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      const transfers = crossChainService.listTransfers();
-      expect(transfers).toHaveLength(2);
-      expect(transfers[0].createdAt.getTime()).toBeGreaterThanOrEqual(
-        transfers[1].createdAt.getTime(),
-      );
-    });
-
-    it("should filter by sender", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender1",
-        "biz-1",
-      );
-
-      const filtered = crossChainService.listTransfers({
-        sender: "0xsender2",
-      });
-      expect(filtered).toHaveLength(0);
-    });
-
-    it("should filter by sourceChain", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      const matchSource = crossChainService.listTransfers({
-        sourceChain: "aethelred-mainnet",
-      });
-      expect(matchSource).toHaveLength(1);
-
-      const noMatchSource = crossChainService.listTransfers({
-        sourceChain: "polygon-mainnet",
-      });
-      expect(noMatchSource).toHaveLength(0);
-    });
-
-    it("should filter by destinationChain", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      const matchDest = crossChainService.listTransfers({
-        destinationChain: "ethereum-mainnet",
-      });
-      expect(matchDest).toHaveLength(1);
-
-      const noMatchDest = crossChainService.listTransfers({
-        destinationChain: "polygon-mainnet",
-      });
-      expect(noMatchDest).toHaveLength(0);
-    });
-
-    it("should filter by status", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      const filtered = crossChainService.listTransfers({ status: "COMPLETED" });
-      expect(filtered).toHaveLength(0);
-    });
-  });
-
-  // ─── recoverTransfer ───────────────────────────────────────────────────────
-
-  describe("recoverTransfer", () => {
-    it("should throw TRANSFER_NOT_FOUND for unknown transfer", async () => {
-      await expect(
-        crossChainService.recoverTransfer("nonexistent", "0xactor"),
-      ).rejects.toMatchObject({ code: "TRANSFER_NOT_FOUND" });
-    });
-
-    it("should throw INVALID_STATE when transfer is not STUCK or FAILED", async () => {
-      const transfer = await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
+  it.each([
+    ["missing source", "", "ethereum", "USDC", "1", "INVALID_ROUTE"],
+    ["same chain", "aethelred", "aethelred", "USDC", "1", "INVALID_ROUTE"],
+    [
+      "missing token",
+      "aethelred",
+      "ethereum",
+      "",
+      "1",
+      "INVALID_QUOTE_REQUEST",
+    ],
+    [
+      "non-finite amount",
+      "aethelred",
+      "ethereum",
+      "USDC",
+      "NaN",
+      "INVALID_QUOTE_REQUEST",
+    ],
+    [
+      "non-positive amount",
+      "aethelred",
+      "ethereum",
+      "USDC",
+      "0",
+      "INVALID_QUOTE_REQUEST",
+    ],
+  ])(
+    "rejects a %s quote before contacting any RPC",
+    async (_name, source, destination, token, amount, code) => {
+      const { service, chainProbe } = setup();
 
       await expect(
-        crossChainService.recoverTransfer(transfer.id, "0xactor"),
-      ).rejects.toMatchObject({ code: "INVALID_STATE" });
-    });
+        service.getRoutes(source, destination, token, amount),
+      ).rejects.toMatchObject({ code });
+      expect(chainProbe).not.toHaveBeenCalled();
+    },
+  );
 
-    it("should recover a STUCK transfer successfully", async () => {
-      const transfer = await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
+  it("distinguishes unknown chains from unavailable chain RPCs", async () => {
+    const { service, chainProbe } = setup();
+    chainProbe.mockImplementation(async (chain: { chainId: number }) => ({
+      chainId: chain.chainId,
+      gasPrice: 1n,
+    }));
 
-      // Manually set status to STUCK
-      (transfer as any).status = "STUCK";
+    await expect(
+      service.getRoutes("unknown", "ethereum", "USDC", "1"),
+    ).rejects.toMatchObject({ code: "CHAIN_NOT_FOUND", statusCode: 404 });
 
-      const result = await crossChainService.recoverTransfer(transfer.id, "0xactor");
-      expect(result.success).toBe(true);
-      expect(result.message).toContain("recovery initiated");
-    });
-
-    it("should recover a FAILED transfer", async () => {
-      const transfer = await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      (transfer as any).status = "FAILED";
-
-      const result = await crossChainService.recoverTransfer(transfer.id, "0xactor");
-      expect(result.success).toBe(true);
+    chainProbe.mockReset();
+    chainProbe
+      .mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce({ chainId: 11155111, gasPrice: 1n });
+    await expect(
+      service.getRoutes("aethelred", "ethereum", "USDC", "1"),
+    ).rejects.toMatchObject({
+      code: "CHAIN_RPC_UNAVAILABLE",
+      statusCode: 503,
     });
   });
 
-  // ─── getRelayNodes ─────────────────────────────────────────────────────────
+  it.each([
+    [undefined, "CHAIN_REGISTRY_UNAVAILABLE"],
+    ["not-json", "CHAIN_REGISTRY_MISCONFIGURED"],
+    ["[]", "CHAIN_REGISTRY_MISCONFIGURED"],
+  ])("rejects an unusable chain registry: %p", async (value, code) => {
+    const { service, chainProbe } = setup();
+    if (value === undefined) delete process.env.CROSSCHAIN_CHAINS_JSON;
+    else process.env.CROSSCHAIN_CHAINS_JSON = value;
 
-  describe("getRelayNodes", () => {
-    it("should return relay nodes", () => {
-      const nodes = crossChainService.getRelayNodes();
-      expect(nodes.length).toBeGreaterThan(0);
-      expect(nodes[0]).toHaveProperty("address");
-      expect(nodes[0]).toHaveProperty("chains");
-      expect(nodes[0]).toHaveProperty("uptime");
+    await expect(service.getChains()).rejects.toMatchObject({
+      code,
+      statusCode: 503,
+    });
+    expect(chainProbe).not.toHaveBeenCalled();
+  });
+
+  it("rejects duplicate chain identifiers and malformed registry URLs", async () => {
+    const { service, chainProbe } = setup();
+    process.env.CROSSCHAIN_CHAINS_JSON = JSON.stringify([
+      chainConfig[0],
+      { ...chainConfig[1], id: chainConfig[0].id },
+    ]);
+    await expect(service.getChains()).rejects.toMatchObject({
+      code: "CHAIN_REGISTRY_MISCONFIGURED",
+    });
+
+    process.env.CROSSCHAIN_CHAINS_JSON = JSON.stringify([
+      { ...chainConfig[0], rpcUrl: "not-a-url" },
+    ]);
+    await expect(service.getChains()).rejects.toMatchObject({
+      code: "CHAIN_REGISTRY_MISCONFIGURED",
+    });
+    expect(chainProbe).not.toHaveBeenCalled();
+  });
+
+  it("requires HTTPS registry endpoints in production", async () => {
+    const { service, chainProbe } = setup();
+    process.env.NODE_ENV = "production";
+    process.env.CROSSCHAIN_CHAINS_JSON = JSON.stringify([
+      { ...chainConfig[0], explorer: "http://explorer.internal" },
+    ]);
+
+    await expect(service.getChains()).rejects.toMatchObject({
+      code: "CHAIN_REGISTRY_MISCONFIGURED",
+      statusCode: 503,
+    });
+    expect(chainProbe).not.toHaveBeenCalled();
+  });
+
+  it("tenant-scopes and paginates transfer history", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.crossChainTransfer.findMany.mockResolvedValue([transfer()]);
+
+    const records = await service.listTransfers({
+      businessId: "business-1",
+      sender: wallet,
+      status: "COMPLETED",
+      page: 2,
+      limit: 25,
+    });
+
+    expect(records[0]).toEqual(
+      expect.objectContaining({
+        businessId: "business-1",
+        bridgeFee: "1.5",
+        dataSource: "DATABASE_LEDGER",
+      }),
+    );
+    expect(prisma.crossChainTransfer.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: 25, take: 25 }),
+    );
+  });
+
+  it("rejects cross-tenant sender filters before querying transfers", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+
+    await expect(
+      service.listTransfers({
+        businessId: "business-1",
+        sender: "0x3333333333333333333333333333333333333333",
+      }),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+    expect(prisma.crossChainTransfer.findMany).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when the authenticated business no longer exists", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue(null);
+
+    await expect(
+      service.listTransfers({ businessId: "missing-business" }),
+    ).rejects.toMatchObject({ code: "BUSINESS_NOT_FOUND", statusCode: 404 });
+    expect(prisma.crossChainTransfer.findMany).not.toHaveBeenCalled();
+  });
+
+  it("reads one tenant-owned transfer and sanitizes persisted step metadata", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.crossChainTransfer.findFirst.mockResolvedValue(
+      transfer({
+        bridgeFee: null,
+        metadata: {
+          steps: [
+            null,
+            { step: "1", name: "invalid", status: "COMPLETED" },
+            {
+              step: 1,
+              name: "source_finality",
+              status: "COMPLETED",
+              txHash: "0xsource",
+              timestamp: "2026-07-21T11:00:30.000Z",
+              details: "12 confirmations",
+            },
+            {
+              step: 2,
+              name: "destination_mint",
+              status: "PENDING",
+              timestamp: "not-a-date",
+            },
+          ],
+        },
+      }),
+    );
+
+    const record = await service.getTransfer("transfer-1", "business-1");
+
+    expect(record.bridgeFee).toBeNull();
+    expect(record.steps).toEqual([
+      expect.objectContaining({
+        step: 1,
+        txHash: "0xsource",
+        timestamp: new Date("2026-07-21T11:00:30.000Z"),
+        details: "12 confirmations",
+      }),
+      expect.objectContaining({
+        step: 2,
+        txHash: null,
+        timestamp: null,
+        details: "",
+      }),
+    ]);
+    expect(prisma.crossChainTransfer.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "transfer-1",
+        sender: { equals: wallet, mode: "insensitive" },
+      },
     });
   });
 
-  // ─── getAnalytics ──────────────────────────────────────────────────────────
+  it("conceals a missing or foreign transfer behind a tenant-scoped 404", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.crossChainTransfer.findFirst.mockResolvedValue(null);
 
-  describe("getAnalytics", () => {
-    it("should return analytics with no transfers", () => {
-      const analytics = crossChainService.getAnalytics();
-      expect(analytics.totalTransfers).toBe(0);
-      expect(analytics.totalVolume).toBe("0.00");
-      expect(analytics.successRate).toBe(1); // default
+    await expect(
+      service.getTransfer("foreign-transfer", "business-1"),
+    ).rejects.toMatchObject({ code: "TRANSFER_NOT_FOUND", statusCode: 404 });
+  });
+
+  it("fails bridge initiation and recovery closed", async () => {
+    const { service } = setup();
+    await expect(
+      service.initiateTransfer(
+        {
+          sourceChain: "aethelred",
+          destinationChain: "ethereum",
+          token: "USDC",
+          amount: "1",
+          recipient: "0x2222222222222222222222222222222222222222",
+        },
+        wallet,
+        "business-1",
+      ),
+    ).rejects.toMatchObject({
+      code: "BRIDGE_EXECUTION_UNAVAILABLE",
+      statusCode: 501,
     });
+    await expect(
+      service.recoverTransfer("transfer-1", wallet, "business-1"),
+    ).rejects.toMatchObject({ statusCode: 501 });
+  });
 
-    it("should calculate analytics with transfers", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "10000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
+  it("returns only persisted relay registry records with bounded pagination", async () => {
+    const { prisma, service } = setup();
+    prisma.relayNode.findMany.mockResolvedValue([
+      {
+        id: "relay-1",
+        address: wallet,
+        chains: ["aethelred", "ethereum"],
+        stake: new Prisma.Decimal("500"),
+        successRate: new Prisma.Decimal("98.5"),
+        totalRelayed: 12,
+        avgLatency: 500,
+        isActive: true,
+        registeredAt: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    ]);
 
-      const analytics = crossChainService.getAnalytics();
-      expect(analytics.totalTransfers).toBe(1);
-      expect(parseFloat(analytics.totalVolume)).toBe(10000);
-      expect(analytics.activeRelayNodes).toBeGreaterThan(0);
+    const relays = await service.getRelayNodes({ page: 1, limit: 10 });
+
+    expect(relays[0]).toEqual(
+      expect.objectContaining({
+        successRate: 98.5,
+        uptime: null,
+        dataSource: "DATABASE_REGISTRY",
+      }),
+    );
+    expect(prisma.relayNode.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: 0, take: 10 }),
+    );
+  });
+
+  it("maps inactive relays and supports an unpaginated registry read", async () => {
+    const { prisma, service } = setup();
+    prisma.relayNode.findMany.mockResolvedValue([
+      {
+        id: "relay-2",
+        address: wallet,
+        chains: ["aethelred"],
+        stake: new Prisma.Decimal("0"),
+        successRate: new Prisma.Decimal("0"),
+        totalRelayed: 0,
+        avgLatency: 0,
+        isActive: false,
+        registeredAt: new Date("2026-07-01T00:00:00.000Z"),
+      },
+    ]);
+
+    const relays = await service.getRelayNodes();
+
+    expect(relays[0].status).toBe("INACTIVE");
+    expect(prisma.relayNode.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: undefined, take: undefined }),
+    );
+  });
+
+  it("derives bridge analytics from tenant-scoped durable transfers", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.crossChainTransfer.findMany.mockResolvedValue([
+      transfer(),
+      transfer({
+        id: "transfer-2",
+        amount: new Prisma.Decimal("50"),
+        status: "STUCK",
+        completedAt: null,
+        sourceChain: "ethereum",
+        destChain: "aethelred",
+      }),
+      transfer({
+        id: "transfer-3",
+        amount: new Prisma.Decimal("25"),
+        status: "COMPLETED",
+      }),
+    ]);
+    prisma.relayNode.count.mockResolvedValue(2);
+
+    const analytics = await service.getAnalytics("business-1");
+
+    expect(analytics).toMatchObject({
+      totalTransfers: 3,
+      totalVolume: "325",
+      successRate: 2 / 3,
+      avgSettlementTime: 90,
+      activeRelayNodes: 2,
+      stuckTransfers: 1,
+      dataSource: "DATABASE_LEDGER",
     });
-
-    it("should calculate settlement time for completed transfers", async () => {
-      const transfer = await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      // Simulate completion
-      (transfer as any).status = "COMPLETED";
-      (transfer as any).completedAt = new Date(transfer.createdAt.getTime() + 60000);
-
-      const analytics = crossChainService.getAnalytics();
-      expect(analytics.totalTransfers).toBe(1);
-      expect(analytics.avgSettlementTime).toBeGreaterThan(0);
+    expect(analytics.topCorridors[0]).toEqual({
+      source: "aethelred",
+      destination: "ethereum",
+      volume: "275",
+      count: 2,
     });
-
-    it("should calculate corridor analytics with multiple transfers", async () => {
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "10000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      await crossChainService.initiateTransfer(
-        {
-          sourceChain: "ethereum-mainnet",
-          destinationChain: "polygon-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient2",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      const analytics = crossChainService.getAnalytics();
-      expect(analytics.totalTransfers).toBe(2);
-      expect(analytics.topCorridors.length).toBeGreaterThanOrEqual(2);
-      expect(analytics.byChain).toBeDefined();
+    expect(analytics.byChain.aethelred).toEqual({
+      inbound: "50",
+      outbound: "275",
+      transfers: 3,
     });
-
-    it("should handle failed transfers in analytics", async () => {
-      const transfer = await crossChainService.initiateTransfer(
-        {
-          sourceChain: "aethelred-mainnet",
-          destinationChain: "ethereum-mainnet",
-          token: "USDC",
-          amount: "5000",
-          recipient: "0xrecipient",
-        },
-        "0xsender",
-        "biz-1",
-      );
-
-      (transfer as any).status = "FAILED";
-
-      const analytics = crossChainService.getAnalytics();
-      // Failed transfers still get counted in totalTransfers
-      expect(analytics.totalTransfers).toBe(1);
-      // But successRate should be < 1
-      expect(analytics.successRate).toBeLessThanOrEqual(1);
+    expect(prisma.relayNode.count).toHaveBeenCalledWith({
+      where: { isActive: true },
     });
   });
 
-  // ─── initiateTransfer NO_ROUTE branch ──────────────────────────────────────
+  it("returns explicit null rates for an empty analytics ledger", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.crossChainTransfer.findMany.mockResolvedValue([]);
+    prisma.relayNode.count.mockResolvedValue(0);
 
-  describe("initiateTransfer (NO_ROUTE)", () => {
-    it("should throw NO_ROUTE when getRoutes returns empty array", async () => {
-      // Temporarily mock getRoutes to return empty
-      const origGetRoutes = crossChainService.getRoutes.bind(crossChainService);
-      jest.spyOn(crossChainService, "getRoutes").mockReturnValue([]);
-
-      await expect(
-        crossChainService.initiateTransfer(
-          {
-            sourceChain: "aethelred-mainnet",
-            destinationChain: "ethereum-mainnet",
-            token: "USDC",
-            amount: "5000",
-            recipient: "0xrecipient",
-          },
-          "0xsender",
-          "biz-1",
-        ),
-      ).rejects.toMatchObject({ code: "NO_ROUTE" });
-
-      jest.restoreAllMocks();
-      jest.spyOn(auditService, "createAuditEntry").mockResolvedValue({} as any);
-    });
-  });
-
-  // ─── CrossChainError ───────────────────────────────────────────────────────
-
-  describe("CrossChainError", () => {
-    it("should set properties correctly", () => {
-      const err = new CrossChainError("CODE", "msg", 404);
-      expect(err.code).toBe("CODE");
-      expect(err.statusCode).toBe(404);
-      expect(err.name).toBe("CrossChainError");
-    });
-
-    it("should default statusCode to 400", () => {
-      const err = new CrossChainError("CODE", "msg");
-      expect(err.statusCode).toBe(400);
+    await expect(service.getAnalytics("business-1")).resolves.toMatchObject({
+      totalTransfers: 0,
+      avgSettlementTime: null,
+      successRate: null,
+      topCorridors: [],
+      byChain: {},
     });
   });
 });

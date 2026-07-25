@@ -1,107 +1,82 @@
 import { Router, Response } from "express";
-import { PrismaClient, KYCStatus, BusinessTier, Prisma } from "@prisma/client";
-import { AuthenticatedRequest, authenticateAPIKey, generateAPIKey } from "../middleware/auth";
+import { Business, KYCStatus, BusinessTier, Prisma } from "@prisma/client";
+import { prisma } from "../lib/db";
+import {
+  AuthenticatedRequest,
+  authenticateAPIKey,
+  createPublicRateLimit,
+} from "../middleware/auth";
 import {
   validate,
   CreateBusinessSchema,
   UpdateBusinessSchema,
   ListBusinessesSchema,
+  BusinessVerificationSchema,
+  BusinessTierUpgradeSchema,
+  type ListBusinessesInput,
 } from "../middleware/validation";
-import { extractRole, requireOwnership, requirePermission, requireRole, RBACRequest } from "../middleware/rbac";
+import {
+  extractRole,
+  requireCurrentPlatformAdmin,
+  requireOwnership,
+  requirePermission,
+  revalidatePlatformAdmin,
+  RBACRequest,
+} from "../middleware/rbac";
 import { AuditService } from "../services/audit";
 import { activeBusinesses } from "../lib/metrics";
 import { logger } from "../lib/logger";
+import {
+  BusinessRegistrationError,
+  BusinessRegistrationService,
+} from "../services/business-registration";
+import {
+  BusinessReconciliationError,
+  BusinessReconciliationService,
+} from "../services/business-reconciliation";
 
-const prisma = new PrismaClient();
 const auditService = new AuditService(prisma);
+const registrationService = new BusinessRegistrationService(
+  prisma,
+  auditService,
+);
+const reconciliationService = new BusinessReconciliationService(
+  prisma,
+  auditService,
+);
 
 const router = Router();
-
-// Tier limits configuration
-const TIER_LIMITS: Record<BusinessTier, { daily: number; monthly: number }> = {
-  STARTER: { daily: 10000, monthly: 100000 },
-  STANDARD: { daily: 50000, monthly: 500000 },
-  ENTERPRISE: { daily: 500000, monthly: 5000000 },
-  INSTITUTIONAL: { daily: 5000000, monthly: 50000000 },
-};
+const registrationLimiter = createPublicRateLimit({
+  scope: "business-registration",
+  limit: 5,
+  key: (req) =>
+    typeof req.body?.address === "string" ? req.body.address : req.ip,
+});
 
 // ─── POST /v1/businesses — Register new business ───────────────────────────
 
 router.post(
   "/",
+  registrationLimiter,
   validate(CreateBusinessSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      // Check for existing business with same address or license
-      const existing = await prisma.business.findFirst({
-        where: {
-          OR: [
-            { address: req.body.address },
-            { licenseNumber: req.body.licenseNumber },
-          ],
-        },
-      });
-
-      if (existing) {
-        res.status(409).json({
-          error: "DUPLICATE_BUSINESS",
-          message: "A business with this address or license number already exists",
-        });
-        return;
-      }
-
-      const business = await prisma.business.create({
-        data: {
-          address: req.body.address,
-          licenseNumber: req.body.licenseNumber,
-          businessName: req.body.businessName,
-          jurisdiction: req.body.jurisdiction,
-          businessType: req.body.businessType,
-          complianceOfficer: req.body.complianceOfficer || null,
-          contactEmail: req.body.contactEmail,
-          kycStatus: "UNVERIFIED",
-          tier: "STARTER",
-          dailyLimit: TIER_LIMITS.STARTER.daily,
-          monthlyLimit: TIER_LIMITS.STARTER.monthly,
-        },
-      });
-
-      // Generate initial API key
-      const { rawKey, keyHash } = generateAPIKey();
-      await prisma.aPIKey.create({
-        data: {
-          businessId: business.id,
-          keyHash,
-          name: "Default API Key",
-          status: "ACTIVE",
-        },
-      });
-
-      await auditService.createAuditEntry({
-        eventType: "BUSINESS_REGISTERED",
-        actor: req.body.address,
-        description: `Business "${req.body.businessName}" registered in ${req.body.jurisdiction}`,
-        severity: "INFO",
-        metadata: {
-          businessId: business.id,
-          jurisdiction: req.body.jurisdiction,
-          businessType: req.body.businessType,
-        },
-      });
-
-      logger.info("Business registered", {
-        businessId: business.id,
-        businessName: req.body.businessName,
-      });
-
-      res.status(201).json({
+      const result = await registrationService.register(req.body);
+      res.status(result.replayed ? 200 : 201).json({
         success: true,
         data: {
-          ...business,
-          dailyLimit: business.dailyLimit.toString(),
-          monthlyLimit: business.monthlyLimit.toString(),
+          business: {
+            ...result.business,
+            dailyLimit: result.business.dailyLimit.toString(),
+            monthlyLimit: result.business.monthlyLimit.toString(),
+            registrationBlockNumber:
+              result.business.registrationBlockNumber?.toString() || null,
+          },
+          apiKey: result.apiKey,
+          replayed: result.replayed,
+          confirmations: result.confirmations,
+          chainId: result.chainId,
         },
-        apiKey: rawKey, // Only returned once at registration
       });
     } catch (error) {
       handleError(error, res);
@@ -115,16 +90,25 @@ router.get(
   "/",
   authenticateAPIKey,
   extractRole,
-  requireRole("ADMIN"),
+  requireCurrentPlatformAdmin,
   validate(ListBusinessesSchema, "query"),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const { page, limit, sortOrder, kycStatus, tier, jurisdiction } = req.query as any;
+      const { page, limit, sortOrder, kycStatus, tier, jurisdiction, search } =
+        req.query as unknown as ListBusinessesInput;
 
       const where: Prisma.BusinessWhereInput = {};
       if (kycStatus) where.kycStatus = kycStatus as KYCStatus;
       if (tier) where.tier = tier as BusinessTier;
-      if (jurisdiction) where.jurisdiction = { contains: jurisdiction, mode: "insensitive" };
+      if (jurisdiction)
+        where.jurisdiction = { contains: jurisdiction, mode: "insensitive" };
+      if (search) {
+        where.OR = [
+          { businessName: { contains: search, mode: "insensitive" } },
+          { licenseNumber: { contains: search, mode: "insensitive" } },
+          { address: { contains: search, mode: "insensitive" } },
+        ];
+      }
 
       const [data, total] = await Promise.all([
         prisma.business.findMany({
@@ -142,6 +126,8 @@ router.get(
           ...b,
           dailyLimit: b.dailyLimit.toString(),
           monthlyLimit: b.monthlyLimit.toString(),
+          registrationBlockNumber:
+            b.registrationBlockNumber?.toString() || null,
         })),
         pagination: {
           page: page || 1,
@@ -162,6 +148,7 @@ router.get(
   "/:id",
   authenticateAPIKey,
   extractRole,
+  revalidatePlatformAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       // Tenant isolation: verify caller owns the resource or is admin
@@ -202,6 +189,8 @@ router.get(
           ...business,
           dailyLimit: business.dailyLimit.toString(),
           monthlyLimit: business.monthlyLimit.toString(),
+          registrationBlockNumber:
+            business.registrationBlockNumber?.toString() || null,
         },
       });
     } catch (error) {
@@ -252,6 +241,8 @@ router.patch(
           ...updated,
           dailyLimit: updated.dailyLimit.toString(),
           monthlyLimit: updated.monthlyLimit.toString(),
+          registrationBlockNumber:
+            updated.registrationBlockNumber?.toString() || null,
         },
       });
     } catch (error) {
@@ -266,59 +257,28 @@ router.post(
   "/:id/verify",
   authenticateAPIKey,
   extractRole,
-  requireRole("ADMIN", "COMPLIANCE_OFFICER"),
+  requireCurrentPlatformAdmin,
+  validate(BusinessVerificationSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const business = await prisma.business.findUnique({
-        where: { id: req.params.id },
-      });
-
-      if (!business) {
-        res.status(404).json({
-          error: "BUSINESS_NOT_FOUND",
-          message: "Business not found",
-        });
-        return;
-      }
-
-      if (business.kycStatus === "VERIFIED") {
-        res.status(409).json({
-          error: "ALREADY_VERIFIED",
-          message: "Business is already verified",
-        });
-        return;
-      }
-
-      const updated = await prisma.business.update({
-        where: { id: req.params.id },
-        data: {
-          kycStatus: "VERIFIED",
-          lastVerified: new Date(),
-        },
-      });
-
-      // Update active businesses metric
+      const result = await reconciliationService.reconcileVerification(
+        req.params.id,
+        req.body.txHash,
+      );
       const verifiedCount = await prisma.business.count({
-        where: { kycStatus: "VERIFIED" },
+        where: { kycStatus: "VERIFIED", tier: result.business.tier },
       });
-      activeBusinesses.set({ tier: updated.tier }, verifiedCount);
-
-      await auditService.createAuditEntry({
-        eventType: "BUSINESS_VERIFIED",
-        actor: req.businessId || "system",
-        description: `Business "${business.businessName}" KYC verified`,
-        severity: "INFO",
-        metadata: { businessId: business.id },
-      });
+      activeBusinesses.set({ tier: result.business.tier }, verifiedCount);
 
       res.json({
         success: true,
         data: {
-          ...updated,
-          dailyLimit: updated.dailyLimit.toString(),
-          monthlyLimit: updated.monthlyLimit.toString(),
+          business: serializeBusiness(result.business),
+          replayed: result.replayed,
+          txHash: result.txHash,
+          confirmations: result.confirmations,
+          chainId: result.chainId,
         },
-        message: "Business KYC verified successfully",
       });
     } catch (error) {
       handleError(error, res);
@@ -326,76 +286,46 @@ router.post(
   },
 );
 
-// ─── POST /v1/businesses/:id/suspend — Suspend business ────────────────────
-
-router.post(
-  "/:id/suspend",
-  authenticateAPIKey,
-  extractRole,
-  requireRole("ADMIN"),
-  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
-    try {
-      const business = await prisma.business.findUnique({
-        where: { id: req.params.id },
-      });
-
-      if (!business) {
-        res.status(404).json({
-          error: "BUSINESS_NOT_FOUND",
-          message: "Business not found",
+for (const [path, reconcile] of [
+  [
+    "suspend",
+    reconciliationService.reconcileSuspension.bind(reconciliationService),
+  ],
+  [
+    "reinstate",
+    reconciliationService.reconcileReinstatement.bind(reconciliationService),
+  ],
+  [
+    "revoke",
+    reconciliationService.reconcileRevocation.bind(reconciliationService),
+  ],
+] as const) {
+  router.post(
+    `/:id/${path}`,
+    authenticateAPIKey,
+    extractRole,
+    requirePermission("businesses:manage"),
+    requireCurrentPlatformAdmin,
+    validate(BusinessVerificationSchema),
+    async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+      try {
+        const result = await reconcile(req.params.id, req.body.txHash);
+        res.json({
+          success: true,
+          data: {
+            business: serializeBusiness(result.business),
+            replayed: result.replayed,
+            txHash: result.txHash,
+            confirmations: result.confirmations,
+            chainId: result.chainId,
+          },
         });
-        return;
+      } catch (error) {
+        handleError(error, res);
       }
-
-      if (business.kycStatus === "SUSPENDED") {
-        res.status(409).json({
-          error: "ALREADY_SUSPENDED",
-          message: "Business is already suspended",
-        });
-        return;
-      }
-
-      const updated = await prisma.business.update({
-        where: { id: req.params.id },
-        data: { kycStatus: "SUSPENDED" },
-      });
-
-      // Revoke all active API keys
-      await prisma.aPIKey.updateMany({
-        where: { businessId: req.params.id, status: "ACTIVE" },
-        data: { status: "REVOKED", revokedAt: new Date() },
-      });
-
-      await auditService.createAuditEntry({
-        eventType: "BUSINESS_SUSPENDED",
-        actor: req.businessId || "system",
-        description: `Business "${business.businessName}" suspended. All API keys revoked.`,
-        severity: "HIGH",
-        metadata: {
-          businessId: business.id,
-          reason: req.body.reason || "No reason provided",
-        },
-      });
-
-      logger.warn("Business suspended", {
-        businessId: business.id,
-        businessName: business.businessName,
-      });
-
-      res.json({
-        success: true,
-        data: {
-          ...updated,
-          dailyLimit: updated.dailyLimit.toString(),
-          monthlyLimit: updated.monthlyLimit.toString(),
-        },
-        message: "Business suspended. All API keys have been revoked.",
-      });
-    } catch (error) {
-      handleError(error, res);
-    }
-  },
-);
+    },
+  );
+}
 
 // ─── POST /v1/businesses/:id/upgrade — Upgrade business tier ────────────────
 
@@ -403,74 +333,26 @@ router.post(
   "/:id/upgrade",
   authenticateAPIKey,
   extractRole,
-  requireRole("ADMIN"),
+  requirePermission("businesses:manage"),
+  requireCurrentPlatformAdmin,
+  validate(BusinessTierUpgradeSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const business = await prisma.business.findUnique({
-        where: { id: req.params.id },
-      });
-
-      if (!business) {
-        res.status(404).json({
-          error: "BUSINESS_NOT_FOUND",
-          message: "Business not found",
-        });
-        return;
-      }
-
-      if (business.kycStatus !== "VERIFIED") {
-        res.status(403).json({
-          error: "KYC_REQUIRED",
-          message: "Business must be KYC verified before tier upgrade",
-        });
-        return;
-      }
-
-      const tierOrder: BusinessTier[] = ["STARTER", "STANDARD", "ENTERPRISE", "INSTITUTIONAL"];
-      const currentIndex = tierOrder.indexOf(business.tier);
-
-      if (currentIndex >= tierOrder.length - 1) {
-        res.status(409).json({
-          error: "MAX_TIER",
-          message: "Business is already at the highest tier",
-        });
-        return;
-      }
-
-      const newTier = tierOrder[currentIndex + 1];
-      const newLimits = TIER_LIMITS[newTier];
-
-      const updated = await prisma.business.update({
-        where: { id: req.params.id },
-        data: {
-          tier: newTier,
-          dailyLimit: newLimits.daily,
-          monthlyLimit: newLimits.monthly,
-        },
-      });
-
-      await auditService.createAuditEntry({
-        eventType: "BUSINESS_UPGRADED",
-        actor: req.businessId || "system",
-        description: `Business "${business.businessName}" upgraded from ${business.tier} to ${newTier}`,
-        severity: "INFO",
-        metadata: {
-          businessId: business.id,
-          previousTier: business.tier,
-          newTier,
-          dailyLimit: newLimits.daily,
-          monthlyLimit: newLimits.monthly,
-        },
-      });
+      const result = await reconciliationService.reconcileTierUpgrade(
+        req.params.id,
+        req.body.newTier,
+        req.body.txHash,
+      );
 
       res.json({
         success: true,
         data: {
-          ...updated,
-          dailyLimit: updated.dailyLimit.toString(),
-          monthlyLimit: updated.monthlyLimit.toString(),
+          business: serializeBusiness(result.business),
+          replayed: result.replayed,
+          txHash: result.txHash,
+          confirmations: result.confirmations,
+          chainId: result.chainId,
         },
-        message: `Business upgraded to ${newTier} tier`,
       });
     } catch (error) {
       handleError(error, res);
@@ -484,6 +366,7 @@ router.get(
   "/:id/limits",
   authenticateAPIKey,
   extractRole,
+  revalidatePlatformAdmin,
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       // Ownership check: caller must own the resource or be admin
@@ -495,67 +378,12 @@ router.get(
         return;
       }
 
-      const business = await prisma.business.findUnique({
-        where: { id: req.params.id },
-      });
-
-      if (!business) {
-        res.status(404).json({
-          error: "BUSINESS_NOT_FOUND",
-          message: "Business not found",
-        });
-        return;
-      }
-
-      const now = new Date();
-      const startOfDay = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-      const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1);
-
-      const [dailyUsage, monthlyUsage] = await Promise.all([
-        prisma.payment.aggregate({
-          _sum: { amount: true },
-          _count: { id: true },
-          where: {
-            sender: business.address,
-            initiatedAt: { gte: startOfDay },
-            status: { notIn: ["CANCELLED", "REFUNDED", "REJECTED"] },
-          },
-        }),
-        prisma.payment.aggregate({
-          _sum: { amount: true },
-          _count: { id: true },
-          where: {
-            sender: business.address,
-            initiatedAt: { gte: startOfMonth },
-            status: { notIn: ["CANCELLED", "REFUNDED", "REJECTED"] },
-          },
-        }),
-      ]);
-
-      const dailyUsed = dailyUsage._sum.amount?.toString() || "0";
-      const monthlyUsed = monthlyUsage._sum.amount?.toString() || "0";
-
+      const limits = await reconciliationService.getOnChainLimits(
+        req.params.id,
+      );
       res.json({
         success: true,
-        data: {
-          tier: business.tier,
-          daily: {
-            limit: business.dailyLimit.toString(),
-            used: dailyUsed,
-            remaining: (
-              parseFloat(business.dailyLimit.toString()) - parseFloat(dailyUsed)
-            ).toString(),
-            transactions: dailyUsage._count.id,
-          },
-          monthly: {
-            limit: business.monthlyLimit.toString(),
-            used: monthlyUsed,
-            remaining: (
-              parseFloat(business.monthlyLimit.toString()) - parseFloat(monthlyUsed)
-            ).toString(),
-            transactions: monthlyUsage._count.id,
-          },
-        },
+        data: limits,
       });
     } catch (error) {
       handleError(error, res);
@@ -566,6 +394,15 @@ router.get(
 // ─── Error Handler ──────────────────────────────────────────────────────────
 
 function handleError(error: unknown, res: Response): void {
+  if (
+    error instanceof BusinessRegistrationError ||
+    error instanceof BusinessReconciliationError
+  ) {
+    res
+      .status(error.statusCode)
+      .json({ error: error.code, message: error.message });
+    return;
+  }
   logger.error("Unhandled business error", {
     error: (error as Error).message,
     stack: (error as Error).stack,
@@ -575,6 +412,16 @@ function handleError(error: unknown, res: Response): void {
     error: "INTERNAL_ERROR",
     message: "An internal error occurred",
   });
+}
+
+function serializeBusiness(business: Business): Record<string, unknown> {
+  return {
+    ...business,
+    dailyLimit: business.dailyLimit.toString(),
+    monthlyLimit: business.monthlyLimit.toString(),
+    registrationBlockNumber:
+      business.registrationBlockNumber?.toString() || null,
+  };
 }
 
 export default router;

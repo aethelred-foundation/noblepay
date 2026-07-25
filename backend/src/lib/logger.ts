@@ -3,15 +3,17 @@ import { v4 as uuidv4 } from "uuid";
 
 const { combine, timestamp, json, errors, printf } = winston.format;
 
-const structuredFormat = printf(({ level, message, timestamp, correlationId, ...meta }) => {
-  return JSON.stringify({
-    timestamp,
-    level,
-    correlationId: correlationId || undefined,
-    message,
-    ...meta,
-  });
-});
+const structuredFormat = printf(
+  ({ level, message, timestamp, correlationId, ...meta }) => {
+    return JSON.stringify({
+      timestamp,
+      level,
+      correlationId: correlationId || undefined,
+      message,
+      ...meta,
+    });
+  },
+);
 
 export const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || "info",

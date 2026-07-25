@@ -1,162 +1,326 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const {
+  loadFixture,
+  time,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 /**
  * BranchMax1 — targets uncovered branches in:
  *   InvoiceFinancing, StreamingPayments, ComplianceOracle, CrossChainRouter
  */
 describe("BranchMax1", function () {
-
   // ═══════════════════════════════════════════════════════════════
   // InvoiceFinancing
   // ═══════════════════════════════════════════════════════════════
   describe("InvoiceFinancing — deep branch coverage", function () {
     async function deployIF() {
-      const [admin, treasury, creditor, debtor, factor, analyst, arbiter, other] = await ethers.getSigners();
+      const [
+        admin,
+        treasury,
+        creditor,
+        debtor,
+        factor,
+        analyst,
+        arbiter,
+        other,
+      ] = await ethers.getSigners();
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const usdc = await MockERC20.deploy("USDC", "USDC", 6);
       const IF = await ethers.getContractFactory("InvoiceFinancing");
       const inv = await IF.deploy(admin.address, treasury.address, 100);
-      await inv.connect(admin).grantRole(await inv.FACTOR_ROLE(), factor.address);
-      await inv.connect(admin).grantRole(await inv.CREDIT_ANALYST_ROLE(), analyst.address);
-      await inv.connect(admin).grantRole(await inv.ARBITER_ROLE(), arbiter.address);
+      await inv
+        .connect(admin)
+        .grantRole(await inv.FACTOR_ROLE(), factor.address);
+      await inv
+        .connect(admin)
+        .grantRole(await inv.CREDIT_ANALYST_ROLE(), analyst.address);
+      await inv
+        .connect(admin)
+        .grantRole(await inv.ARBITER_ROLE(), arbiter.address);
       await inv.connect(admin).setSupportedToken(usdc.target, true);
       const amt = ethers.parseUnits("100000000", 6);
       for (const s of [factor, debtor, creditor, other]) {
         await usdc.mint(s.address, amt);
         await usdc.connect(s).approve(inv.target, ethers.MaxUint256);
       }
-      return { inv, usdc, admin, treasury, creditor, debtor, factor, analyst, arbiter, other };
+      return {
+        inv,
+        usdc,
+        admin,
+        treasury,
+        creditor,
+        debtor,
+        factor,
+        analyst,
+        arbiter,
+        other,
+      };
     }
 
     const FACE = ethers.parseUnits("100000", 6);
     const DOC = ethers.keccak256(ethers.toUtf8Bytes("doc"));
 
-    async function createInvoice(inv, creditor, debtor, usdc, maturityOffset = 30n * 86400n) {
+    async function createInvoice(
+      inv,
+      creditor,
+      debtor,
+      usdc,
+      maturityOffset = 30n * 86400n,
+    ) {
       const mat = BigInt(await time.latest()) + maturityOffset;
-      const tx = await inv.connect(creditor).createInvoice(
-        debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      );
+      const tx = await inv
+        .connect(creditor)
+        .createInvoice(
+          debtor.address,
+          FACE,
+          usdc.target,
+          mat,
+          DOC,
+          7n * 86400n,
+          500,
+        );
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+      );
       return ev.args[0];
     }
 
     it("reverts with zero treasury", async function () {
       const [a] = await ethers.getSigners();
       const IF = await ethers.getContractFactory("InvoiceFinancing");
-      await expect(IF.deploy(a.address, ethers.ZeroAddress, 100))
-        .to.be.revertedWithCustomError(IF, "ZeroAddress");
+      await expect(
+        IF.deploy(a.address, ethers.ZeroAddress, 100),
+      ).to.be.revertedWithCustomError(IF, "ZeroAddress");
     });
 
     it("reverts when maturity > 365 days in future", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) + 366n * 86400n;
-      await expect(inv.connect(creditor).createInvoice(
-        debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createInvoice(
+            debtor.address,
+            FACE,
+            usdc.target,
+            mat,
+            DOC,
+            7n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts when grace period > MAX_GRACE_PERIOD", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) + 30n * 86400n;
-      await expect(inv.connect(creditor).createInvoice(
-        debtor.address, FACE, usdc.target, mat, DOC, 91n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createInvoice(
+            debtor.address,
+            FACE,
+            usdc.target,
+            mat,
+            DOC,
+            91n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts createInvoice with zero face value", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) + 30n * 86400n;
-      await expect(inv.connect(creditor).createInvoice(
-        debtor.address, 0, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createInvoice(
+            debtor.address,
+            0,
+            usdc.target,
+            mat,
+            DOC,
+            7n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts createInvoice with debtor == creditor", async function () {
       const { inv, usdc, creditor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) + 30n * 86400n;
-      await expect(inv.connect(creditor).createInvoice(
-        creditor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createInvoice(
+            creditor.address,
+            FACE,
+            usdc.target,
+            mat,
+            DOC,
+            7n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts createInvoice with unsupported token", async function () {
       const { inv, creditor, debtor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) + 30n * 86400n;
-      await expect(inv.connect(creditor).createInvoice(
-        debtor.address, FACE, ethers.ZeroAddress, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createInvoice(
+            debtor.address,
+            FACE,
+            ethers.ZeroAddress,
+            mat,
+            DOC,
+            7n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts createInvoice with maturity in the past", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) - 100n;
-      await expect(inv.connect(creditor).createInvoice(
-        debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createInvoice(
+            debtor.address,
+            FACE,
+            usdc.target,
+            mat,
+            DOC,
+            7n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts createInvoice with excessive penalty", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) + 30n * 86400n;
-      await expect(inv.connect(creditor).createInvoice(
-        debtor.address, FACE, usdc.target, mat, DOC, 7n * 86400n, 2001
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createInvoice(
+            debtor.address,
+            FACE,
+            usdc.target,
+            mat,
+            DOC,
+            7n * 86400n,
+            2001,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts chained invoice with zero debtor", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
       const mat = BigInt(await time.latest()) + 30n * 86400n;
-      await expect(inv.connect(creditor).createChainedInvoice(
-        invId, ethers.ZeroAddress, FACE, mat, DOC, 7n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .createChainedInvoice(
+            invId,
+            ethers.ZeroAddress,
+            FACE,
+            mat,
+            DOC,
+            7n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts batch with array length mismatch", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const mat = BigInt(await time.latest()) + 30n * 86400n;
-      await expect(inv.connect(creditor).batchCreateInvoices(
-        [debtor.address], [FACE, FACE], usdc.target, [mat], [DOC], 7n * 86400n, 500
-      )).to.be.reverted;
+      await expect(
+        inv
+          .connect(creditor)
+          .batchCreateInvoices(
+            [debtor.address],
+            [FACE, FACE],
+            usdc.target,
+            [mat],
+            [DOC],
+            7n * 86400n,
+            500,
+          ),
+      ).to.be.reverted;
     });
 
     it("handles protocolFee == 0", async function () {
-      const { inv, usdc, creditor, debtor, factor, admin } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor, admin } =
+        await loadFixture(deployIF);
       await inv.connect(admin).setProtocolFee(0);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("90000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("90000", 6), 500);
     });
 
     it("caps repayment at remaining amount", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("90000", 6), 500);
-      await inv.connect(debtor).repayInvoice(invId, ethers.parseUnits("200000", 6));
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("90000", 6), 500);
+      await inv
+        .connect(debtor)
+        .repayInvoice(invId, ethers.parseUnits("200000", 6));
     });
 
     it("late repayment updates credit score", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
-      const invId = await createInvoice(inv, creditor, debtor, usdc, 10n * 86400n);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
+      const invId = await createInvoice(
+        inv,
+        creditor,
+        debtor,
+        usdc,
+        10n * 86400n,
+      );
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await time.increase(15 * 86400);
       await inv.connect(debtor).repayInvoice(invId, FACE);
     });
 
     it("very late repayment (>30 days) hits worst credit tier", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
-      const invId = await createInvoice(inv, creditor, debtor, usdc, 5n * 86400n);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
+      const invId = await createInvoice(
+        inv,
+        creditor,
+        debtor,
+        usdc,
+        5n * 86400n,
+      );
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await time.increase(40 * 86400);
       await inv.connect(debtor).repayInvoice(invId, FACE);
     });
 
     it("on-time repayment gives best credit tier", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await inv.connect(debtor).repayInvoice(invId, FACE);
     });
 
@@ -167,10 +331,15 @@ describe("BranchMax1", function () {
     });
 
     it("releases collateral after settlement", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(debtor).depositCollateral(invId, usdc.target, ethers.parseUnits("10000", 6));
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(debtor)
+        .depositCollateral(invId, usdc.target, ethers.parseUnits("10000", 6));
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await inv.connect(debtor).repayInvoice(invId, FACE);
       await inv.connect(debtor).releaseCollateral(invId, debtor.address);
     });
@@ -178,7 +347,9 @@ describe("BranchMax1", function () {
     it("releases collateral after cancel", async function () {
       const { inv, usdc, creditor, debtor } = await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(debtor).depositCollateral(invId, usdc.target, ethers.parseUnits("10000", 6));
+      await inv
+        .connect(debtor)
+        .depositCollateral(invId, usdc.target, ethers.parseUnits("10000", 6));
       await inv.connect(creditor).cancelInvoice(invId);
       await inv.connect(debtor).releaseCollateral(invId, debtor.address);
     });
@@ -190,78 +361,129 @@ describe("BranchMax1", function () {
     });
 
     it("reverts cancel on financed invoice", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await expect(inv.connect(creditor).cancelInvoice(invId)).to.be.reverted;
     });
 
     it("debtor initiates dispute", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await inv.connect(debtor).initiateDispute(invId, "defective");
     });
 
     it("creditor initiates dispute", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await inv.connect(creditor).initiateDispute(invId, "non-payment");
     });
 
     it("resolve dispute FAVOR_DEBTOR", async function () {
-      const { inv, usdc, creditor, debtor, factor, arbiter } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor, arbiter } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       // Fund the contract so it can distribute awards
       await usdc.mint(inv.target, FACE);
       const dtx = await inv.connect(debtor).initiateDispute(invId, "defective");
       const dr = await dtx.wait();
-      const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DisputeInitiated");
+      const dev = dr.logs.find(
+        (l) => l.fragment && l.fragment.name === "DisputeInitiated",
+      );
       // FAVOR_DEBTOR = 2, creditorAward=0, debtorRefund=some amount
-      await inv.connect(arbiter).resolveDispute(dev.args[0], 2, 0, ethers.parseUnits("1000", 6));
+      await inv
+        .connect(arbiter)
+        .resolveDispute(dev.args[0], 2, 0, ethers.parseUnits("1000", 6));
     });
 
     it("resolve dispute FAVOR_CREDITOR", async function () {
-      const { inv, usdc, creditor, debtor, factor, arbiter } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor, arbiter } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       // Fund the contract so it can distribute awards
       await usdc.mint(inv.target, FACE);
       const dtx = await inv.connect(debtor).initiateDispute(invId, "defective");
       const dr = await dtx.wait();
-      const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DisputeInitiated");
+      const dev = dr.logs.find(
+        (l) => l.fragment && l.fragment.name === "DisputeInitiated",
+      );
       // FAVOR_CREDITOR = 1, creditorAward=some amount, debtorRefund=0
-      await inv.connect(arbiter).resolveDispute(dev.args[0], 1, ethers.parseUnits("1000", 6), 0);
+      await inv
+        .connect(arbiter)
+        .resolveDispute(dev.args[0], 1, ethers.parseUnits("1000", 6), 0);
     });
 
     it("resolve dispute SPLIT (both awards)", async function () {
-      const { inv, usdc, creditor, debtor, factor, arbiter } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor, arbiter } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await usdc.mint(inv.target, FACE);
       const dtx = await inv.connect(debtor).initiateDispute(invId, "defective");
       const dr = await dtx.wait();
-      const dev = dr.logs.find(l => l.fragment && l.fragment.name === "DisputeInitiated");
+      const dev = dr.logs.find(
+        (l) => l.fragment && l.fragment.name === "DisputeInitiated",
+      );
       // SPLIT = 3, both get something
-      await inv.connect(arbiter).resolveDispute(dev.args[0], 3, ethers.parseUnits("500", 6), ethers.parseUnits("500", 6));
+      await inv
+        .connect(arbiter)
+        .resolveDispute(
+          dev.args[0],
+          3,
+          ethers.parseUnits("500", 6),
+          ethers.parseUnits("500", 6),
+        );
     });
 
     it("marks invoice overdue", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
-      const invId = await createInvoice(inv, creditor, debtor, usdc, 5n * 86400n);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
+      const invId = await createInvoice(
+        inv,
+        creditor,
+        debtor,
+        usdc,
+        5n * 86400n,
+      );
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
       await time.increase(15 * 86400);
       await inv.connect(creditor).markOverdue(invId);
     });
 
     it("partial then full repayment settles", async function () {
-      const { inv, usdc, creditor, debtor, factor } = await loadFixture(deployIF);
+      const { inv, usdc, creditor, debtor, factor } =
+        await loadFixture(deployIF);
       const invId = await createInvoice(inv, creditor, debtor, usdc);
-      await inv.connect(factor).financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
-      await inv.connect(debtor).repayInvoice(invId, ethers.parseUnits("50000", 6));
-      await inv.connect(debtor).repayInvoice(invId, ethers.parseUnits("50000", 6));
+      await inv
+        .connect(factor)
+        .financeInvoice(invId, ethers.parseUnits("50000", 6), 500);
+      await inv
+        .connect(debtor)
+        .repayInvoice(invId, ethers.parseUnits("50000", 6));
+      await inv
+        .connect(debtor)
+        .repayInvoice(invId, ethers.parseUnits("50000", 6));
     });
   });
 
@@ -275,20 +497,31 @@ describe("BranchMax1", function () {
       const token = await MockERC20.deploy("USDC", "USDC", 6);
       const SP = await ethers.getContractFactory("StreamingPayments");
       const sp = await SP.deploy(admin.address);
-      await sp.connect(admin).grantRole(await sp.STREAM_ADMIN_ROLE(), admin.address);
+      await sp
+        .connect(admin)
+        .grantRole(await sp.STREAM_ADMIN_ROLE(), admin.address);
       const amt = ethers.parseUnits("10000000", 6);
       await token.mint(sender.address, amt);
       await token.connect(sender).approve(sp.target, ethers.MaxUint256);
       return { sp, token, admin, sender, recipient, other };
     }
 
-    async function createStream(sp, token, sender, recipient, duration = 30 * 86400, cliff = 0) {
+    async function createStream(
+      sp,
+      token,
+      sender,
+      recipient,
+      duration = 30 * 86400,
+      cliff = 0,
+    ) {
       const amount = ethers.parseUnits("10000", 6);
-      const tx = await sp.connect(sender).createStream(
-        recipient.address, token.target, amount, duration, cliff
-      );
+      const tx = await sp
+        .connect(sender)
+        .createStream(recipient.address, token.target, amount, duration, cliff);
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "StreamCreated");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "StreamCreated",
+      );
       return ev.args[0];
     }
 
@@ -299,34 +532,61 @@ describe("BranchMax1", function () {
 
     it("reverts createStream with self as recipient", async function () {
       const { sp, token, sender } = await loadFixture(deploySP);
-      await expect(sp.connect(sender).createStream(
-        sender.address, token.target, ethers.parseUnits("1000", 6), 30 * 86400, 0
-      )).to.be.reverted;
+      await expect(
+        sp
+          .connect(sender)
+          .createStream(
+            sender.address,
+            token.target,
+            ethers.parseUnits("1000", 6),
+            30 * 86400,
+            0,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts createStream with zero amount", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
-      await expect(sp.connect(sender).createStream(
-        recipient.address, token.target, 0, 30 * 86400, 0
-      )).to.be.reverted;
+      await expect(
+        sp
+          .connect(sender)
+          .createStream(recipient.address, token.target, 0, 30 * 86400, 0),
+      ).to.be.reverted;
     });
 
     it("reverts createStream with duration too short", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
-      await expect(sp.connect(sender).createStream(
-        recipient.address, token.target, ethers.parseUnits("1000", 6), 3599, 0
-      )).to.be.reverted;
+      await expect(
+        sp
+          .connect(sender)
+          .createStream(
+            recipient.address,
+            token.target,
+            ethers.parseUnits("1000", 6),
+            3599,
+            0,
+          ),
+      ).to.be.reverted;
     });
 
     it("reverts createStream with cliff >= duration", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
-      await expect(sp.connect(sender).createStream(
-        recipient.address, token.target, ethers.parseUnits("1000", 6), 30 * 86400, 30 * 86400
-      )).to.be.reverted;
+      await expect(
+        sp
+          .connect(sender)
+          .createStream(
+            recipient.address,
+            token.target,
+            ethers.parseUnits("1000", 6),
+            30 * 86400,
+            30 * 86400,
+          ),
+      ).to.be.reverted;
     });
 
     it("pauseStream reverts for unauthorized caller", async function () {
-      const { sp, token, sender, recipient, other } = await loadFixture(deploySP);
+      const { sp, token, sender, recipient, other } =
+        await loadFixture(deploySP);
       const sid = await createStream(sp, token, sender, recipient);
       await expect(sp.connect(other).pauseStream(sid)).to.be.reverted;
     });
@@ -346,14 +606,28 @@ describe("BranchMax1", function () {
 
     it("withdraw before cliff reverts", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
-      const sid = await createStream(sp, token, sender, recipient, 30 * 86400, 10 * 86400);
+      const sid = await createStream(
+        sp,
+        token,
+        sender,
+        recipient,
+        30 * 86400,
+        10 * 86400,
+      );
       await time.increase(5 * 86400);
       await expect(sp.connect(recipient).withdraw(sid)).to.be.reverted;
     });
 
     it("withdraw after cliff succeeds", async function () {
       const { sp, token, sender, recipient } = await loadFixture(deploySP);
-      const sid = await createStream(sp, token, sender, recipient, 30 * 86400, 10 * 86400);
+      const sid = await createStream(
+        sp,
+        token,
+        sender,
+        recipient,
+        30 * 86400,
+        10 * 86400,
+      );
       await time.increase(15 * 86400);
       await sp.connect(recipient).withdraw(sid);
     });
@@ -384,7 +658,8 @@ describe("BranchMax1", function () {
     });
 
     it("withdraw by non-recipient reverts", async function () {
-      const { sp, token, sender, recipient, other } = await loadFixture(deploySP);
+      const { sp, token, sender, recipient, other } =
+        await loadFixture(deploySP);
       const sid = await createStream(sp, token, sender, recipient);
       await time.increase(5 * 86400);
       await expect(sp.connect(other).withdraw(sid)).to.be.reverted;
@@ -403,8 +678,12 @@ describe("BranchMax1", function () {
       const pid1 = ethers.keccak256(ethers.toUtf8Bytes("platform1"));
       const att2 = ethers.toUtf8Bytes("enclave-key-2");
       const pid2 = ethers.keccak256(ethers.toUtf8Bytes("platform2"));
-      await co.connect(node1).registerTEENode(att1, pid1, { value: ethers.parseEther("10") });
-      await co.connect(node2).registerTEENode(att2, pid2, { value: ethers.parseEther("10") });
+      await co
+        .connect(node1)
+        .registerTEENode(att1, pid1, { value: ethers.parseEther("10") });
+      await co
+        .connect(node2)
+        .registerTEENode(att2, pid2, { value: ethers.parseEther("10") });
       return { co, admin, node1, node2, node3, other };
     }
 
@@ -427,22 +706,26 @@ describe("BranchMax1", function () {
       const { co, admin, node1 } = await loadFixture(deployCO);
       const attData = ethers.toUtf8Bytes("attestation-content");
       const wrongHash = ethers.keccak256(ethers.toUtf8Bytes("wrong"));
-      await expect(co.connect(admin).verifyAttestation(node1.address, attData, wrongHash))
-        .to.be.revertedWithCustomError(co, "InvalidAttestation");
+      await expect(
+        co.connect(admin).verifyAttestation(node1.address, attData, wrongHash),
+      ).to.be.revertedWithCustomError(co, "InvalidAttestation");
     });
 
     it("verifyAttestation with correct hash succeeds", async function () {
       const { co, admin, node1 } = await loadFixture(deployCO);
       const attData = ethers.toUtf8Bytes("attestation-content");
       const correctHash = ethers.keccak256(attData);
-      await co.connect(admin).verifyAttestation(node1.address, attData, correctHash);
+      await co
+        .connect(admin)
+        .verifyAttestation(node1.address, attData, correctHash);
     });
 
     it("submitScreeningResult with riskScore > 100 reverts", async function () {
       const { co, node1 } = await loadFixture(deployCO);
       const sub = ethers.keccak256(ethers.toUtf8Bytes("sub"));
       const res = ethers.keccak256(ethers.toUtf8Bytes("res"));
-      await expect(co.connect(node1).submitScreeningResult(sub, res, 101, true)).to.be.reverted;
+      await expect(co.connect(node1).submitScreeningResult(sub, res, 101, true))
+        .to.be.reverted;
     });
 
     it("submitScreeningResult succeeds", async function () {
@@ -462,8 +745,15 @@ describe("BranchMax1", function () {
       const { co, admin, node1 } = await loadFixture(deployCO);
       for (let i = 0; i < 3; i++) {
         await time.increase(6 * 60);
-        try { await co.connect(admin).slashOfflineNode(node1.address); } catch { break; }
+        await expect(co.connect(admin).slashOfflineNode(node1.address)).to.emit(
+          co,
+          "TEENodeSlashed",
+        );
       }
+      const node = await co.getTEENode(node1.address);
+      expect(node.status).to.equal(3);
+      expect(node.stake).to.equal(0);
+      expect(await co.getActiveTEENodeCount()).to.equal(1);
     });
 
     it("deregisterTEENode removes node", async function () {
@@ -478,8 +768,10 @@ describe("BranchMax1", function () {
 
     it("proposeThresholdUpdate invalid ranges revert", async function () {
       const { co, admin } = await loadFixture(deployCO);
-      await expect(co.connect(admin).proposeThresholdUpdate(50, 50)).to.be.reverted;
-      await expect(co.connect(admin).proposeThresholdUpdate(50, 101)).to.be.reverted;
+      await expect(co.connect(admin).proposeThresholdUpdate(50, 50)).to.be
+        .reverted;
+      await expect(co.connect(admin).proposeThresholdUpdate(50, 101)).to.be
+        .reverted;
     });
 
     it("propose and approve threshold update", async function () {
@@ -488,7 +780,9 @@ describe("BranchMax1", function () {
       await co.connect(admin).grantRole(THRESHOLD_ROLE, node1.address);
       const tx = await co.connect(admin).proposeThresholdUpdate(20, 60);
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "ThresholdChangeProposed");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "ThresholdChangeProposed",
+      );
       if (ev) {
         await co.connect(node1).approveThresholdUpdate(ev.args[0], 20, 60);
       }
@@ -498,10 +792,13 @@ describe("BranchMax1", function () {
       const { co, admin } = await loadFixture(deployCO);
       const tx = await co.connect(admin).proposeThresholdUpdate(20, 60);
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "ThresholdChangeProposed");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "ThresholdChangeProposed",
+      );
       if (ev) {
-        await expect(co.connect(admin).approveThresholdUpdate(ev.args[0], 20, 60))
-          .to.be.revertedWithCustomError(co, "AlreadyVoted");
+        await expect(
+          co.connect(admin).approveThresholdUpdate(ev.args[0], 20, 60),
+        ).to.be.revertedWithCustomError(co, "AlreadyVoted");
       }
     });
 
@@ -526,16 +823,25 @@ describe("BranchMax1", function () {
     const MAX_TRANSFER = ethers.parseUnits("1000000", 6);
 
     async function deployCCR() {
-      const [admin, relay1, relay2, sender, treasury, other] = await ethers.getSigners();
+      const [admin, relay1, relay2, sender, treasury, other] =
+        await ethers.getSigners();
       const MockERC20 = await ethers.getContractFactory("MockERC20");
       const token = await MockERC20.deploy("USDC", "USDC", 6);
       const CCR = await ethers.getContractFactory("CrossChainRouter");
       const ccr = await CCR.deploy(admin.address, treasury.address);
       await ccr.connect(admin).setTokenSupport(token.target, true);
-      await ccr.connect(admin).addChain(
-        CHAIN_ID, "Polygon", BASE_FEE, FEE_RATE_BP, FINALITY_BLOCKS,
-        RECOVERY_TIMEOUT, MIN_TRANSFER, MAX_TRANSFER
-      );
+      await ccr
+        .connect(admin)
+        .addChain(
+          CHAIN_ID,
+          "Polygon",
+          BASE_FEE,
+          FEE_RATE_BP,
+          FINALITY_BLOCKS,
+          RECOVERY_TIMEOUT,
+          MIN_TRANSFER,
+          MAX_TRANSFER,
+        );
       const amt = ethers.parseUnits("10000000", 6);
       await token.mint(sender.address, amt);
       await token.connect(sender).approve(ccr.target, ethers.MaxUint256);
@@ -546,57 +852,130 @@ describe("BranchMax1", function () {
     it("initiateTransfer with zero token reverts", async function () {
       const { ccr, sender } = await loadFixture(deployCCR);
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      await expect(ccr.connect(sender).initiateTransfer(ethers.ZeroAddress, ethers.parseUnits("1000", 6), CHAIN_ID, rh)).to.be.reverted;
+      await expect(
+        ccr
+          .connect(sender)
+          .initiateTransfer(
+            ethers.ZeroAddress,
+            ethers.parseUnits("1000", 6),
+            CHAIN_ID,
+            rh,
+          ),
+      ).to.be.reverted;
     });
 
     it("initiateTransfer with zero amount reverts", async function () {
       const { ccr, token, sender } = await loadFixture(deployCCR);
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      await expect(ccr.connect(sender).initiateTransfer(token.target, 0, CHAIN_ID, rh)).to.be.reverted;
+      await expect(
+        ccr.connect(sender).initiateTransfer(token.target, 0, CHAIN_ID, rh),
+      ).to.be.reverted;
     });
 
     it("addChain duplicate reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(CHAIN_ID, "P2", BASE_FEE, FEE_RATE_BP, FINALITY_BLOCKS, RECOVERY_TIMEOUT, MIN_TRANSFER, MAX_TRANSFER)).to.be.reverted;
+      await expect(
+        ccr
+          .connect(admin)
+          .addChain(
+            CHAIN_ID,
+            "P2",
+            BASE_FEE,
+            FEE_RATE_BP,
+            FINALITY_BLOCKS,
+            RECOVERY_TIMEOUT,
+            MIN_TRANSFER,
+            MAX_TRANSFER,
+          ),
+      ).to.be.reverted;
     });
 
     it("addChain fee too high reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(999, "T", BASE_FEE, 201, FINALITY_BLOCKS, RECOVERY_TIMEOUT, MIN_TRANSFER, MAX_TRANSFER)).to.be.reverted;
+      await expect(
+        ccr
+          .connect(admin)
+          .addChain(
+            999,
+            "T",
+            BASE_FEE,
+            201,
+            FINALITY_BLOCKS,
+            RECOVERY_TIMEOUT,
+            MIN_TRANSFER,
+            MAX_TRANSFER,
+          ),
+      ).to.be.reverted;
     });
 
     it("addChain recovery timeout too short reverts", async function () {
       const { ccr, admin } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).addChain(999, "T", BASE_FEE, FEE_RATE_BP, FINALITY_BLOCKS, 60, MIN_TRANSFER, MAX_TRANSFER)).to.be.reverted;
+      await expect(
+        ccr
+          .connect(admin)
+          .addChain(
+            999,
+            "T",
+            BASE_FEE,
+            FEE_RATE_BP,
+            FINALITY_BLOCKS,
+            60,
+            MIN_TRANSFER,
+            MAX_TRANSFER,
+          ),
+      ).to.be.reverted;
     });
 
     it("deregisterRelay non-relay reverts", async function () {
       const { ccr, admin, other } = await loadFixture(deployCCR);
-      await expect(ccr.connect(admin).deregisterRelay(other.address)).to.be.reverted;
+      await expect(ccr.connect(admin).deregisterRelay(other.address)).to.be
+        .reverted;
     });
 
     it("deregister non-last relay triggers swap-and-pop", async function () {
       const { ccr, admin, relay1, relay2 } = await loadFixture(deployCCR);
-      await ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") });
-      await ccr.connect(relay2).registerRelay({ value: ethers.parseEther("5") });
+      await ccr
+        .connect(relay1)
+        .registerRelay({ value: ethers.parseEther("5") });
+      await ccr
+        .connect(relay2)
+        .registerRelay({ value: ethers.parseEther("5") });
       await ccr.connect(admin).deregisterRelay(relay1.address);
     });
 
     it("markTransferFailed with no relay (no penalty)", async function () {
       const { ccr, token, admin, sender } = await loadFixture(deployCCR);
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      const tx = await ccr.connect(sender).initiateTransfer(token.target, ethers.parseUnits("1000", 6), CHAIN_ID, rh);
+      const tx = await ccr
+        .connect(sender)
+        .initiateTransfer(
+          token.target,
+          ethers.parseUnits("1000", 6),
+          CHAIN_ID,
+          rh,
+        );
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "TransferInitiated");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "TransferInitiated",
+      );
       await ccr.connect(admin).markTransferFailed(ev.args[0], "fail");
     });
 
     it("recoverTransfer after deadline", async function () {
       const { ccr, token, sender } = await loadFixture(deployCCR);
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      const tx = await ccr.connect(sender).initiateTransfer(token.target, ethers.parseUnits("1000", 6), CHAIN_ID, rh);
+      const tx = await ccr
+        .connect(sender)
+        .initiateTransfer(
+          token.target,
+          ethers.parseUnits("1000", 6),
+          CHAIN_ID,
+          rh,
+        );
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "TransferInitiated");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "TransferInitiated",
+      );
       await time.increase(RECOVERY_TIMEOUT + 1);
       await ccr.connect(sender).recoverTransfer(ev.args[0]);
     });
@@ -604,22 +983,45 @@ describe("BranchMax1", function () {
     it("recoverTransfer for FAILED transfer", async function () {
       const { ccr, token, admin, sender } = await loadFixture(deployCCR);
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      const tx = await ccr.connect(sender).initiateTransfer(token.target, ethers.parseUnits("1000", 6), CHAIN_ID, rh);
+      const tx = await ccr
+        .connect(sender)
+        .initiateTransfer(
+          token.target,
+          ethers.parseUnits("1000", 6),
+          CHAIN_ID,
+          rh,
+        );
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "TransferInitiated");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "TransferInitiated",
+      );
       await ccr.connect(admin).markTransferFailed(ev.args[0], "fail");
       await ccr.connect(sender).recoverTransfer(ev.args[0]);
     });
 
     it("full relay flow: initiate, proof, confirm", async function () {
-      const { ccr, token, admin, relay1, sender } = await loadFixture(deployCCR);
-      await ccr.connect(relay1).registerRelay({ value: ethers.parseEther("5") });
+      const { ccr, token, admin, relay1, sender } =
+        await loadFixture(deployCCR);
+      await ccr
+        .connect(relay1)
+        .registerRelay({ value: ethers.parseEther("5") });
       const rh = ethers.keccak256(ethers.toUtf8Bytes("r"));
-      const tx = await ccr.connect(sender).initiateTransfer(token.target, ethers.parseUnits("1000", 6), CHAIN_ID, rh);
+      const tx = await ccr
+        .connect(sender)
+        .initiateTransfer(
+          token.target,
+          ethers.parseUnits("1000", 6),
+          CHAIN_ID,
+          rh,
+        );
       const r = await tx.wait();
-      const ev = r.logs.find(l => l.fragment && l.fragment.name === "TransferInitiated");
+      const ev = r.logs.find(
+        (l) => l.fragment && l.fragment.name === "TransferInitiated",
+      );
       const destTx = ethers.keccak256(ethers.toUtf8Bytes("destTx"));
-      await ccr.connect(relay1).submitRelayProof(ev.args[0], destTx, ethers.toUtf8Bytes("proof"));
+      await ccr
+        .connect(relay1)
+        .submitRelayProof(ev.args[0], destTx, ethers.toUtf8Bytes("proof"));
       await ccr.connect(admin).confirmTransfer(ev.args[0]);
     });
 

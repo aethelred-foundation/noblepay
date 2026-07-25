@@ -22,7 +22,10 @@ func main() {
 		logger.Fatal("configuration error", zap.Error(err))
 	}
 
-	srv := server.New(cfg, logger)
+	srv, err := server.New(cfg, logger)
+	if err != nil {
+		logger.Fatal("server setup failed", zap.Error(err))
+	}
 
 	// Graceful shutdown on SIGINT/SIGTERM.
 	ctx, cancel := context.WithCancel(context.Background())

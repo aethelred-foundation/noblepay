@@ -42,7 +42,8 @@ describe("SealSettlementGate", function () {
   }
 
   it("sets and reads back the CEAP policy", async function () {
-    const [backends, minVerif, platforms, vendorRoot, residency] = await gate.compliancePolicy();
+    const [backends, minVerif, platforms, vendorRoot, residency] =
+      await gate.compliancePolicy();
     expect(backends).to.deep.equal(["tee"]);
     expect(minVerif).to.equal("");
     expect(platforms).to.deep.equal([]);
@@ -57,7 +58,9 @@ describe("SealSettlementGate", function () {
   it("clears a corridor backed by a policy-satisfying, corridor-bound seal", async function () {
     await seedCorridorSeal("job-1", "seal-1", payer, payee);
     // Permissionless: the payee (a third party to governance) clears it.
-    await expect(gate.connect(payee).clear(payer.address, payee.address, "job-1"))
+    await expect(
+      gate.connect(payee).clear(payer.address, payee.address, "job-1"),
+    )
       .to.emit(gate, "CorridorCleared")
       .withArgs(payer.address, payee.address, "seal-1", "job-1");
     expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
@@ -110,10 +113,12 @@ describe("SealSettlementGate", function () {
   });
 
   it("rejects a zero-address corridor", async function () {
-    await expect(gate.clear(ethers.ZeroAddress, payee.address, "job-1"))
-      .to.be.revertedWithCustomError(gate, "ZeroCorridor");
-    await expect(gate.clear(payer.address, ethers.ZeroAddress, "job-1"))
-      .to.be.revertedWithCustomError(gate, "ZeroCorridor");
+    await expect(
+      gate.clear(ethers.ZeroAddress, payee.address, "job-1"),
+    ).to.be.revertedWithCustomError(gate, "ZeroCorridor");
+    await expect(
+      gate.clear(payer.address, ethers.ZeroAddress, "job-1"),
+    ).to.be.revertedWithCustomError(gate, "ZeroCorridor");
   });
 
   it("closes the corridor live when the chain revokes the seal", async function () {
@@ -141,8 +146,9 @@ describe("SealSettlementGate", function () {
   });
 
   it("requireCleared reverts for an uncleared corridor and passes for a cleared one", async function () {
-    await expect(gate.requireCleared(payer.address, payee.address))
-      .to.be.revertedWithCustomError(gate, "NoSuchClearance");
+    await expect(
+      gate.requireCleared(payer.address, payee.address),
+    ).to.be.revertedWithCustomError(gate, "NoSuchClearance");
     await seedCorridorSeal("job-1", "seal-1", payer, payee);
     await gate.clear(payer.address, payee.address, "job-1");
     await gate.requireCleared(payer.address, payee.address); // no revert
@@ -152,10 +158,12 @@ describe("SealSettlementGate", function () {
     await seedCorridorSeal("job-1", "seal-1", payer, payee);
     await gate.clear(payer.address, payee.address, "job-1");
 
-    await expect(gate.connect(stranger).revoke(payer.address, payee.address))
-      .to.be.revertedWith("Ownable: caller is not the owner");
-    await expect(gate.connect(gov).revoke(other.address, stranger.address))
-      .to.be.revertedWithCustomError(gate, "NoSuchClearance");
+    await expect(
+      gate.connect(stranger).revoke(payer.address, payee.address),
+    ).to.be.revertedWith("Ownable: caller is not the owner");
+    await expect(
+      gate.connect(gov).revoke(other.address, stranger.address),
+    ).to.be.revertedWithCustomError(gate, "NoSuchClearance");
 
     await expect(gate.connect(gov).revoke(payer.address, payee.address))
       .to.emit(gate, "ClearanceRevoked")
@@ -166,17 +174,26 @@ describe("SealSettlementGate", function () {
   it("honours pause / unpause on the clearance path", async function () {
     await gate.connect(gov).pause();
     await seedCorridorSeal("job-1", "seal-1", payer, payee);
-    await expect(gate.clear(payer.address, payee.address, "job-1")).to.be.revertedWith(
-      "Pausable: paused",
-    );
+    await expect(
+      gate.clear(payer.address, payee.address, "job-1"),
+    ).to.be.revertedWith("Pausable: paused");
     await gate.connect(gov).unpause();
     await gate.clear(payer.address, payee.address, "job-1");
     expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
+
+    await gate.connect(gov).pause();
+    await expect(
+      gate.requireCleared(payer.address, payee.address),
+    ).to.be.revertedWith("Pausable: paused");
+    await gate.connect(gov).unpause();
+    await gate.requireCleared(payer.address, payee.address);
   });
 
   it("restricts setCompliancePolicy to the owner", async function () {
     await expect(
-      gate.connect(stranger).setCompliancePolicy(["fhe"], "", [], false, ["EU"]),
+      gate
+        .connect(stranger)
+        .setCompliancePolicy(["fhe"], "", [], false, ["EU"]),
     ).to.be.revertedWith("Ownable: caller is not the owner");
   });
 });

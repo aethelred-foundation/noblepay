@@ -1,6 +1,10 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { loadFixture, time } = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const {
+  loadFixture,
+  time,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const { configureMockBusinessRegistry } = require("./helpers/paymentChannels");
 
 // ================================================================
 // MockERC20 - decimals() coverage
@@ -63,7 +67,8 @@ describe("ComplianceOracle - Final Coverage", function () {
 // ================================================================
 describe("CrossChainRouter - Final Coverage", function () {
   async function deployFixture() {
-    const [admin, relay1, relay2, sender, recipient, other, treasuryAddr] = await ethers.getSigners();
+    const [admin, relay1, relay2, sender, recipient, other, treasuryAddr] =
+      await ethers.getSigners();
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const token = await MockERC20.deploy("USDC", "USDC", 6);
 
@@ -71,15 +76,34 @@ describe("CrossChainRouter - Final Coverage", function () {
     const router = await CCR.deploy(admin.address, treasuryAddr.address);
 
     await router.connect(admin).setTokenSupport(token.target, true);
-    await router.connect(admin).addChain(
-      1, "Ethereum", ethers.parseUnits("1", 6), 50, 12, 86400, ethers.parseUnits("10", 6), ethers.parseUnits("1000000", 6)
-    );
+    await router
+      .connect(admin)
+      .addChain(
+        1,
+        "Ethereum",
+        ethers.parseUnits("1", 6),
+        50,
+        12,
+        86400,
+        ethers.parseUnits("10", 6),
+        ethers.parseUnits("1000000", 6),
+      );
 
     const mintAmount = ethers.parseUnits("10000000", 6);
     await token.mint(sender.address, mintAmount);
     await token.connect(sender).approve(router.target, ethers.MaxUint256);
 
-    return { router, token, admin, relay1, relay2, sender, recipient, other, treasuryAddr };
+    return {
+      router,
+      token,
+      admin,
+      relay1,
+      relay2,
+      sender,
+      recipient,
+      other,
+      treasuryAddr,
+    };
   }
 
   it("should return relay node info", async function () {
@@ -121,8 +145,10 @@ describe("PaymentChannels - Final Coverage", function () {
     const pc = await PC.deploy(admin.address, treasury.address, 100);
 
     await pc.connect(admin).setSupportedToken(usdc.target, true);
-    await pc.connect(admin).setKYCStatus(partyA.address, true);
-    await pc.connect(admin).setKYCStatus(partyB.address, true);
+    const registry = await configureMockBusinessRegistry(pc, admin, [
+      partyA,
+      partyB,
+    ]);
 
     const mintAmount = ethers.parseUnits("10000000", 6);
     await usdc.mint(partyA.address, mintAmount);
@@ -130,7 +156,7 @@ describe("PaymentChannels - Final Coverage", function () {
     await usdc.connect(partyA).approve(pc.target, ethers.MaxUint256);
     await usdc.connect(partyB).approve(pc.target, ethers.MaxUint256);
 
-    return { pc, usdc, admin, partyA, partyB, other, treasury };
+    return { pc, registry, usdc, admin, partyA, partyB, other, treasury };
   }
 
   it("should return dispute record", async function () {
@@ -151,9 +177,9 @@ describe("PaymentChannels - Final Coverage", function () {
     expect(ids.length).to.equal(0);
   });
 
-  it("should batch set KYC status", async function () {
-    const { pc, admin, other } = await loadFixture(deployFixture);
-    await pc.connect(admin).batchSetKYCStatus([other.address], [true]);
+  it("should return current registry KYC status", async function () {
+    const { pc, registry, other } = await loadFixture(deployFixture);
+    await registry.setBusiness(other.address, true, 0);
     expect(await pc.kycVerified(other.address)).to.be.true;
   });
 });
@@ -163,7 +189,8 @@ describe("PaymentChannels - Final Coverage", function () {
 // ================================================================
 describe("FXHedgingVault - Final Coverage", function () {
   async function deployFixture() {
-    const [admin, hedger, oracle, liquidator, other, treasuryAddr] = await ethers.getSigners();
+    const [admin, hedger, oracle, liquidator, other, treasuryAddr] =
+      await ethers.getSigners();
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const collateral = await MockERC20.deploy("USDC", "USDC", 6);
 
@@ -176,11 +203,13 @@ describe("FXHedgingVault - Final Coverage", function () {
     await vault.connect(admin).grantRole(LIQUIDATOR_ROLE, liquidator.address);
     await vault.connect(admin).setSupportedCollateral(collateral.target, true);
 
-    const pairTx = await vault.connect(admin).addCurrencyPair(
-      "0x555344", "0x455552", 10000, 1000, 500
-    );
+    const pairTx = await vault
+      .connect(admin)
+      .addCurrencyPair("0x555344", "0x455552", 10000, 1000, 500);
     const pairReceipt = await pairTx.wait();
-    const pairEvent = pairReceipt.logs.find(l => l.fragment && l.fragment.name === "CurrencyPairAdded");
+    const pairEvent = pairReceipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "CurrencyPairAdded",
+    );
     const pairId = pairEvent.args[0];
 
     await vault.connect(oracle).submitFXRate(pairId, 367250000n);
@@ -189,51 +218,103 @@ describe("FXHedgingVault - Final Coverage", function () {
     await collateral.mint(hedger.address, mintAmount);
     await collateral.connect(hedger).approve(vault.target, ethers.MaxUint256);
     await collateral.mint(liquidator.address, mintAmount);
-    await collateral.connect(liquidator).approve(vault.target, ethers.MaxUint256);
+    await collateral
+      .connect(liquidator)
+      .approve(vault.target, ethers.MaxUint256);
 
-    return { vault, collateral, admin, hedger, oracle, liquidator, other, treasuryAddr, pairId };
+    return {
+      vault,
+      collateral,
+      admin,
+      hedger,
+      oracle,
+      liquidator,
+      other,
+      treasuryAddr,
+      pairId,
+    };
   }
 
   it("should revert createForward with inactive pair", async function () {
-    const { vault, collateral, hedger, admin, pairId } = await loadFixture(deployFixture);
+    const { vault, collateral, hedger, admin, pairId } =
+      await loadFixture(deployFixture);
     await vault.connect(admin).setCurrencyPairActive(pairId, false);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
-    await expect(vault.connect(hedger).createForward(
-      pairId, ethers.parseUnits("1000", 6), maturity, collateral.target, ethers.parseUnits("200", 6)
-    )).to.be.revertedWithCustomError(vault, "PairNotActive");
+    await expect(
+      vault
+        .connect(hedger)
+        .createForward(
+          pairId,
+          ethers.parseUnits("1000", 6),
+          maturity,
+          collateral.target,
+          ethers.parseUnits("200", 6),
+        ),
+    ).to.be.revertedWithCustomError(vault, "PairNotActive");
   });
 
   it("should revert createForward with zero notional", async function () {
-    const { vault, collateral, hedger, pairId } = await loadFixture(deployFixture);
+    const { vault, collateral, hedger, pairId } =
+      await loadFixture(deployFixture);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
-    await expect(vault.connect(hedger).createForward(
-      pairId, 0, maturity, collateral.target, ethers.parseUnits("200", 6)
-    )).to.be.revertedWithCustomError(vault, "ZeroAmount");
+    await expect(
+      vault
+        .connect(hedger)
+        .createForward(
+          pairId,
+          0,
+          maturity,
+          collateral.target,
+          ethers.parseUnits("200", 6),
+        ),
+    ).to.be.revertedWithCustomError(vault, "ZeroAmount");
   });
 
   it("should revert createForward with maturity in past", async function () {
-    const { vault, collateral, hedger, pairId } = await loadFixture(deployFixture);
-    await expect(vault.connect(hedger).createForward(
-      pairId, ethers.parseUnits("1000", 6), 1, collateral.target, ethers.parseUnits("200", 6)
-    )).to.be.revertedWithCustomError(vault, "MaturityInPast");
+    const { vault, collateral, hedger, pairId } =
+      await loadFixture(deployFixture);
+    await expect(
+      vault
+        .connect(hedger)
+        .createForward(
+          pairId,
+          ethers.parseUnits("1000", 6),
+          1,
+          collateral.target,
+          ethers.parseUnits("200", 6),
+        ),
+    ).to.be.revertedWithCustomError(vault, "MaturityInPast");
   });
 
   it("should revert createForward with unsupported collateral", async function () {
     const { vault, hedger, other, pairId } = await loadFixture(deployFixture);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
-    await expect(vault.connect(hedger).createForward(
-      pairId, ethers.parseUnits("1000", 6), maturity, other.address, ethers.parseUnits("200", 6)
-    )).to.be.revertedWithCustomError(vault, "UnsupportedCollateral");
+    await expect(
+      vault
+        .connect(hedger)
+        .createForward(
+          pairId,
+          ethers.parseUnits("1000", 6),
+          maturity,
+          other.address,
+          ethers.parseUnits("200", 6),
+        ),
+    ).to.be.revertedWithCustomError(vault, "UnsupportedCollateral");
   });
 
   it("should check isUnderMargined for forward with no loss", async function () {
-    const { vault, collateral, hedger, oracle, pairId } = await loadFixture(deployFixture);
+    const { vault, collateral, hedger, oracle, pairId } =
+      await loadFixture(deployFixture);
     const notional = ethers.parseUnits("100000", 6);
     const coll = ethers.parseUnits("15000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
-    const tx = await vault.connect(hedger).createForward(pairId, notional, maturity, collateral.target, coll);
+    const tx = await vault
+      .connect(hedger)
+      .createForward(pairId, notional, maturity, collateral.target, coll);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "ForwardCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "ForwardCreated",
+    );
     const positionId = event.args[0];
 
     // Rate goes UP - no unrealized loss
@@ -260,7 +341,16 @@ describe("FXHedgingVault - Final Coverage", function () {
 // ================================================================
 describe("InvoiceFinancing - Final Coverage", function () {
   async function deployFixture() {
-    const [admin, factor, analyst, arbiter, creditor, debtor, other, treasuryAddr] = await ethers.getSigners();
+    const [
+      admin,
+      factor,
+      analyst,
+      arbiter,
+      creditor,
+      debtor,
+      other,
+      treasuryAddr,
+    ] = await ethers.getSigners();
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const token = await MockERC20.deploy("USDC", "USDC", 6);
 
@@ -283,28 +373,52 @@ describe("InvoiceFinancing - Final Coverage", function () {
     await token.connect(debtor).approve(invoicing.target, ethers.MaxUint256);
     await token.connect(factor).approve(invoicing.target, ethers.MaxUint256);
 
-    return { invoicing, token, admin, factor, analyst, arbiter, creditor, debtor, other, treasuryAddr };
+    return {
+      invoicing,
+      token,
+      admin,
+      factor,
+      analyst,
+      arbiter,
+      creditor,
+      debtor,
+      other,
+      treasuryAddr,
+    };
   }
 
   it("should trigger volume bonus in credit score calculation via large repayment", async function () {
-    const { invoicing, token, creditor, debtor } = await loadFixture(deployFixture);
+    const { invoicing, token, creditor, debtor } =
+      await loadFixture(deployFixture);
     // Create and repay multiple high-value invoices to build up totalValueRepaid
     const faceValue = ethers.parseUnits("200000", 6); // 200k per invoice
     for (let i = 0; i < 6; i++) {
       const maturity = BigInt(await time.latest()) + 86400n * 90n;
       const docHash = ethers.keccak256(ethers.toUtf8Bytes(`inv-${i}`));
-      const tx = await invoicing.connect(creditor).createInvoice(
-        debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-      );
+      const tx = await invoicing
+        .connect(creditor)
+        .createInvoice(
+          debtor.address,
+          faceValue,
+          token.target,
+          maturity,
+          docHash,
+          7,
+          200,
+        );
       const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+      const event = receipt.logs.find(
+        (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+      );
       const invoiceId = event.args[0];
       // Repay immediately
       await invoicing.connect(debtor).repayInvoice(invoiceId, faceValue);
     }
     // totalValueRepaid should now be 1.2M > 1M, triggering volumeBonus = 30
     const cp = await invoicing.getCreditProfile(debtor.address);
-    expect(cp.totalValueRepaid).to.be.greaterThan(ethers.parseUnits("1000000", 6));
+    expect(cp.totalValueRepaid).to.be.greaterThan(
+      ethers.parseUnits("1000000", 6),
+    );
   });
 
   it("should return dispute via getDispute", async function () {
@@ -335,11 +449,30 @@ describe("InvoiceFinancing - Final Coverage", function () {
 // ================================================================
 describe("NoblePay - Final Coverage", function () {
   async function deployFixture() {
-    const [admin, treasury, teeNode, complianceOfficer, business1, recipient, other] = await ethers.getSigners();
+    const [
+      admin,
+      treasury,
+      teeNode,
+      complianceOfficer,
+      business1,
+      recipient,
+      other,
+    ] = await ethers.getSigners();
     const NP = await ethers.getContractFactory("NoblePay");
     const baseFee = ethers.parseUnits("1", 6);
     const percentageFee = 50;
-    const noblepay = await NP.deploy(admin.address, treasury.address, baseFee, percentageFee);
+    const noblepay = await NP.deploy(
+      admin.address,
+      treasury.address,
+      baseFee,
+      percentageFee,
+    );
+    const Registry = await ethers.getContractFactory("MockBusinessRegistry");
+    const registry = await Registry.deploy();
+    const Gate = await ethers.getContractFactory("MockSealSettlementGate");
+    const gate = await Gate.deploy(true);
+    await registry.setBusiness(business1.address, true, 0);
+    await noblepay.connect(admin).configureTrust(registry.target, gate.target);
 
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
@@ -347,7 +480,9 @@ describe("NoblePay - Final Coverage", function () {
     const TEE_NODE_ROLE = await noblepay.TEE_NODE_ROLE();
     const COMPLIANCE_OFFICER_ROLE = await noblepay.COMPLIANCE_OFFICER_ROLE();
     await noblepay.connect(admin).grantRole(TEE_NODE_ROLE, teeNode.address);
-    await noblepay.connect(admin).grantRole(COMPLIANCE_OFFICER_ROLE, complianceOfficer.address);
+    await noblepay
+      .connect(admin)
+      .grantRole(COMPLIANCE_OFFICER_ROLE, complianceOfficer.address);
     await noblepay.connect(admin).setSupportedToken(usdc.target, true);
     await noblepay.connect(admin).syncBusiness(business1.address, 0, true);
 
@@ -355,49 +490,105 @@ describe("NoblePay - Final Coverage", function () {
     await usdc.mint(business1.address, amount);
     await usdc.connect(business1).approve(noblepay.target, amount);
 
-    return { noblepay, usdc, admin, treasury, teeNode, complianceOfficer, business1, recipient, other };
+    return {
+      noblepay,
+      registry,
+      gate,
+      usdc,
+      admin,
+      treasury,
+      teeNode,
+      complianceOfficer,
+      business1,
+      recipient,
+      other,
+    };
   }
 
   it("should revert submitComplianceResult for non-PENDING payment", async function () {
-    const { noblepay, usdc, teeNode, business1, recipient } = await loadFixture(deployFixture);
+    const { noblepay, usdc, teeNode, business1, recipient } =
+      await loadFixture(deployFixture);
     const amount = ethers.parseUnits("100", 6);
-    const tx = await noblepay.connect(business1).initiatePayment(
-      recipient.address, amount, usdc.target, ethers.ZeroHash, "0x555344"
-    );
+    const tx = await noblepay
+      .connect(business1)
+      .initiatePayment(
+        recipient.address,
+        amount,
+        usdc.target,
+        ethers.ZeroHash,
+        "0x555344",
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "PaymentInitiated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "PaymentInitiated",
+    );
     const paymentId = event.args[0];
 
     // Submit compliance once (changes to APPROVED)
-    await noblepay.connect(teeNode).submitComplianceResult(
-      paymentId, true, 30, true, ethers.ZeroHash, "0x1234"
-    );
+    await noblepay
+      .connect(teeNode)
+      .submitComplianceResult(
+        paymentId,
+        true,
+        30,
+        true,
+        ethers.ZeroHash,
+        "0x1234",
+      );
 
     // Try to submit again on non-PENDING payment
-    await expect(noblepay.connect(teeNode).submitComplianceResult(
-      paymentId, true, 30, true, ethers.ZeroHash, "0x1234"
-    )).to.be.revertedWithCustomError(noblepay, "InvalidPaymentStatus");
+    await expect(
+      noblepay
+        .connect(teeNode)
+        .submitComplianceResult(
+          paymentId,
+          true,
+          30,
+          true,
+          ethers.ZeroHash,
+          "0x1234",
+        ),
+    ).to.be.revertedWithCustomError(noblepay, "InvalidPaymentStatus");
   });
 
   it("should revert submitComplianceResult with invalid risk score", async function () {
-    const { noblepay, usdc, teeNode, business1, recipient } = await loadFixture(deployFixture);
+    const { noblepay, usdc, teeNode, business1, recipient } =
+      await loadFixture(deployFixture);
     const amount = ethers.parseUnits("100", 6);
-    const tx = await noblepay.connect(business1).initiatePayment(
-      recipient.address, amount, usdc.target, ethers.ZeroHash, "0x555344"
-    );
+    const tx = await noblepay
+      .connect(business1)
+      .initiatePayment(
+        recipient.address,
+        amount,
+        usdc.target,
+        ethers.ZeroHash,
+        "0x555344",
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "PaymentInitiated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "PaymentInitiated",
+    );
     const paymentId = event.args[0];
 
-    await expect(noblepay.connect(teeNode).submitComplianceResult(
-      paymentId, true, 101, true, ethers.ZeroHash, "0x1234"
-    )).to.be.revertedWithCustomError(noblepay, "InvalidRiskScore");
+    await expect(
+      noblepay
+        .connect(teeNode)
+        .submitComplianceResult(
+          paymentId,
+          true,
+          101,
+          true,
+          ethers.ZeroHash,
+          "0x1234",
+        ),
+    ).to.be.revertedWithCustomError(noblepay, "InvalidRiskScore");
   });
 
   it("should revert settle for non-existent payment", async function () {
     const { noblepay } = await loadFixture(deployFixture);
-    await expect(noblepay.settlePayment(ethers.ZeroHash))
-      .to.be.revertedWithCustomError(noblepay, "PaymentNotFound");
+    await expect(
+      noblepay.settlePayment(ethers.ZeroHash),
+    ).to.be.revertedWithCustomError(noblepay, "PaymentNotFound");
   });
 
   it("should return getDailyLimit for enterprise tier", async function () {
@@ -418,9 +609,11 @@ describe("LiquidityPool - Final Coverage", function () {
 
     let token0, token1;
     if (BigInt(tokenA.target) < BigInt(tokenB.target)) {
-      token0 = tokenA; token1 = tokenB;
+      token0 = tokenA;
+      token1 = tokenB;
     } else {
-      token0 = tokenB; token1 = tokenA;
+      token0 = tokenB;
+      token1 = tokenA;
     }
 
     const LP = await ethers.getContractFactory("LiquidityPool");
@@ -429,9 +622,13 @@ describe("LiquidityPool - Final Coverage", function () {
     const LP_ROLE = await pool.LIQUIDITY_PROVIDER_ROLE();
     await pool.connect(admin).grantRole(LP_ROLE, provider.address);
 
-    const poolTx = await pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 8000);
+    const poolTx = await pool
+      .connect(admin)
+      .createPool(token0.target, token1.target, 30, 10, 8000);
     const poolReceipt = await poolTx.wait();
-    const poolEvent = poolReceipt.logs.find(l => l.fragment && l.fragment.name === "PoolCreated");
+    const poolEvent = poolReceipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "PoolCreated",
+    );
     const poolId = poolEvent.args[0];
 
     const mintAmount = ethers.parseEther("10000000");
@@ -440,7 +637,16 @@ describe("LiquidityPool - Final Coverage", function () {
     await token0.connect(provider).approve(pool.target, ethers.MaxUint256);
     await token1.connect(provider).approve(pool.target, ethers.MaxUint256);
 
-    return { pool, token0, token1, admin, provider, other, treasuryAddr, poolId };
+    return {
+      pool,
+      token0,
+      token1,
+      admin,
+      provider,
+      other,
+      treasuryAddr,
+      poolId,
+    };
   }
 
   it("should return position info", async function () {
@@ -451,21 +657,27 @@ describe("LiquidityPool - Final Coverage", function () {
 
   it("should revert addLiquidity for non-LP role", async function () {
     const { pool, other, poolId } = await loadFixture(deployFixture);
-    await expect(pool.connect(other).addLiquidity(poolId, 100, 100, -1000, 1000))
-      .to.be.reverted;
+    await expect(
+      pool.connect(other).addLiquidity(poolId, 100, 100, -1000, 1000),
+    ).to.be.reverted;
   });
 
   it("should revert removeLiquidity for non-owner", async function () {
     const { pool, provider, other, poolId } = await loadFixture(deployFixture);
     const amount0 = ethers.parseEther("10000");
     const amount1 = ethers.parseEther("10000");
-    const tx = await pool.connect(provider).addLiquidity(poolId, amount0, amount1, -1000, 1000);
+    const tx = await pool
+      .connect(provider)
+      .addLiquidity(poolId, amount0, amount1, -1000, 1000);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "LiquidityAdded");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "LiquidityAdded",
+    );
     const positionId = event.args[0];
 
-    await expect(pool.connect(other).removeLiquidity(poolId, positionId))
-      .to.be.revertedWithCustomError(pool, "Unauthorized");
+    await expect(
+      pool.connect(other).removeLiquidity(poolId, positionId),
+    ).to.be.revertedWithCustomError(pool, "Unauthorized");
   });
 });
 
@@ -482,36 +694,45 @@ describe("TravelRule - Final Coverage", function () {
     await tr.connect(admin).grantRole(TEE_NODE_ROLE, teeNode.address);
     await tr.connect(admin).grantRole(VASP_ROLE, vasp1.address);
     await tr.connect(admin).grantRole(VASP_ROLE, vasp2.address);
-    await tr.connect(vasp1).registerVASP(ethers.keccak256("0x01"), ethers.toUtf8Bytes("pubkey1"));
-    await tr.connect(vasp2).registerVASP(ethers.keccak256("0x02"), ethers.toUtf8Bytes("pubkey2"));
+    await tr
+      .connect(vasp1)
+      .registerVASP(ethers.keccak256("0x01"), ethers.toUtf8Bytes("pubkey1"));
+    await tr
+      .connect(vasp2)
+      .registerVASP(ethers.keccak256("0x02"), ethers.toUtf8Bytes("pubkey2"));
     return { tr, admin, teeNode, vasp1, vasp2, other };
   }
 
   it("should revert reject on already verified record", async function () {
     const { tr, teeNode, vasp1, vasp2 } = await loadFixture(deployFixture);
     const paymentId = ethers.keccak256(ethers.toUtf8Bytes("reject-test"));
-    const tx = await tr.connect(teeNode).submitTravelRuleData(
-      paymentId,
-      ethers.keccak256(ethers.toUtf8Bytes("originator")),
-      vasp1.address,
-      ethers.keccak256(ethers.toUtf8Bytes("VASP1")),
-      ethers.keccak256(ethers.toUtf8Bytes("beneficiary")),
-      vasp2.address,
-      ethers.keccak256(ethers.toUtf8Bytes("VASP2")),
-      ethers.parseUnits("10000", 6),
-      "0x555344",
-      ethers.keccak256(ethers.toUtf8Bytes("encrypted"))
-    );
+    const tx = await tr
+      .connect(teeNode)
+      .submitTravelRuleData(
+        paymentId,
+        ethers.keccak256(ethers.toUtf8Bytes("originator")),
+        vasp1.address,
+        ethers.keccak256(ethers.toUtf8Bytes("VASP1")),
+        ethers.keccak256(ethers.toUtf8Bytes("beneficiary")),
+        vasp2.address,
+        ethers.keccak256(ethers.toUtf8Bytes("VASP2")),
+        ethers.parseUnits("10000", 6),
+        "0x555344",
+        ethers.keccak256(ethers.toUtf8Bytes("encrypted")),
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "TravelRuleDataSubmitted");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "TravelRuleDataSubmitted",
+    );
     const travelRuleId = event.args[0];
 
     // Verify first
     await tr.connect(teeNode).verifyTravelRuleCompliance(travelRuleId);
 
     // Now reject should fail (no longer PENDING)
-    await expect(tr.connect(teeNode).rejectTravelRuleData(travelRuleId, "too late"))
-      .to.be.revertedWithCustomError(tr, "InvalidStatus");
+    await expect(
+      tr.connect(teeNode).rejectTravelRuleData(travelRuleId, "too late"),
+    ).to.be.revertedWithCustomError(tr, "InvalidStatus");
   });
 });
 
@@ -520,7 +741,8 @@ describe("TravelRule - Final Coverage", function () {
 // ================================================================
 describe("BusinessRegistry - Final Coverage", function () {
   async function deployFixture() {
-    const [admin, verifier, biz1, biz2, officer1, officer2, other] = await ethers.getSigners();
+    const [admin, verifier, biz1, biz2, officer1, officer2, other] =
+      await ethers.getSigners();
     const BR = await ethers.getContractFactory("BusinessRegistry");
     const br = await BR.deploy(admin.address);
     const VERIFIER_ROLE = await br.VERIFIER_ROLE();
@@ -564,9 +786,19 @@ describe("StreamingPayments - Final Coverage", function () {
     const amount = ethers.parseUnits("10000", 6);
     const duration = 86400;
     const cliffPeriod = 3600;
-    const tx = await sp.connect(sender).createStream(recipient.address, token.target, amount, duration, cliffPeriod);
+    const tx = await sp
+      .connect(sender)
+      .createStream(
+        recipient.address,
+        token.target,
+        amount,
+        duration,
+        cliffPeriod,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "StreamCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "StreamCreated",
+    );
     const streamId = event.args[0];
 
     const withdrawable = await sp.withdrawableBalance(streamId);
@@ -576,9 +808,13 @@ describe("StreamingPayments - Final Coverage", function () {
   it("should return stream info", async function () {
     const { sp, token, sender, recipient } = await loadFixture(deployFixture);
     const amount = ethers.parseUnits("10000", 6);
-    const tx = await sp.connect(sender).createStream(recipient.address, token.target, amount, 86400, 0);
+    const tx = await sp
+      .connect(sender)
+      .createStream(recipient.address, token.target, amount, 86400, 0);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "StreamCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "StreamCreated",
+    );
     const streamId = event.args[0];
 
     const stream = await sp.getStream(streamId);
@@ -588,7 +824,9 @@ describe("StreamingPayments - Final Coverage", function () {
   it("should return sender stream count", async function () {
     const { sp, token, sender, recipient } = await loadFixture(deployFixture);
     const amount = ethers.parseUnits("10000", 6);
-    await sp.connect(sender).createStream(recipient.address, token.target, amount, 86400, 0);
+    await sp
+      .connect(sender)
+      .createStream(recipient.address, token.target, amount, 86400, 0);
     const count = await sp.getSenderStreamCount(sender.address);
     expect(count).to.equal(1);
   });
@@ -596,7 +834,9 @@ describe("StreamingPayments - Final Coverage", function () {
   it("should return recipient stream count", async function () {
     const { sp, token, sender, recipient } = await loadFixture(deployFixture);
     const amount = ethers.parseUnits("10000", 6);
-    await sp.connect(sender).createStream(recipient.address, token.target, amount, 86400, 0);
+    await sp
+      .connect(sender)
+      .createStream(recipient.address, token.target, amount, 86400, 0);
     const count = await sp.getRecipientStreamCount(recipient.address);
     expect(count).to.equal(1);
   });
@@ -609,7 +849,14 @@ describe("MultiSigTreasury - Final Coverage", function () {
   async function deployFixture() {
     const [admin, s1, s2, s3, s4, other] = await ethers.getSigners();
     const MST = await ethers.getContractFactory("MultiSigTreasury");
-    const mst = await MST.deploy(admin.address, [s1.address, s2.address, s3.address, s4.address], 1, 2, 3, 1);
+    const mst = await MST.deploy(
+      admin.address,
+      [s1.address, s2.address, s3.address, s4.address],
+      1,
+      2,
+      3,
+      1,
+    );
     return { mst, admin, s1, s2, s3, s4, other };
   }
 

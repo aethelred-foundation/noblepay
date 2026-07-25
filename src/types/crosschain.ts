@@ -27,7 +27,7 @@ export interface ChainInfo {
   /** Average block time in seconds */
   avgBlockTime: number;
   /** Current gas price (gwei) */
-  gasPrice: number;
+  gasPrice: number | null;
   /** NoblePay router contract address on this chain */
   routerAddress: string;
   /** Supported token addresses on this chain */
@@ -93,9 +93,9 @@ export interface CrossChainTransfer {
   /** Individual transfer steps */
   steps: TransferStep[];
   /** Estimated total time in seconds */
-  estimatedTime: number;
+  estimatedTime: number | null;
   /** Bridge fee (USD) */
-  bridgeFee: number;
+  bridgeFee: number | null;
   /** Relay node handling this transfer */
   relayNodeId: string;
   /** Transfer initiation timestamp (Unix ms) */
@@ -154,13 +154,13 @@ export interface RelayNode {
   /** Total transfers relayed */
   totalRelayed: number;
   /** Success rate percentage (0-100) */
-  successRate: number;
+  successRate: number | null;
   /** Average relay time in seconds */
   avgRelayTime: number;
   /** Staked collateral (USD) */
   stakedCollateral: number;
   /** Uptime percentage (0-100) */
-  uptime: number;
+  uptime: number | null;
   /** Last active timestamp (Unix ms) */
-  lastActiveAt: number;
+  lastActiveAt: number | null;
 }

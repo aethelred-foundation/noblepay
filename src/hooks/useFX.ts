@@ -1,261 +1,165 @@
-/**
- * FX Hooks — Custom React hooks for NoblePay foreign exchange operations.
- *
- * Provides typed hooks for FX rates with simulated real-time updates,
- * hedge management, and exposure reporting.
- */
+import { useCallback, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ApiError, apiRequest } from "@/lib/api";
+import type { ExposureReport, FXHedge, FXRate } from "@/types/defi";
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import type { FXRate, FXHedge, ExposureReport } from "@/types/defi";
+interface ApiRate {
+  pair: string;
+  bid: number;
+  ask: number;
+  mid: number;
+  timestamp: string;
+  change24h: number | null;
+}
 
-// ---------------------------------------------------------------------------
-// Mock Data
-// ---------------------------------------------------------------------------
+interface ApiHedge {
+  id: string;
+  pair: string;
+  notionalAmount: string;
+  entryRate: number;
+  strikeRate: number | null;
+  currentRate: number;
+  expiryDate: string;
+  status: "OPEN" | "CLOSED" | "EXPIRED" | "EXERCISED";
+  marginDeposit: null;
+  unrealizedPnL: string | null;
+  createdAt: string;
+}
 
-const INITIAL_RATES: FXRate[] = [
-  {
-    pair: "USD/AED",
-    rate: 3.6725,
-    change24h: 0.02,
-    bid: 3.672,
-    ask: 3.673,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/GBP",
-    rate: 0.7892,
-    change24h: -0.15,
-    bid: 0.789,
-    ask: 0.7894,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/EUR",
-    rate: 0.9215,
-    change24h: -0.08,
-    bid: 0.9213,
-    ask: 0.9217,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/SGD",
-    rate: 1.3412,
-    change24h: 0.11,
-    bid: 1.341,
-    ask: 1.3414,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/JPY",
-    rate: 149.82,
-    change24h: 0.35,
-    bid: 149.8,
-    ask: 149.84,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/INR",
-    rate: 83.12,
-    change24h: -0.04,
-    bid: 83.1,
-    ask: 83.14,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "AETHEL/USD",
-    rate: 1.5,
-    change24h: 2.1,
-    bid: 1.49,
-    ask: 1.51,
-    updatedAt: Date.now(),
-  },
-];
-
-const MOCK_HEDGES: FXHedge[] = [
-  {
-    id: "hedge-001",
-    fromCurrency: "USD",
-    toCurrency: "AED",
-    notionalAmount: 2_000_000,
-    lockedRate: 3.67,
-    currentRate: 3.6725,
-    unrealizedPnl: 1_362,
-    status: "Active",
-    expiryAt: Date.now() + 30 * 86_400_000,
-    createdAt: Date.now() - 15 * 86_400_000,
-    collateral: 200_000,
-  },
-  {
-    id: "hedge-002",
-    fromCurrency: "USD",
-    toCurrency: "GBP",
-    notionalAmount: 500_000,
-    lockedRate: 0.785,
-    currentRate: 0.7892,
-    unrealizedPnl: -2_673,
-    status: "Active",
-    expiryAt: Date.now() + 60 * 86_400_000,
-    createdAt: Date.now() - 10 * 86_400_000,
-    collateral: 50_000,
-  },
-  {
-    id: "hedge-003",
-    fromCurrency: "USD",
-    toCurrency: "EUR",
-    notionalAmount: 1_000_000,
-    lockedRate: 0.918,
-    currentRate: 0.9215,
-    unrealizedPnl: -3_810,
-    status: "Active",
-    expiryAt: Date.now() + 45 * 86_400_000,
-    createdAt: Date.now() - 20 * 86_400_000,
-    collateral: 100_000,
-  },
-];
-
-const MOCK_EXPOSURE: ExposureReport = {
-  totalExposure: 5_500_000,
-  hedgedPercentage: 63.6,
-  unhedgedExposure: 2_000_000,
-  byPair: [
+interface ApiExposure {
+  totalExposure: string;
+  byCurrency: Record<
+    string,
     {
-      pair: "USD/AED",
-      exposure: 3_000_000,
-      hedged: 2_000_000,
-      unhedged: 1_000_000,
-    },
-    {
-      pair: "USD/GBP",
-      exposure: 1_000_000,
-      hedged: 500_000,
-      unhedged: 500_000,
-    },
-    {
-      pair: "USD/EUR",
-      exposure: 1_500_000,
-      hedged: 1_000_000,
-      unhedged: 500_000,
-    },
-  ],
-  valueAtRisk: 82_500,
-  generatedAt: Date.now(),
-};
+      exposure: string;
+      hedged: string;
+      unhedged: null;
+      hedgeRatio: null;
+    }
+  >;
+  netExposure: null;
+  valueAtRisk: null;
+  calculatedAt: string;
+}
 
-// ---------------------------------------------------------------------------
-// useFX — FX rates, hedges, and exposure
-// ---------------------------------------------------------------------------
+function mapRate(rate: ApiRate): FXRate {
+  return {
+    pair: rate.pair,
+    rate: rate.mid,
+    change24h: rate.change24h,
+    bid: rate.bid,
+    ask: rate.ask,
+    updatedAt: Date.parse(rate.timestamp),
+  };
+}
+
+function mapHedge(hedge: ApiHedge): FXHedge {
+  const [fromCurrency = "", toCurrency = ""] = hedge.pair.split("/");
+  const status: FXHedge["status"] =
+    hedge.status === "OPEN"
+      ? "Active"
+      : hedge.status === "EXPIRED"
+        ? "Expired"
+        : "Settled";
+
+  return {
+    id: hedge.id,
+    fromCurrency,
+    toCurrency,
+    notionalAmount: Number(hedge.notionalAmount),
+    lockedRate: hedge.strikeRate ?? hedge.entryRate,
+    currentRate: hedge.currentRate,
+    unrealizedPnl:
+      hedge.unrealizedPnL === null ? null : Number(hedge.unrealizedPnL),
+    status,
+    expiryAt: Date.parse(hedge.expiryDate),
+    createdAt: Date.parse(hedge.createdAt),
+    collateral: null,
+  };
+}
+
+function mapExposure(exposure: ApiExposure): ExposureReport {
+  const byPair = Object.entries(exposure.byCurrency).map(
+    ([currency, value]) => ({
+      pair: currency,
+      exposure: Number(value.exposure),
+      hedged: Number(value.hedged),
+      unhedged: null,
+    }),
+  );
+  const totalExposure = Number(exposure.totalExposure);
+  const totalHedged = byPair.reduce((sum, item) => sum + item.hedged, 0);
+
+  return {
+    totalExposure,
+    hedgedPercentage:
+      totalExposure > 0 ? (totalHedged / totalExposure) * 100 : 0,
+    unhedgedExposure: null,
+    byPair,
+    valueAtRisk: null,
+    generatedAt: Date.parse(exposure.calculatedAt),
+  };
+}
 
 export function useFX() {
-  const [rates, setRates] = useState<FXRate[]>([]);
-  const [hedges, setHedges] = useState<FXHedge[]>([]);
-  const [exposure, setExposure] = useState<ExposureReport | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const ratesQuery = useQuery({
+    queryKey: ["fx", "rates"],
+    queryFn: ({ signal }) => apiRequest<ApiRate[]>("/v1/fx/rates", { signal }),
+    refetchInterval: 30_000,
+  });
+  const hedgesQuery = useQuery({
+    queryKey: ["fx", "hedges"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiHedge[]>("/v1/fx/hedges", { signal }),
+  });
+  const exposureQuery = useQuery({
+    queryKey: ["fx", "exposure"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiExposure>("/v1/fx/exposure", { signal }),
+  });
 
-  // Initial load
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setRates(INITIAL_RATES);
-      setHedges(MOCK_HEDGES);
-      setExposure(MOCK_EXPOSURE);
-      setIsLoading(false);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, []);
-
-  // Simulated real-time rate updates every 3 seconds
-  useEffect(() => {
-    if (rates.length === 0) return;
-
-    intervalRef.current = setInterval(() => {
-      setRates((prev) =>
-        prev.map((r) => {
-          // Random walk: +/- 0.01% to 0.05%
-          const delta = (Math.random() - 0.5) * 0.001 * r.rate;
-          const newRate = Math.max(0.0001, r.rate + delta);
-          const spread = r.ask - r.bid;
-          return {
-            ...r,
-            rate: Number(newRate.toFixed(4)),
-            bid: Number((newRate - spread / 2).toFixed(4)),
-            ask: Number((newRate + spread / 2).toFixed(4)),
-            change24h: Number(
-              (r.change24h + (Math.random() - 0.5) * 0.02).toFixed(2),
-            ),
-            updatedAt: Date.now(),
-          };
-        }),
-      );
-    }, 3000);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [rates.length]);
-
-  // Update hedge PnL when rates change
-  useEffect(() => {
-    if (rates.length === 0 || hedges.length === 0) return;
-
-    setHedges((prev) =>
-      prev.map((h) => {
-        const pair = `${h.fromCurrency}/${h.toCurrency}`;
-        const currentRate = rates.find((r) => r.pair === pair);
-        if (!currentRate) return h;
-        const pnl = (currentRate.rate - h.lockedRate) * h.notionalAmount;
-        return {
-          ...h,
-          currentRate: currentRate.rate,
-          unrealizedPnl: Number(pnl.toFixed(2)),
-        };
-      }),
-    );
-  }, [rates, hedges.length]);
-
-  const createHedge = useCallback(
-    (params: {
-      fromCurrency: string;
-      toCurrency: string;
-      notionalAmount: number;
-      collateral: number;
-      durationDays: number;
-    }) => {
-      const pair = `${params.fromCurrency}/${params.toCurrency}`;
-      const currentRate = rates.find((r) => r.pair === pair);
-      const rate = currentRate?.rate || 1;
-
-      const newHedge: FXHedge = {
-        id: `hedge-${String(Date.now()).slice(-6)}`,
-        fromCurrency: params.fromCurrency,
-        toCurrency: params.toCurrency,
-        notionalAmount: params.notionalAmount,
-        lockedRate: rate,
-        currentRate: rate,
-        unrealizedPnl: 0,
-        status: "Active",
-        expiryAt: Date.now() + params.durationDays * 86_400_000,
-        createdAt: Date.now(),
-        collateral: params.collateral,
-      };
-      setHedges((prev) => [newHedge, ...prev]);
-    },
-    [rates],
+  const rates = useMemo(
+    () => (ratesQuery.data || []).map(mapRate),
+    [ratesQuery.data],
+  );
+  const hedges = useMemo(
+    () => (hedgesQuery.data || []).map(mapHedge),
+    [hedgesQuery.data],
   );
 
-  const closeHedge = useCallback((hedgeId: string) => {
-    setHedges((prev) =>
-      prev.map((h) =>
-        h.id === hedgeId ? { ...h, status: "Settled" as const } : h,
+  const refetch = useCallback(async () => {
+    await Promise.all([
+      ratesQuery.refetch(),
+      hedgesQuery.refetch(),
+      exposureQuery.refetch(),
+    ]);
+  }, [exposureQuery, hedgesQuery, ratesQuery]);
+
+  const executionUnavailable = useCallback(
+    () =>
+      Promise.reject(
+        new ApiError(
+          "FX execution is disabled until signed settlement and receipt verification are configured.",
+          { status: 501, code: "FX_EXECUTION_UNAVAILABLE" },
+        ),
       ),
-    );
-  }, []);
+    [],
+  );
 
   return {
     rates,
     hedges,
-    exposure,
-    isLoading,
-    createHedge,
-    closeHedge,
+    exposure: exposureQuery.data ? mapExposure(exposureQuery.data) : null,
+    isLoading: hedgesQuery.isLoading || exposureQuery.isLoading,
+    ratesLoading: ratesQuery.isLoading,
+    isMutating: false,
+    error: hedgesQuery.error || exposureQuery.error || null,
+    oracleError: ratesQuery.error || null,
+    mutationsEnabled: false,
+    mutationReason:
+      "FX execution is disabled until signed settlement and receipt verification are configured.",
+    refetch,
+    createHedge: executionUnavailable,
+    closeHedge: executionUnavailable,
   };
 }

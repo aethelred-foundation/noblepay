@@ -7,9 +7,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
 
 use crate::types::{AMLRiskLevel, Payment};
 
@@ -143,31 +141,24 @@ pub enum CorridorRecommendation {
 fn jurisdiction_risk(country: &str) -> CorridorRiskLevel {
     match country {
         // Low risk — FATF-compliant, strong AML frameworks
-        "AE" | "US" | "GB" | "DE" | "FR" | "SG" | "JP" | "AU" | "CA" | "CH" | "NL" | "SE" | "NO" | "DK" | "FI" => {
-            CorridorRiskLevel::Low
-        }
+        "AE" | "US" | "GB" | "DE" | "FR" | "SG" | "JP" | "AU" | "CA" | "CH" | "NL" | "SE"
+        | "NO" | "DK" | "FI" => CorridorRiskLevel::Low,
         // Medium risk — developing AML frameworks
-        "IN" | "BR" | "TR" | "MX" | "ZA" | "TH" | "MY" | "PH" | "ID" | "SA" | "QA" | "KW" | "BH" | "OM" => {
-            CorridorRiskLevel::Medium
-        }
+        "IN" | "BR" | "TR" | "MX" | "ZA" | "TH" | "MY" | "PH" | "ID" | "SA" | "QA" | "KW"
+        | "BH" | "OM" => CorridorRiskLevel::Medium,
         // High risk — FATF grey list or weak AML
-        "PK" | "NG" | "VN" | "BD" | "KE" | "TZ" | "GH" | "MM" | "KH" | "JO" | "LB" | "YE" | "SD" => {
-            CorridorRiskLevel::High
-        }
+        "PK" | "NG" | "VN" | "BD" | "KE" | "TZ" | "GH" | "MM" | "KH" | "JO" | "LB" | "YE"
+        | "SD" => CorridorRiskLevel::High,
         // Very high risk — FATF black list or sanctioned
-        "AF" | "AL" | "BF" | "ML" | "MZ" | "SN" | "SS" | "HT" | "SO" => {
-            CorridorRiskLevel::VeryHigh
-        }
+        "AF" | "AL" | "BF" | "ML" | "MZ" | "SN" | "SS" | "HT" | "SO" => CorridorRiskLevel::VeryHigh,
         // Prohibited — comprehensive sanctions
-        "KP" | "IR" | "SY" | "CU" | "RU" => {
-            CorridorRiskLevel::Prohibited
-        }
+        "KP" | "IR" | "SY" | "CU" | "RU" => CorridorRiskLevel::Prohibited,
         _ => CorridorRiskLevel::Medium,
     }
 }
 
 /// Infer jurisdiction from payment entity or currency.
-fn infer_jurisdiction(entity: &str, currency: &str) -> String {
+fn infer_jurisdiction(_entity: &str, currency: &str) -> String {
     // Simplified — in production this would use business registry lookups
     match currency {
         "AED" => "AE".to_string(),
@@ -192,6 +183,12 @@ pub struct CorridorAnalyzer {
     corridors: HashMap<String, Corridor>,
     /// Typology database.
     typologies: Vec<Typology>,
+}
+
+impl Default for CorridorAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CorridorAnalyzer {
@@ -222,7 +219,10 @@ impl CorridorAnalyzer {
 
         // Get or create corridor profile
         if !self.corridors.contains_key(&corridor_key) {
-            self.corridors.insert(corridor_key.clone(), Self::build_corridor(origin, destination));
+            self.corridors.insert(
+                corridor_key.clone(),
+                Self::build_corridor(origin, destination),
+            );
         }
         let corridor = self.corridors.get_mut(&corridor_key).unwrap();
 
@@ -230,7 +230,8 @@ impl CorridorAnalyzer {
         let amount = payment.amount as f64;
         corridor.volume_stats.total_transactions += 1;
         corridor.volume_stats.total_volume += amount;
-        corridor.volume_stats.avg_amount = corridor.volume_stats.total_volume / corridor.volume_stats.total_transactions as f64;
+        corridor.volume_stats.avg_amount =
+            corridor.volume_stats.total_volume / corridor.volume_stats.total_transactions as f64;
         if amount > corridor.volume_stats.max_amount {
             corridor.volume_stats.max_amount = amount;
         }
@@ -238,7 +239,11 @@ impl CorridorAnalyzer {
         // Calculate corridor risk
         let origin_risk = jurisdiction_risk(origin);
         let dest_risk = jurisdiction_risk(destination);
-        let corridor_risk = if origin_risk > dest_risk { origin_risk } else { dest_risk };
+        let corridor_risk = if origin_risk > dest_risk {
+            origin_risk
+        } else {
+            dest_risk
+        };
 
         // Clone data needed for later analysis before releasing the mutable borrow
         let requirements = corridor.requirements.clone();
@@ -269,14 +274,20 @@ impl CorridorAnalyzer {
         let base_risk = corridor_risk.to_factor() * 40.0;
         let typology_risk = matched.iter().map(|t| t.match_score * 20.0).sum::<f64>();
         let volume_risk = volume_anomalies.len() as f64 * 10.0;
-        let amount_risk = if amount > 100_000.0 { 15.0 } else if amount > 50_000.0 { 10.0 } else { 0.0 };
+        let amount_risk = if amount > 100_000.0 {
+            15.0
+        } else if amount > 50_000.0 {
+            10.0
+        } else {
+            0.0
+        };
 
         let composite = (base_risk + typology_risk + volume_risk + amount_risk).min(100.0) as u8;
 
         let enhanced_due_diligence = composite > 40 || corridor_risk >= CorridorRiskLevel::High;
-        let reporting_required = requirements.iter().any(|r| {
-            r.reporting_required && r.threshold_amount.map_or(true, |t| amount >= t)
-        });
+        let reporting_required = requirements
+            .iter()
+            .any(|r| r.reporting_required && r.threshold_amount.is_none_or(|t| amount >= t));
 
         let recommendation = match composite {
             0..=25 => CorridorRecommendation::Proceed,
@@ -302,7 +313,11 @@ impl CorridorAnalyzer {
     fn build_corridor(origin: &str, destination: &str) -> Corridor {
         let origin_risk = jurisdiction_risk(origin);
         let dest_risk = jurisdiction_risk(destination);
-        let base_risk = if origin_risk > dest_risk { origin_risk } else { dest_risk };
+        let base_risk = if origin_risk > dest_risk {
+            origin_risk
+        } else {
+            dest_risk
+        };
 
         let mut requirements = Vec::new();
 
@@ -321,7 +336,9 @@ impl CorridorAnalyzer {
         // FATF travel rule
         requirements.push(RegulatoryRequirement {
             name: "FATF Travel Rule".to_string(),
-            description: "Originator and beneficiary information required for cross-border transfers".to_string(),
+            description:
+                "Originator and beneficiary information required for cross-border transfers"
+                    .to_string(),
             threshold_amount: Some(1_000.0),
             threshold_currency: "USD".to_string(),
             reporting_required: false,
@@ -363,9 +380,9 @@ impl CorridorAnalyzer {
                 let matched = match indicator.as_str() {
                     "high_value" => amount > 100_000.0,
                     "round_amount" => amount % 1000.0 == 0.0 && amount >= 5000.0,
-                    "just_below_threshold" => {
-                        [9900.0, 14900.0, 49900.0, 54900.0].iter().any(|&t| (amount - t).abs() < 200.0)
-                    }
+                    "just_below_threshold" => [9900.0, 14900.0, 49900.0, 54900.0]
+                        .iter()
+                        .any(|&t| (amount - t).abs() < 200.0),
                     "high_risk_corridor" => corridor.base_risk >= CorridorRiskLevel::High,
                     "cross_border" => corridor.origin != corridor.destination,
                     "rapid_settlement" => false, // Would need timing data
@@ -389,7 +406,11 @@ impl CorridorAnalyzer {
             }
         }
 
-        matches.sort_by(|a, b| b.match_score.partial_cmp(&a.match_score).unwrap_or(std::cmp::Ordering::Equal));
+        matches.sort_by(|a, b| {
+            b.match_score
+                .partial_cmp(&a.match_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         matches
     }
 
@@ -425,15 +446,23 @@ impl CorridorAnalyzer {
                 id: "TYP-001".to_string(),
                 name: "Trade-Based Money Laundering".to_string(),
                 description: "Over/under-invoicing in international trade".to_string(),
-                risk_indicators: vec!["high_value".to_string(), "cross_border".to_string(), "round_amount".to_string()],
+                risk_indicators: vec![
+                    "high_value".to_string(),
+                    "cross_border".to_string(),
+                    "round_amount".to_string(),
+                ],
                 severity: AMLRiskLevel::High,
                 pattern_weight: 0.8,
             },
             Typology {
                 id: "TYP-002".to_string(),
                 name: "Structuring / Smurfing".to_string(),
-                description: "Breaking large amounts into smaller transactions below thresholds".to_string(),
-                risk_indicators: vec!["just_below_threshold".to_string(), "rapid_settlement".to_string()],
+                description: "Breaking large amounts into smaller transactions below thresholds"
+                    .to_string(),
+                risk_indicators: vec![
+                    "just_below_threshold".to_string(),
+                    "rapid_settlement".to_string(),
+                ],
                 severity: AMLRiskLevel::High,
                 pattern_weight: 0.9,
             },
@@ -441,7 +470,11 @@ impl CorridorAnalyzer {
                 id: "TYP-003".to_string(),
                 name: "Shell Company Layering".to_string(),
                 description: "Rapid movement of funds through multiple entities".to_string(),
-                risk_indicators: vec!["new_relationship".to_string(), "high_risk_corridor".to_string(), "rapid_settlement".to_string()],
+                risk_indicators: vec![
+                    "new_relationship".to_string(),
+                    "high_risk_corridor".to_string(),
+                    "rapid_settlement".to_string(),
+                ],
                 severity: AMLRiskLevel::Critical,
                 pattern_weight: 0.95,
             },
@@ -456,8 +489,13 @@ impl CorridorAnalyzer {
             Typology {
                 id: "TYP-005".to_string(),
                 name: "Sanctions Evasion".to_string(),
-                description: "Routing through intermediary jurisdictions to evade sanctions".to_string(),
-                risk_indicators: vec!["cross_border".to_string(), "new_relationship".to_string(), "high_value".to_string()],
+                description: "Routing through intermediary jurisdictions to evade sanctions"
+                    .to_string(),
+                risk_indicators: vec![
+                    "cross_border".to_string(),
+                    "new_relationship".to_string(),
+                    "high_value".to_string(),
+                ],
                 severity: AMLRiskLevel::Critical,
                 pattern_weight: 1.0,
             },
@@ -466,13 +504,16 @@ impl CorridorAnalyzer {
 
     /// Get corridor statistics for analytics.
     pub fn get_corridor_stats(&self) -> Vec<CorridorSummary> {
-        self.corridors.values().map(|c| CorridorSummary {
-            corridor: format!("{}→{}", c.origin, c.destination),
-            risk_level: c.base_risk,
-            total_volume: c.volume_stats.total_volume,
-            total_transactions: c.volume_stats.total_transactions,
-            avg_amount: c.volume_stats.avg_amount,
-        }).collect()
+        self.corridors
+            .values()
+            .map(|c| CorridorSummary {
+                corridor: format!("{}→{}", c.origin, c.destination),
+                risk_level: c.base_risk,
+                total_volume: c.volume_stats.total_volume,
+                total_transactions: c.volume_stats.total_transactions,
+                avg_amount: c.volume_stats.avg_amount,
+            })
+            .collect()
     }
 }
 
@@ -674,7 +715,10 @@ mod tests {
             .matched_typologies
             .iter()
             .any(|t| t.typology_id == "TYP-001");
-        assert!(has_trade_ml, "Should match trade-based ML typology for high-value round amount");
+        assert!(
+            has_trade_ml,
+            "Should match trade-based ML typology for high-value round amount"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -690,7 +734,10 @@ mod tests {
             .matched_typologies
             .iter()
             .any(|t| t.typology_id == "TYP-002");
-        assert!(has_structuring, "Should match structuring typology for amount near threshold");
+        assert!(
+            has_structuring,
+            "Should match structuring typology for amount near threshold"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -721,7 +768,10 @@ mod tests {
         let mut analyzer = CorridorAnalyzer::new();
         let payment = Payment::test_payment("sender", "receiver", 50000, "INR");
         let result = analyzer.analyze_payment(&payment);
-        assert!(result.risk_score > 0, "Should have non-zero risk score for INR corridor");
+        assert!(
+            result.risk_score > 0,
+            "Should have non-zero risk score for INR corridor"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -733,7 +783,11 @@ mod tests {
         let mut analyzer = CorridorAnalyzer::new();
         let payment = Payment::test_payment("sender", "receiver", 500, "USD");
         let result = analyzer.analyze_payment(&payment);
-        assert!(result.risk_score <= 25, "Small USD payment should have low risk score, got {}", result.risk_score);
+        assert!(
+            result.risk_score <= 25,
+            "Small USD payment should have low risk score, got {}",
+            result.risk_score
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -766,7 +820,10 @@ mod tests {
     fn build_corridor_uae_has_uae_requirement() {
         let corridor = CorridorAnalyzer::build_corridor("AE", "US");
         let has_uae_req = corridor.requirements.iter().any(|r| r.name.contains("UAE"));
-        assert!(has_uae_req, "AE corridor should have UAE AML Reporting requirement");
+        assert!(
+            has_uae_req,
+            "AE corridor should have UAE AML Reporting requirement"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -883,7 +940,10 @@ mod tests {
         let payment = Payment::test_payment("sender", "receiver", 60_000, "AED");
         let result = analyzer.analyze_payment(&payment);
         // Should have UAE AML Reporting requirement with threshold 55,000
-        let has_uae_req = result.applicable_requirements.iter().any(|r| r.name.contains("UAE"));
+        let has_uae_req = result
+            .applicable_requirements
+            .iter()
+            .any(|r| r.name.contains("UAE"));
         assert!(has_uae_req, "AED corridor should have UAE AML requirement");
     }
 
@@ -916,7 +976,10 @@ mod tests {
         );
         // Should get ManualReview or Block recommendation
         assert!(
-            matches!(result.recommendation, CorridorRecommendation::ManualReview | CorridorRecommendation::Block),
+            matches!(
+                result.recommendation,
+                CorridorRecommendation::ManualReview | CorridorRecommendation::Block
+            ),
             "Should recommend ManualReview or Block for score > 50"
         );
     }
@@ -991,8 +1054,13 @@ mod tests {
         assert_eq!(result.risk_level, CorridorRiskLevel::Prohibited);
         assert!(result.enhanced_due_diligence);
         assert!(result.reporting_required);
-        assert!(result.volume_anomalies.contains(&"PROHIBITED CORRIDOR".to_string()));
-        assert!(matches!(result.recommendation, CorridorRecommendation::Block));
+        assert!(result
+            .volume_anomalies
+            .contains(&"PROHIBITED CORRIDOR".to_string()));
+        assert!(matches!(
+            result.recommendation,
+            CorridorRecommendation::Block
+        ));
     }
 
     #[test]
@@ -1023,8 +1091,14 @@ mod tests {
         let payment = Payment::test_payment("sender", "receiver", 5000, "USD");
         let result = analyzer.analyze_payment(&payment);
         // The unknown indicator should not match (falls through to _ => false)
-        let custom_match = result.matched_typologies.iter().find(|t| t.typology_id == "TYP-CUSTOM");
-        assert!(custom_match.is_none(), "Unknown indicator should not produce a match");
+        let custom_match = result
+            .matched_typologies
+            .iter()
+            .find(|t| t.typology_id == "TYP-CUSTOM");
+        assert!(
+            custom_match.is_none(),
+            "Unknown indicator should not produce a match"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -1053,7 +1127,10 @@ mod tests {
             "High risk corridor with volume anomaly and typologies should score > 75, got {}",
             result.risk_score
         );
-        assert!(matches!(result.recommendation, CorridorRecommendation::Block));
+        assert!(matches!(
+            result.recommendation,
+            CorridorRecommendation::Block
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -1077,7 +1154,10 @@ mod tests {
             result.risk_score
         );
         assert!(
-            matches!(result.recommendation, CorridorRecommendation::ManualReview | CorridorRecommendation::Block),
+            matches!(
+                result.recommendation,
+                CorridorRecommendation::ManualReview | CorridorRecommendation::Block
+            ),
             "Should recommend ManualReview or Block"
         );
     }

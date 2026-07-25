@@ -1,7 +1,4 @@
-import {
-  createMockPrisma,
-  resetAllMocks,
-} from "../setup";
+import { createMockPrisma, resetAllMocks } from "../setup";
 
 const mockPrisma = createMockPrisma();
 jest.mock("@prisma/client", () => ({
@@ -19,6 +16,15 @@ const mockAuditService = {
 
 jest.mock("../../services/audit", () => ({
   AuditService: jest.fn(() => mockAuditService),
+  AuditError: class AuditError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode = 400,
+    ) {
+      super(message);
+    }
+  },
 }));
 
 jest.mock("../../middleware/auth", () => ({
@@ -39,6 +45,7 @@ jest.mock("../../middleware/validation", () => ({
 import express from "express";
 import request from "supertest";
 import auditRouter from "../../routes/audit";
+import { AuditError } from "../../services/audit";
 
 const app = express();
 app.use(express.json());
@@ -55,7 +62,11 @@ describe("Audit Routes", () => {
     it("should list audit entries", async () => {
       mockAuditService.listAuditEntries.mockResolvedValue({
         data: [
-          { id: "audit-1", eventType: "PAYMENT_CREATED", blockNumber: BigInt(100) },
+          {
+            id: "audit-1",
+            eventType: "PAYMENT_CREATED",
+            blockNumber: BigInt(100),
+          },
         ],
         pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
       });
@@ -70,7 +81,9 @@ describe("Audit Routes", () => {
 
     it("should handle null blockNumber", async () => {
       mockAuditService.listAuditEntries.mockResolvedValue({
-        data: [{ id: "audit-1", eventType: "PAYMENT_CREATED", blockNumber: null }],
+        data: [
+          { id: "audit-1", eventType: "PAYMENT_CREATED", blockNumber: null },
+        ],
         pagination: { page: 1, limit: 20, total: 1, totalPages: 1 },
       });
 
@@ -80,7 +93,9 @@ describe("Audit Routes", () => {
     });
 
     it("should return 500 on error", async () => {
-      mockAuditService.listAuditEntries.mockRejectedValue(new Error("DB error"));
+      mockAuditService.listAuditEntries.mockRejectedValue(
+        new Error("DB error"),
+      );
 
       const res = await request(app).get("/v1/audit");
 
@@ -106,7 +121,9 @@ describe("Audit Routes", () => {
     });
 
     it("should return 500 on error", async () => {
-      mockAuditService.verifyChainIntegrity.mockRejectedValue(new Error("DB error"));
+      mockAuditService.verifyChainIntegrity.mockRejectedValue(
+        new Error("DB error"),
+      );
 
       const res = await request(app).get("/v1/audit/verify");
 
@@ -239,7 +256,9 @@ describe("Audit Routes", () => {
     });
 
     it("should return 500 on error", async () => {
-      mockAuditService.generateExport.mockRejectedValue(new Error("Export error"));
+      mockAuditService.generateExport.mockRejectedValue(
+        new Error("Export error"),
+      );
 
       const res = await request(app)
         .post("/v1/audit/export")
@@ -247,6 +266,26 @@ describe("Audit Routes", () => {
 
       expect(res.status).toBe(500);
       expect(res.body.error).toBe("INTERNAL_ERROR");
+    });
+
+    it("returns a typed 4xx response when a synchronous export exceeds its bound", async () => {
+      mockAuditService.generateExport.mockRejectedValue(
+        new AuditError(
+          "AUDIT_EXPORT_ROW_LIMIT_EXCEEDED",
+          "narrow the period",
+          413,
+        ),
+      );
+
+      const res = await request(app)
+        .post("/v1/audit/export")
+        .send({ format: "json", from: "2024-01-01", to: "2024-03-31" });
+
+      expect(res.status).toBe(413);
+      expect(res.body).toEqual({
+        error: "AUDIT_EXPORT_ROW_LIMIT_EXCEEDED",
+        message: "narrow the period",
+      });
     });
   });
 });

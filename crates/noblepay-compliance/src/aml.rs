@@ -97,11 +97,9 @@ fn high_risk_jurisdictions() -> HashSet<&'static str> {
 /// Returns a smaller set of jurisdictions on the FATF grey list (elevated risk
 /// but not outright blocked).
 fn grey_list_jurisdictions() -> HashSet<&'static str> {
-    [
-        "PK", "NG", "TZ", "JM", "HT", "AL", "BA", "PH", "KH",
-    ]
-    .into_iter()
-    .collect()
+    ["PK", "NG", "TZ", "JM", "HT", "AL", "BA", "PH", "KH"]
+        .into_iter()
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +132,12 @@ pub struct RiskScoringModel {
     high_value_threshold: u64,
     /// Reporting threshold for structuring detection (USD cents).
     reporting_threshold: u64,
+}
+
+impl Default for RiskScoringModel {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RiskScoringModel {
@@ -198,8 +202,7 @@ impl RiskScoringModel {
         }
 
         // --- Pattern analysis ---
-        let (pattern_score, pattern_factors) =
-            self.score_patterns(&payment.sender, payment.amount);
+        let (pattern_score, pattern_factors) = self.score_patterns(&payment.sender, payment.amount);
         raw_scores.insert("pattern", pattern_score);
         factors.extend(pattern_factors);
 
@@ -265,8 +268,16 @@ impl RiskScoringModel {
         let one_hour_ago = now - Duration::hours(1);
         let one_day_ago = now - Duration::days(1);
 
-        let hourly_count = record.timestamps.iter().filter(|t| **t >= one_hour_ago).count();
-        let daily_count = record.timestamps.iter().filter(|t| **t >= one_day_ago).count();
+        let hourly_count = record
+            .timestamps
+            .iter()
+            .filter(|t| **t >= one_hour_ago)
+            .count();
+        let daily_count = record
+            .timestamps
+            .iter()
+            .filter(|t| **t >= one_day_ago)
+            .count();
 
         let hourly_score = (hourly_count as f64 / 10.0 * 100.0).min(100.0);
         let daily_score = (daily_count as f64 / 50.0 * 100.0).min(100.0);
@@ -284,7 +295,7 @@ impl RiskScoringModel {
         let high_risk = high_risk_jurisdictions();
         let grey = grey_list_jurisdictions();
 
-        let mut score = 0.0;
+        let mut score: f64 = 0.0;
 
         for country in [sender_country, recipient_country].into_iter().flatten() {
             if high_risk.contains(country) {
@@ -294,7 +305,7 @@ impl RiskScoringModel {
             }
         }
 
-        (score as f64).min(100.0)
+        score.min(100.0)
     }
 
     /// Score based on whether the counterparty is new.
@@ -314,7 +325,7 @@ impl RiskScoringModel {
 
     /// Detect structuring and round-trip patterns.
     fn score_patterns(&self, entity: &str, current_amount: u64) -> (f64, Vec<RiskFactor>) {
-        let mut score = 0.0;
+        let mut score: f64 = 0.0;
         let mut factors = Vec::new();
 
         if let Some(record) = self.velocity.get(entity) {
@@ -340,7 +351,7 @@ impl RiskScoringModel {
             }
         }
 
-        ((score as f64).min(100.0), factors)
+        (score.min(100.0), factors)
     }
 
     /// Score based on how rapidly funds are moving through this entity.
@@ -522,7 +533,11 @@ mod tests {
     fn amount_scoring_at_threshold() {
         let model = RiskScoringModel::new();
         let score = model.score_amount(1_000_000);
-        assert!(score >= 60.0, "At threshold should score >= 60, got {}", score);
+        assert!(
+            score >= 60.0,
+            "At threshold should score >= 60, got {}",
+            score
+        );
     }
 
     #[test]
@@ -632,10 +647,9 @@ mod tests {
     fn well_known_counterparty_scores_low() {
         let model = RiskScoringModel::new();
         // Insert a counterparty as known with an old timestamp
-        model.known_counterparties.insert(
-            "old-partner".to_string(),
-            Utc::now() - Duration::days(30),
-        );
+        model
+            .known_counterparties
+            .insert("old-partner".to_string(), Utc::now() - Duration::days(30));
         let score = model.score_counterparty("old-partner");
         assert!(
             (score - 10.0).abs() < f64::EPSILON,

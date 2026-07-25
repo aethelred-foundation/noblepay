@@ -14,19 +14,28 @@ jest.mock("jsonwebtoken", () => ({
 
 // Mock PrismaClient
 const mockPrismaInstance = {
+  business: {
+    findUnique: jest.fn(),
+  },
   aPIKey: {
     findUnique: jest.fn(),
     update: jest.fn(),
   },
 };
+const mockCurrentAuthorization = jest.fn();
 
 jest.mock("@prisma/client", () => ({
   PrismaClient: jest.fn(() => mockPrismaInstance),
+}));
+jest.mock("../../lib/business-registry-authorization", () => ({
+  getCurrentBusinessRegistryAuthorization: (address: string) =>
+    mockCurrentAuthorization(address),
 }));
 
 import jwt from "jsonwebtoken";
 import {
   authenticateAPIKey,
+  createTierRateLimit,
   tierRateLimit,
   generateJWT,
   generateAPIKey,
@@ -37,6 +46,18 @@ beforeEach(() => {
   (jwt.verify as jest.Mock).mockReset();
   mockPrismaInstance.aPIKey.findUnique.mockReset();
   mockPrismaInstance.aPIKey.update.mockReset();
+  mockPrismaInstance.business.findUnique.mockReset();
+  mockPrismaInstance.business.findUnique.mockResolvedValue({
+    id: "biz-1",
+    address: "0x1234567890abcdef1234567890abcdef12345678",
+  });
+  mockCurrentAuthorization.mockReset();
+  mockCurrentAuthorization.mockResolvedValue({
+    active: true,
+    status: "VERIFIED",
+    tier: "STANDARD",
+    isAdmin: false,
+  });
 });
 
 describe("Auth Middleware", () => {
@@ -71,9 +92,10 @@ describe("Auth Middleware", () => {
 
     it("should authenticate with valid JWT token", async () => {
       const jwtPayload = {
-        sub: "biz-1",
+        sub: "0x1234567890abcdef1234567890abcdef12345678",
         businessId: "biz-1",
         tier: "STANDARD",
+        role: "ADMIN",
         iat: Date.now(),
         exp: Date.now() + 86400,
       };
@@ -93,6 +115,136 @@ describe("Auth Middleware", () => {
       expect(req.jwtPayload).toEqual(jwtPayload);
     });
 
+    it.each(["SUSPENDED", "REVOKED"])(
+      "revokes an existing wallet session immediately when chain status is %s",
+      async (status) => {
+        (jwt.verify as jest.Mock).mockReturnValue({
+          sub: "0x1234567890abcdef1234567890abcdef12345678",
+          businessId: "biz-1",
+          tier: "STANDARD",
+          role: "ADMIN",
+          iat: 1,
+          exp: 2,
+        });
+        mockCurrentAuthorization.mockResolvedValue({
+          active: false,
+          status,
+          tier: "STANDARD",
+          isAdmin: false,
+        });
+        const req = createMockRequest({
+          headers: { authorization: "Bearer header.payload.signature" },
+        });
+        const res = createMockResponse();
+        const next = createMockNext();
+
+        await authenticateAPIKey(req, res, next);
+
+        expect(res.status).toHaveBeenCalledWith(403);
+        expect(res.json).toHaveBeenCalledWith(
+          expect.objectContaining({ error: "BUSINESS_INACTIVE" }),
+        );
+        expect(next).not.toHaveBeenCalled();
+      },
+    );
+
+    it("fails a valid session closed when canonical chain authorization is unavailable", async () => {
+      (jwt.verify as jest.Mock).mockReturnValue({
+        sub: "0x1234567890abcdef1234567890abcdef12345678",
+        businessId: "biz-1",
+        tier: "STANDARD",
+        role: "ADMIN",
+        iat: 1,
+        exp: 2,
+      });
+      mockCurrentAuthorization.mockRejectedValue(new Error("RPC unavailable"));
+      const req = createMockRequest({
+        headers: { authorization: "Bearer header.payload.signature" },
+      });
+      const res = createMockResponse();
+      const next = createMockNext();
+
+      await authenticateAPIKey(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("overwrites stale session tier and downgrades removed chain-admin privilege", async () => {
+      (jwt.verify as jest.Mock).mockReturnValue({
+        sub: "0x1234567890abcdef1234567890abcdef12345678",
+        businessId: "biz-1",
+        tier: "STANDARD",
+        role: "SUPER_ADMIN",
+        iat: 1,
+        exp: 2,
+      });
+      mockCurrentAuthorization.mockResolvedValue({
+        active: true,
+        status: "VERIFIED",
+        tier: "ENTERPRISE",
+        isAdmin: false,
+      });
+      const req = createMockRequest({
+        headers: { authorization: "Bearer header.payload.signature" },
+      });
+      const res = createMockResponse();
+      const next = createMockNext();
+
+      await authenticateAPIKey(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(req.businessTier).toBe("ENTERPRISE");
+      expect(req.jwtPayload).toMatchObject({
+        tier: "ENTERPRISE",
+        role: "ADMIN",
+      });
+    });
+
+    it("rejects an unsafe cookie-authenticated request without a CSRF header", async () => {
+      const req = createMockRequest({
+        method: "POST",
+        headers: {
+          cookie: "noblepay_session=session-token; noblepay_csrf=csrf-token",
+        },
+      });
+      const res = createMockResponse();
+      const next = createMockNext();
+
+      await authenticateAPIKey(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({ error: "CSRF_VALIDATION_FAILED" }),
+      );
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    it("accepts a matching double-submit CSRF token for a wallet session", async () => {
+      (jwt.verify as jest.Mock).mockReturnValue({
+        sub: "0x1234567890abcdef1234567890abcdef12345678",
+        businessId: "biz-1",
+        tier: "STANDARD",
+        role: "ADMIN",
+        iat: 1,
+        exp: 2,
+      });
+      const req = createMockRequest({
+        method: "POST",
+        headers: {
+          cookie: "noblepay_session=session-token; noblepay_csrf=csrf-token",
+          "x-csrf-token": "csrf-token",
+        },
+      });
+      const res = createMockResponse();
+      const next = createMockNext();
+
+      await authenticateAPIKey(req, res, next);
+
+      expect(next).toHaveBeenCalled();
+      expect(req.authType).toBe("cookie");
+    });
+
     it("should fall back to API key when JWT verification fails", async () => {
       (jwt.verify as jest.Mock).mockImplementation(() => {
         throw new Error("Invalid token");
@@ -105,11 +257,18 @@ describe("Auth Middleware", () => {
         businessId: "biz-2",
         business: {
           id: "biz-2",
+          address: "0x2234567890abcdef1234567890abcdef12345678",
           tier: "ENTERPRISE",
           kycStatus: "VERIFIED",
         },
       };
       mockPrismaInstance.aPIKey.findUnique.mockResolvedValue(apiKey);
+      mockCurrentAuthorization.mockResolvedValue({
+        active: true,
+        status: "VERIFIED",
+        tier: "ENTERPRISE",
+        isAdmin: false,
+      });
       mockPrismaInstance.aPIKey.update.mockResolvedValue(apiKey);
 
       const req = createMockRequest({
@@ -177,7 +336,17 @@ describe("Auth Middleware", () => {
       mockPrismaInstance.aPIKey.findUnique.mockResolvedValue({
         id: "key-1",
         status: "ACTIVE",
-        business: { kycStatus: "SUSPENDED", tier: "STANDARD" },
+        business: {
+          address: "0x2234567890abcdef1234567890abcdef12345678",
+          kycStatus: "SUSPENDED",
+          tier: "STANDARD",
+        },
+      });
+      mockCurrentAuthorization.mockResolvedValue({
+        active: false,
+        status: "SUSPENDED",
+        tier: "STANDARD",
+        isAdmin: false,
       });
 
       const req = createMockRequest({
@@ -190,11 +359,11 @@ describe("Auth Middleware", () => {
 
       expect(res.status).toHaveBeenCalledWith(403);
       expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ message: "Business account is suspended" }),
+        expect.objectContaining({ error: "BUSINESS_INACTIVE" }),
       );
     });
 
-    it("should return 500 on unexpected error", async () => {
+    it("should return 503 on unexpected authentication service error", async () => {
       (jwt.verify as jest.Mock).mockImplementation(() => {
         throw new Error("jwt fail");
       });
@@ -210,9 +379,9 @@ describe("Auth Middleware", () => {
 
       await authenticateAPIKey(req, res, next);
 
-      expect(res.status).toHaveBeenCalledWith(500);
+      expect(res.status).toHaveBeenCalledWith(503);
       expect(res.json).toHaveBeenCalledWith(
-        expect.objectContaining({ error: "INTERNAL_ERROR" }),
+        expect.objectContaining({ error: "AUTHENTICATION_UNAVAILABLE" }),
       );
     });
 
@@ -227,11 +396,18 @@ describe("Auth Middleware", () => {
         businessId: "biz-2",
         business: {
           id: "biz-2",
+          address: "0x2234567890abcdef1234567890abcdef12345678",
           tier: "ENTERPRISE",
           kycStatus: "VERIFIED",
         },
       };
       mockPrismaInstance.aPIKey.findUnique.mockResolvedValue(apiKey);
+      mockCurrentAuthorization.mockResolvedValue({
+        active: true,
+        status: "VERIFIED",
+        tier: "ENTERPRISE",
+        isAdmin: false,
+      });
       mockPrismaInstance.aPIKey.update.mockRejectedValue(
         new Error("Update failed"),
       );
@@ -261,7 +437,15 @@ describe("Auth Middleware", () => {
   // ─── tierRateLimit ─────────────────────────────────────────────────────────
 
   describe("tierRateLimit", () => {
-    it("should call next when within rate limit", () => {
+    it("should call next when within rate limit", async () => {
+      const limiter = createTierRateLimit({
+        store: {
+          consume: jest.fn().mockResolvedValue({
+            count: 1,
+            resetAt: new Date(Date.now() + 60_000),
+          }),
+        },
+      });
       const req = createMockRequest({
         businessId: "biz-rate-test",
         businessTier: "ENTERPRISE",
@@ -269,13 +453,13 @@ describe("Auth Middleware", () => {
       const res = createMockResponse();
       const next = createMockNext();
 
-      tierRateLimit(req, res, next);
+      await limiter(req, res, next);
 
       expect(next).toHaveBeenCalled();
-      expect(res.setHeader).toHaveBeenCalledWith("X-RateLimit-Limit", 1000);
+      expect(res.setHeader).toHaveBeenCalledWith("X-RateLimit-Limit", 5000);
     });
 
-    it("should call next when businessId is missing", () => {
+    it("should call next when businessId is missing", async () => {
       const req = createMockRequest({
         businessId: undefined,
         businessTier: undefined,
@@ -283,22 +467,28 @@ describe("Auth Middleware", () => {
       const res = createMockResponse();
       const next = createMockNext();
 
-      tierRateLimit(req, res, next);
+      await tierRateLimit(req, res, next);
 
       expect(next).toHaveBeenCalled();
     });
 
-    it("should set rate limit headers", () => {
+    it("should set rate limit headers", async () => {
+      const resetAt = new Date(Date.now() + 60_000);
+      const limiter = createTierRateLimit({
+        store: {
+          consume: jest.fn().mockResolvedValue({ count: 1, resetAt }),
+        },
+      });
       const req = createMockRequest({
         businessId: "biz-headers",
-        businessTier: "STARTER",
+        businessTier: "STANDARD",
       });
       const res = createMockResponse();
       const next = createMockNext();
 
-      tierRateLimit(req, res, next);
+      await limiter(req, res, next);
 
-      expect(res.setHeader).toHaveBeenCalledWith("X-RateLimit-Limit", 60);
+      expect(res.setHeader).toHaveBeenCalledWith("X-RateLimit-Limit", 300);
       expect(res.setHeader).toHaveBeenCalledWith(
         "X-RateLimit-Remaining",
         expect.any(Number),
@@ -309,63 +499,60 @@ describe("Auth Middleware", () => {
       );
     });
 
-    it("should return 429 when rate limit is exceeded", () => {
-      const businessId = "biz-rate-exceeded";
-      const businessTier = "STARTER"; // 60 req/min limit
+    it("should return 429 when rate limit is exceeded", async () => {
+      const limiter = createTierRateLimit({
+        store: {
+          consume: jest.fn().mockResolvedValue({
+            count: 301,
+            resetAt: new Date(Date.now() + 60_000),
+          }),
+        },
+      });
+      const req = createMockRequest({
+        businessId: "biz-rate-exceeded",
+        businessTier: "STANDARD",
+      });
+      const res = createMockResponse();
+      const next = createMockNext();
 
-      // Make 61 requests to exceed the limit
-      for (let i = 0; i <= 60; i++) {
-        const req = createMockRequest({ businessId, businessTier });
-        const res = createMockResponse();
-        const next = createMockNext();
+      await limiter(req, res, next);
 
-        tierRateLimit(req, res, next);
-
-        if (i < 60) {
-          expect(next).toHaveBeenCalled();
-        } else {
-          // 61st request should be rate limited
-          expect(res.status).toHaveBeenCalledWith(429);
-          expect(res.json).toHaveBeenCalledWith(
-            expect.objectContaining({
-              error: "RATE_LIMITED",
-              retryAfter: expect.any(Number),
-            }),
-          );
-        }
-      }
+      expect(next).not.toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(429);
+      expect(res.json).toHaveBeenCalledWith(
+        expect.objectContaining({
+          error: "RATE_LIMITED",
+          retryAfter: expect.any(Number),
+        }),
+      );
     });
   });
 
   // ─── rate limit cleanup ──────────────────────────────────────────────────────
 
   describe("rate limit cleanup", () => {
-    it("should clean up expired rate limit windows via setInterval", () => {
-      jest.useFakeTimers();
-
-      let isolatedTierRateLimit: typeof tierRateLimit;
-
-      jest.isolateModules(() => {
-        // Re-import module with fake timers active so setInterval is captured
-        const authModule = require("../../middleware/auth");
-        isolatedTierRateLimit = authModule.tierRateLimit;
+    it("delegates expiry cleanup to the durable store", async () => {
+      const consume = jest.fn().mockResolvedValue({
+        count: 1,
+        resetAt: new Date(Date.now() + 60_000),
       });
-
-      // Create a rate limit entry by making a request
+      const limiter = createTierRateLimit({ store: { consume } });
       const req = createMockRequest({
         businessId: "biz-cleanup-isolated",
-        businessTier: "STARTER",
+        businessTier: "STANDARD",
       });
       const res = createMockResponse();
       const next = createMockNext();
 
-      isolatedTierRateLimit!(req, res, next);
+      await limiter(req, res, next);
+
+      expect(consume).toHaveBeenCalledWith(
+        expect.objectContaining({
+          businessId: "biz-cleanup-isolated",
+          expiresAt: expect.any(Date),
+        }),
+      );
       expect(next).toHaveBeenCalled();
-
-      // Advance time past the window expiry and cleanup interval
-      jest.advanceTimersByTime(600_000);
-
-      jest.useRealTimers();
     });
   });
 
@@ -383,7 +570,12 @@ describe("Auth Middleware", () => {
           role: "VIEWER",
         }),
         expect.any(String),
-        { expiresIn: "24h" },
+        {
+          algorithm: "HS256",
+          expiresIn: 900,
+          issuer: "noblepay-api",
+          audience: "noblepay-web",
+        },
       );
       expect(token).toBe("mock-jwt-token");
     });
@@ -399,7 +591,12 @@ describe("Auth Middleware", () => {
           role: "ADMIN",
         }),
         expect.any(String),
-        { expiresIn: "24h" },
+        {
+          algorithm: "HS256",
+          expiresIn: 900,
+          issuer: "noblepay-api",
+          audience: "noblepay-web",
+        },
       );
       expect(token).toBe("mock-jwt-token");
     });
@@ -437,7 +634,7 @@ describe("Auth Middleware", () => {
   // ─── NP-02: JWT_SECRET validation ────────────────────────────────────────
 
   describe("JWT_SECRET validation (NP-02)", () => {
-    it("should throw FATAL error when JWT_SECRET is unset in non-test mode", () => {
+    it("should fail closed when JWT_SECRET is unset in non-test mode", () => {
       const originalEnv = process.env.NODE_ENV;
       const originalSecret = process.env.JWT_SECRET;
 
@@ -445,11 +642,9 @@ describe("Auth Middleware", () => {
       delete process.env.JWT_SECRET;
       process.env.NODE_ENV = "production";
 
-      expect(() => {
-        jest.isolateModules(() => {
-          require("../../middleware/auth");
-        });
-      }).toThrow("FATAL: JWT_SECRET environment variable is required in non-test environments");
+      expect(() => generateJWT("biz-1", "STANDARD")).toThrow(
+        "JWT_SECRET is not configured",
+      );
 
       // Restore env
       process.env.NODE_ENV = originalEnv;

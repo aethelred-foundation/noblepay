@@ -1,498 +1,437 @@
-import { createMockPrisma, resetAllMocks } from "../setup";
-import { FXService, FXError } from "../../services/fx";
-import { AuditService } from "../../services/audit";
+import { Prisma } from "@prisma/client";
+import { FXService } from "../../services/fx";
+import type { AuditService } from "../../services/audit";
 
-let prisma: ReturnType<typeof createMockPrisma>;
-let auditService: AuditService;
-let fxService: FXService;
+const now = new Date("2026-07-21T12:00:00.000Z");
 
-beforeEach(() => {
-  resetAllMocks();
-  prisma = createMockPrisma();
-  auditService = new AuditService(prisma);
-  jest.spyOn(auditService, "createAuditEntry").mockResolvedValue({} as any);
-  fxService = new FXService(prisma, auditService);
-});
+function hedge(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "hedge-1",
+    businessId: "business-1",
+    baseCurrency: "USDC",
+    quoteCurrency: "AED",
+    type: "FORWARD",
+    notional: new Prisma.Decimal("1000"),
+    spotRate: new Prisma.Decimal("3.67"),
+    strikeRate: new Prisma.Decimal("3.7"),
+    maturityDate: new Date("2026-08-01T00:00:00.000Z"),
+    status: "OPEN",
+    premium: null,
+    pnl: null,
+    createdAt: now,
+    closedAt: null,
+    ...overrides,
+  };
+}
 
-describe("FXService", () => {
-  // ─── getRates ──────────────────────────────────────────────────────────────
+function setup(oracleFetch: jest.Mock = jest.fn()) {
+  const prisma = {
+    fXHedge: { findMany: jest.fn(), findFirst: jest.fn() },
+  };
+  const service = new FXService(
+    prisma as never,
+    {} as AuditService,
+    oracleFetch as typeof fetch,
+  );
+  return { prisma, service, oracleFetch };
+}
 
-  describe("getRates", () => {
-    it("should return all rates when no pair specified", () => {
-      const rates = fxService.getRates();
-      expect(rates.length).toBeGreaterThan(0);
-      expect(rates[0]).toHaveProperty("pair");
-      expect(rates[0]).toHaveProperty("bid");
-      expect(rates[0]).toHaveProperty("ask");
-      expect(rates[0]).toHaveProperty("mid");
-    });
+function quote(overrides: Record<string, unknown> = {}) {
+  return {
+    pair: "USDC/AED",
+    bid: 3.66,
+    ask: 3.68,
+    mid: 3.67,
+    timestamp: now.toISOString(),
+    source: "licensed-oracle",
+    ...overrides,
+  };
+}
 
-    it("should return specific pair rate", () => {
-      const rates = fxService.getRates("AED/USD");
-      expect(rates).toHaveLength(1);
-      expect(rates[0].pair).toBe("AED/USD");
-    });
-
-    it("should throw PAIR_NOT_FOUND for unsupported pair", () => {
-      expect(() => fxService.getRates("XXX/YYY")).toThrow(FXError);
-    });
-
-    it("should have correct bid/ask spread", () => {
-      const rates = fxService.getRates("AED/USD");
-      expect(rates[0].bid).toBeLessThan(rates[0].ask);
-      expect(rates[0].mid).toBeGreaterThan(rates[0].bid);
-      expect(rates[0].mid).toBeLessThan(rates[0].ask);
-    });
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
   });
+}
 
-  // ─── createHedge ───────────────────────────────────────────────────────────
+describe("FXService production behavior", () => {
+  const originalEnv = process.env;
 
-  describe("createHedge", () => {
-    const baseHedge = {
-      pair: "AED/USD",
-      type: "FORWARD" as const,
-      notionalAmount: "100000",
-      currency: "AED",
-      expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-      marginDeposit: "10000",
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(now);
+    process.env = {
+      ...originalEnv,
+      FX_ORACLE_URL: "https://oracle.example/rates",
+      FX_ORACLE_MAX_AGE_MS: "120000",
     };
+  });
 
-    it("should create a forward hedge position", async () => {
-      const position = await fxService.createHedge(
-        baseHedge,
-        "0xtrader",
-        "biz-1",
-      );
+  afterEach(() => {
+    process.env = originalEnv;
+    jest.useRealTimers();
+  });
 
-      expect(position.id).toMatch(/^fx-/);
-      expect(position.pair).toBe("AED/USD");
-      expect(position.type).toBe("FORWARD");
-      expect(position.status).toBe("ACTIVE");
-      expect(position.entryRate).toBeGreaterThan(0);
-      expect(auditService.createAuditEntry).toHaveBeenCalled();
-    });
-
-    it("should create an option position", async () => {
-      const position = await fxService.createHedge(
-        {
-          ...baseHedge,
-          type: "OPTION_CALL",
-          strikeRate: 0.28,
-          marginDeposit: "5000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      expect(position.type).toBe("OPTION_CALL");
-      expect(parseFloat(position.premium)).toBeGreaterThanOrEqual(0);
-    });
-
-    it("should throw INVALID_EXPIRY for past expiry date", async () => {
-      await expect(
-        fxService.createHedge(
-          {
-            ...baseHedge,
-            expiryDate: new Date(Date.now() - 1000).toISOString(),
+  it("accepts only a fresh, internally consistent oracle quote", async () => {
+    const { service, oracleFetch } = setup();
+    oracleFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: {
+            pair: "USDC/AED",
+            bid: 3.66,
+            ask: 3.68,
+            mid: 3.67,
+            timestamp: now.toISOString(),
+            source: "licensed-oracle",
           },
-          "0xtrader",
-          "biz-1",
-        ),
-      ).rejects.toMatchObject({ code: "INVALID_EXPIRY" });
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+
+    const rates = await service.getRates("USDC/AED");
+
+    expect(rates).toEqual([
+      expect.objectContaining({
+        pair: "USDC/AED",
+        verified: true,
+        change24h: null,
+        source: "licensed-oracle",
+      }),
+    ]);
+    expect(String(oracleFetch.mock.calls[0][0])).toContain("pair=USDC%2FAED");
+  });
+
+  it("authenticates configured oracle requests and preserves optional market fields", async () => {
+    process.env.FX_ORACLE_API_KEY = "oracle-secret";
+    const { service, oracleFetch } = setup();
+    oracleFetch.mockResolvedValue(
+      jsonResponse([
+        quote({ change24h: -0.02, volume24h: "1000000" }),
+        quote({ pair: "EUR/AED", bid: 4, ask: 4.1, mid: 4.05 }),
+      ]),
+    );
+
+    const rates = await service.getRates();
+
+    expect(rates).toHaveLength(2);
+    expect(rates[0]).toMatchObject({ change24h: -0.02, volume24h: "1000000" });
+    expect(oracleFetch).toHaveBeenCalledWith(
+      expect.any(URL),
+      expect.objectContaining({
+        headers: { Authorization: "Bearer oracle-secret" },
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("fails closed when the oracle is missing, stale, or inconsistent", async () => {
+    const { service, oracleFetch } = setup();
+    delete process.env.FX_ORACLE_URL;
+    await expect(service.getRates()).rejects.toMatchObject({
+      code: "FX_ORACLE_UNAVAILABLE",
+      statusCode: 503,
     });
 
-    it("should throw INSUFFICIENT_MARGIN when margin is too low", async () => {
-      await expect(
-        fxService.createHedge(
-          { ...baseHedge, marginDeposit: "1" },
-          "0xtrader",
-          "biz-1",
-        ),
-      ).rejects.toMatchObject({ code: "INSUFFICIENT_MARGIN" });
-    });
-
-    it("should throw PAIR_NOT_FOUND for unsupported pair", async () => {
-      await expect(
-        fxService.createHedge(
-          { ...baseHedge, pair: "XXX/YYY" },
-          "0xtrader",
-          "biz-1",
-        ),
-      ).rejects.toThrow(FXError);
+    process.env.FX_ORACLE_URL = "https://oracle.example/rates";
+    oracleFetch.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          pair: "USDC/AED",
+          bid: 3.7,
+          ask: 3.6,
+          mid: 3.65,
+          timestamp: new Date(now.getTime() - 300_000).toISOString(),
+          source: "bad-oracle",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    await expect(service.getRates()).rejects.toMatchObject({
+      code: "FX_ORACLE_INVALID_RESPONSE",
+      statusCode: 503,
     });
   });
 
-  // ─── closePosition ─────────────────────────────────────────────────────────
+  it.each([
+    ["not a URL", "not-a-url", "test"],
+    ["plain HTTP in production", "http://oracle.internal/rates", "production"],
+  ])(
+    "rejects an oracle configuration using %s",
+    async (_name, url, nodeEnv) => {
+      process.env.FX_ORACLE_URL = url;
+      process.env.NODE_ENV = nodeEnv;
+      const { service, oracleFetch } = setup();
 
-  describe("closePosition", () => {
-    it("should close an active position and return P&L", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
+      await expect(service.getRates()).rejects.toMatchObject({
+        code: "FX_ORACLE_MISCONFIGURED",
+        statusCode: 503,
+      });
+      expect(oracleFetch).not.toHaveBeenCalled();
+    },
+  );
 
-      const result = await fxService.closePosition(position.id, "0xtrader");
-
-      expect(result.position.status).toBe("SETTLED");
-      expect(result.realizedPnL).toBeDefined();
+  it("maps upstream HTTP failures and network failures to stable unavailable errors", async () => {
+    const { service, oracleFetch } = setup();
+    oracleFetch.mockResolvedValueOnce(jsonResponse({ error: "busy" }, 429));
+    await expect(service.getRates()).rejects.toMatchObject({
+      code: "FX_ORACLE_UNAVAILABLE",
+      statusCode: 503,
     });
 
-    it("should throw POSITION_NOT_FOUND for unknown position", async () => {
-      await expect(
-        fxService.closePosition("nonexistent", "0xactor"),
-      ).rejects.toMatchObject({ code: "POSITION_NOT_FOUND", statusCode: 404 });
-    });
-
-    it("should throw INVALID_STATE for already settled position", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-      await fxService.closePosition(position.id, "0xtrader");
-
-      await expect(
-        fxService.closePosition(position.id, "0xtrader"),
-      ).rejects.toMatchObject({ code: "INVALID_STATE", statusCode: 409 });
+    oracleFetch.mockRejectedValueOnce(
+      new Error("connect ECONNREFUSED secret-host"),
+    );
+    await expect(service.getRates()).rejects.toMatchObject({
+      code: "FX_ORACLE_UNAVAILABLE",
+      message: "The configured FX oracle could not be reached",
+      statusCode: 503,
     });
   });
 
-  // ─── markToMarket ──────────────────────────────────────────────────────────
-
-  describe("markToMarket", () => {
-    it("should return empty array with no positions", () => {
-      const result = fxService.markToMarket();
-      expect(result).toEqual([]);
+  it("distinguishes an unquoted pair from an empty oracle response", async () => {
+    const { service, oracleFetch } = setup();
+    oracleFetch.mockResolvedValueOnce(
+      jsonResponse([quote({ pair: "EUR/AED", bid: 4, ask: 4.1, mid: 4.05 })]),
+    );
+    await expect(service.getRates("USDC/AED")).rejects.toMatchObject({
+      code: "PAIR_NOT_FOUND",
+      statusCode: 404,
     });
 
-    it("should update active positions", async () => {
-      await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      const updated = fxService.markToMarket();
-      expect(updated).toHaveLength(1);
-      expect(updated[0].hedgeEffectiveness).toBeDefined();
+    oracleFetch.mockResolvedValueOnce(jsonResponse([]));
+    await expect(service.getRates()).rejects.toMatchObject({
+      code: "PAIR_NOT_FOUND",
+      statusCode: 503,
     });
   });
 
-  // ─── markToMarket (catch branch — unavailable rate) ─────────────────────
-  describe("markToMarket (catch branch for unavailable rates)", () => {
-    it("should skip positions with unavailable rates", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
+  it.each([
+    ["null payload", null],
+    ["invalid pair", quote({ pair: "USDC-AED" })],
+    ["non-numeric bid", quote({ bid: "not-a-number" })],
+    ["non-numeric ask", quote({ ask: "not-a-number" })],
+    ["non-numeric midpoint", quote({ mid: "not-a-number" })],
+    ["non-positive bid", quote({ bid: 0 })],
+    ["crossed market", quote({ bid: 3.7, ask: 3.6 })],
+    ["midpoint below bid", quote({ mid: 3.5 })],
+    ["midpoint above ask", quote({ mid: 4 })],
+    ["invalid timestamp", quote({ timestamp: "not-a-date" })],
+    [
+      "future timestamp",
+      quote({ timestamp: new Date(now.getTime() + 60_000).toISOString() }),
+    ],
+    ["missing source", quote({ source: "" })],
+  ])(
+    "rejects a %s response without exposing it as verified",
+    async (_name, payload) => {
+      const { service, oracleFetch } = setup();
+      oracleFetch.mockResolvedValue(jsonResponse(payload));
 
-      // Mutate pair to something that doesn't exist in rate feeds
-      (position as any).pair = "ZZZ/QQQ";
+      await expect(service.getRates()).rejects.toMatchObject({
+        code: "FX_ORACLE_INVALID_RESPONSE",
+        statusCode: 503,
+      });
+    },
+  );
 
-      const marked = fxService.markToMarket();
-      // The position should be skipped (catch block), so no results
-      expect(marked).toHaveLength(0);
+  it("tenant-scopes and paginates persisted hedge records", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findMany.mockResolvedValue([hedge()]);
+
+    const positions = await service.listPositions("business-1", {
+      status: "OPEN",
+      page: 3,
+      limit: 10,
+    });
+
+    expect(positions[0]).toEqual(
+      expect.objectContaining({
+        businessId: "business-1",
+        marginDeposit: null,
+        unrealizedPnL: null,
+        dataSource: "DATABASE_SNAPSHOT",
+      }),
+    );
+    expect(prisma.fXHedge.findMany).toHaveBeenCalledWith({
+      where: { businessId: "business-1", status: "OPEN" },
+      orderBy: { createdAt: "desc" },
+      skip: 20,
+      take: 10,
     });
   });
 
-  // ─── getExposure ───────────────────────────────────────────────────────────
+  it("supports unfiltered history and maps optional durable values", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findMany.mockResolvedValue([
+      hedge({
+        status: "CLOSED",
+        premium: new Prisma.Decimal("2.5"),
+        pnl: new Prisma.Decimal("17"),
+        closedAt: now,
+      }),
+    ]);
 
-  describe("getExposure", () => {
-    it("should return exposure report", async () => {
-      await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
+    const positions = await service.listPositions("business-1");
 
-      const exposure = fxService.getExposure("biz-1");
+    expect(positions[0]).toMatchObject({
+      premium: "2.5",
+      unrealizedPnL: "17",
+      closedAt: now,
+    });
+    expect(prisma.fXHedge.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: undefined, take: undefined }),
+    );
+  });
 
-      expect(exposure.totalExposure).toBeDefined();
-      expect(exposure.valueAtRisk).toBeDefined();
-      expect(exposure.stressTestResults).toHaveProperty("10% USD depreciation");
+  it("tenant-scopes direct position reads and conceals missing records", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findFirst.mockResolvedValueOnce(hedge());
+
+    await expect(
+      service.getPosition("hedge-1", "business-1"),
+    ).resolves.toMatchObject({
+      id: "hedge-1",
+      businessId: "business-1",
+    });
+    expect(prisma.fXHedge.findFirst).toHaveBeenCalledWith({
+      where: { id: "hedge-1", businessId: "business-1" },
     });
 
-    it("should return zeroes with no positions", () => {
-      const exposure = fxService.getExposure("biz-1");
-      expect(exposure.totalExposure).toBe("0.00");
+    prisma.fXHedge.findFirst.mockResolvedValueOnce(null);
+    await expect(
+      service.getPosition("foreign-hedge", "business-1"),
+    ).rejects.toMatchObject({ code: "POSITION_NOT_FOUND", statusCode: 404 });
+  });
+
+  it("keeps mark-to-market as a durable snapshot read", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findMany.mockResolvedValue([hedge()]);
+
+    const positions = await service.markToMarket("business-1");
+
+    expect(positions).toHaveLength(1);
+    expect(prisma.fXHedge.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { businessId: "business-1" } }),
+    );
+  });
+
+  it("fails unverified hedge execution closed", async () => {
+    const { service } = setup();
+    await expect(
+      service.createHedge(
+        {
+          pair: "USDC/AED",
+          type: "FORWARD",
+          notionalAmount: "1000",
+          currency: "USDC",
+          expiryDate: "2026-08-01T00:00:00.000Z",
+          marginDeposit: "100",
+        },
+        "signer-1",
+        "business-1",
+      ),
+    ).rejects.toMatchObject({
+      code: "FX_EXECUTION_UNAVAILABLE",
+      statusCode: 501,
+    });
+    await expect(
+      service.closePosition("hedge-1", "signer-1", "business-1"),
+    ).rejects.toMatchObject({ statusCode: 501 });
+  });
+
+  it("reports only durable hedge notional and marks unknown risk fields null", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findMany.mockResolvedValue([hedge()]);
+
+    const exposure = await service.getExposure("business-1");
+
+    expect(exposure).toEqual(
+      expect.objectContaining({
+        totalExposure: "1000",
+        netExposure: null,
+        valueAtRisk: null,
+        scope: "HEDGE_NOTIONAL_ONLY",
+      }),
+    );
+  });
+
+  it("aggregates repeated-currency exposure without inventing unhedged values", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findMany.mockResolvedValue([
+      hedge({ id: "hedge-1", notional: new Prisma.Decimal("1000") }),
+      hedge({ id: "hedge-2", notional: new Prisma.Decimal("250") }),
+      hedge({
+        id: "hedge-3",
+        baseCurrency: "EUR",
+        quoteCurrency: "AED",
+        notional: new Prisma.Decimal("50"),
+      }),
+    ]);
+
+    const exposure = await service.getExposure("business-1");
+
+    expect(exposure.totalExposure).toBe("1300");
+    expect(exposure.byCurrency).toEqual({
+      USDC: {
+        exposure: "1250",
+        hedged: "1250",
+        unhedged: null,
+        hedgeRatio: null,
+      },
+      EUR: { exposure: "50", hedged: "50", unhedged: null, hedgeRatio: null },
     });
   });
 
-  // ─── getAnalytics ──────────────────────────────────────────────────────────
+  it("derives hedge analytics from open and realized durable PnL", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findMany.mockResolvedValue([
+      hedge({
+        id: "open-with-pnl",
+        pnl: new Prisma.Decimal("10"),
+        maturityDate: new Date(now.getTime() + 86_400_000),
+      }),
+      hedge({
+        id: "closed-with-pnl",
+        status: "CLOSED",
+        pnl: new Prisma.Decimal("7"),
+        notional: new Prisma.Decimal("2000"),
+      }),
+      hedge({
+        id: "expired-no-pnl",
+        status: "EXPIRED",
+        baseCurrency: "EUR",
+        quoteCurrency: "AED",
+        notional: new Prisma.Decimal("500"),
+      }),
+    ]);
 
-  describe("getAnalytics", () => {
-    it("should return analytics with zero positions", () => {
-      const analytics = fxService.getAnalytics();
-      expect(analytics.totalPositions).toBe(0);
-      expect(analytics.totalNotional).toBe("0.00");
+    const analytics = await service.getAnalytics("business-1");
+
+    expect(analytics).toMatchObject({
+      totalPositions: 1,
+      totalNotional: "1000",
+      totalUnrealizedPnL: "10",
+      totalRealizedPnL: "7",
+      expiringThisWeek: 1,
+      dataSource: "DATABASE_SNAPSHOT",
     });
-
-    it("should calculate analytics with positions", async () => {
-      await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      const analytics = fxService.getAnalytics();
-      expect(analytics.totalPositions).toBe(1);
-      expect(parseFloat(analytics.totalNotional)).toBe(100000);
-      expect(analytics.expiringThisWeek).toBe(1);
-    });
-
-    it("should calculate topPairs from multiple pair positions", async () => {
-      await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      await fxService.createHedge(
-        {
-          pair: "GBP/USD",
-          type: "FORWARD",
-          notionalAmount: "50000",
-          currency: "GBP",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "5000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      const analytics = fxService.getAnalytics();
-      expect(analytics.topPairs.length).toBeGreaterThanOrEqual(2);
-    });
-
-    it("should include settled positions in realizedPnL", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      await fxService.closePosition(position.id, "0xtrader");
-
-      const analytics = fxService.getAnalytics();
-      expect(analytics.totalRealizedPnL).toBeDefined();
+    expect(analytics.topPairs[0]).toEqual({
+      pair: "USDC/AED",
+      volume: "3000",
+      pnl: "17",
     });
   });
 
-  // ─── markToMarket (option types) ─────────────────────────────────────────
+  it("uses null unrealized PnL for an empty analytics snapshot", async () => {
+    const { prisma, service } = setup();
+    prisma.fXHedge.findMany.mockResolvedValue([]);
 
-  describe("markToMarket (option types)", () => {
-    it("should calculate P&L for OPTION_CALL positions", async () => {
-      await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "OPTION_CALL",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "5000",
-          strikeRate: 0.28,
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      const marked = fxService.markToMarket();
-      expect(marked).toHaveLength(1);
-      expect(marked[0].unrealizedPnL).toBeDefined();
-    });
-
-    it("should calculate P&L for OPTION_PUT positions", async () => {
-      await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "OPTION_PUT",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "5000",
-          strikeRate: 0.28,
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      const marked = fxService.markToMarket();
-      expect(marked).toHaveLength(1);
-      expect(marked[0].unrealizedPnL).toBeDefined();
-    });
-  });
-
-  // ─── createHedge (PAIR_NOT_FOUND in getRates) ────────────────────────────
-
-  describe("createHedge (edge cases)", () => {
-    it("should throw PAIR_NOT_FOUND when pair has no rates", async () => {
-      await expect(
-        fxService.createHedge(
-          {
-            pair: "ZZZ/QQQ",
-            type: "FORWARD",
-            notionalAmount: "100000",
-            currency: "ZZZ",
-            expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-            marginDeposit: "10000",
-          },
-          "0xtrader",
-          "biz-1",
-        ),
-      ).rejects.toMatchObject({ code: "PAIR_NOT_FOUND" });
-    });
-  });
-
-  // ─── createHedge edge cases (premium, metadata, strikeRate) ─────────────
-
-  describe("createHedge (option with explicit premium and metadata)", () => {
-    it("should use provided premium when specified for options", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "OPTION_CALL",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "5000",
-          strikeRate: 0.28,
-          premium: "500",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      expect(position.premium).toBe("500");
-    });
-
-    it("should use metadata when provided", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-          metadata: { reference: "trade-123" },
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      expect(position.metadata).toEqual({ reference: "trade-123" });
-    });
-
-    it("should set strikeRate to null for forwards", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      expect(position.strikeRate).toBeNull();
-    });
-  });
-
-  // ─── calculatePnL default branch ──────────────────────────────────────────
-
-  describe("calculatePnL (default branch)", () => {
-    it("should return '0' for unknown position type via markToMarket", async () => {
-      const position = await fxService.createHedge(
-        {
-          pair: "AED/USD",
-          type: "FORWARD",
-          notionalAmount: "100000",
-          currency: "AED",
-          expiryDate: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
-          marginDeposit: "10000",
-        },
-        "0xtrader",
-        "biz-1",
-      );
-
-      // Mutate position type to something not in the switch
-      (position as any).type = "SWAP";
-
-      const marked = fxService.markToMarket();
-      expect(marked).toHaveLength(1);
-      expect(marked[0].unrealizedPnL).toBe("0");
-    });
-  });
-
-  // ─── FXError ───────────────────────────────────────────────────────────────
-
-  describe("FXError", () => {
-    it("should set properties correctly", () => {
-      const err = new FXError("CODE", "msg", 404);
-      expect(err.code).toBe("CODE");
-      expect(err.statusCode).toBe(404);
-      expect(err.name).toBe("FXError");
+    await expect(service.getAnalytics("business-1")).resolves.toMatchObject({
+      totalPositions: 0,
+      totalUnrealizedPnL: null,
+      topPairs: [],
     });
   });
 });

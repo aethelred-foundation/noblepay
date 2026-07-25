@@ -1,182 +1,162 @@
-/**
- * Liquidity Hooks — Custom React hooks for NoblePay liquidity pools.
- *
- * Provides typed hooks for liquidity pool data, LP positions,
- * and pool analytics.
- */
-
-import { useState, useEffect, useCallback } from "react";
+import { useCallback, useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { ApiError, apiRequest } from "@/lib/api";
 import type { LiquidityPool, LPPosition } from "@/types/defi";
-
-// ---------------------------------------------------------------------------
-// Mock Data
-// ---------------------------------------------------------------------------
-
-const MOCK_POOLS: LiquidityPool[] = [
-  {
-    address: "0xpool001",
-    name: "USDC / AETHEL",
-    tokenA: "USDC",
-    tokenB: "AETHEL",
-    tvl: 8_500_000,
-    volume24h: 1_200_000,
-    apy: 12.3,
-    feeBps: 30,
-    status: "Active",
-    reserveA: 4_250_000,
-    reserveB: 2_833_333,
-    lpCount: 142,
-    createdAt: Date.now() - 90 * 86_400_000,
-  },
-  {
-    address: "0xpool002",
-    name: "USDC / USDT",
-    tokenA: "USDC",
-    tokenB: "USDT",
-    tvl: 15_200_000,
-    volume24h: 3_400_000,
-    apy: 4.8,
-    feeBps: 5,
-    status: "Active",
-    reserveA: 7_600_000,
-    reserveB: 7_600_000,
-    lpCount: 315,
-    createdAt: Date.now() - 120 * 86_400_000,
-  },
-  {
-    address: "0xpool003",
-    name: "AETHEL / AED",
-    tokenA: "AETHEL",
-    tokenB: "AED",
-    tvl: 2_100_000,
-    volume24h: 450_000,
-    apy: 18.7,
-    feeBps: 50,
-    status: "Active",
-    reserveA: 700_000,
-    reserveB: 1_400_000,
-    lpCount: 67,
-    createdAt: Date.now() - 45 * 86_400_000,
-  },
-  {
-    address: "0xpool004",
-    name: "USDC / AED",
-    tokenA: "USDC",
-    tokenB: "AED",
-    tvl: 5_600_000,
-    volume24h: 890_000,
-    apy: 6.2,
-    feeBps: 10,
-    status: "Active",
-    reserveA: 2_800_000,
-    reserveB: 10_290_000,
-    lpCount: 198,
-    createdAt: Date.now() - 60 * 86_400_000,
-  },
-];
-
-const MOCK_POSITIONS: LPPosition[] = [
-  {
-    id: "pos-001",
-    poolAddress: "0xpool001",
-    poolName: "USDC / AETHEL",
-    lpTokens: 45_000,
-    poolShare: 2.1,
-    valueUsd: 178_500,
-    unclaimedFees: 1_240,
-    impermanentLoss: -0.8,
-    enteredAt: Date.now() - 30 * 86_400_000,
-  },
-  {
-    id: "pos-002",
-    poolAddress: "0xpool002",
-    poolName: "USDC / USDT",
-    lpTokens: 120_000,
-    poolShare: 0.79,
-    valueUsd: 120_080,
-    unclaimedFees: 480,
-    impermanentLoss: -0.01,
-    enteredAt: Date.now() - 60 * 86_400_000,
-  },
-];
-
-// ---------------------------------------------------------------------------
-// Pool analytics type
-// ---------------------------------------------------------------------------
 
 export interface PoolAnalytics {
   totalTvl: number;
   totalVolume24h: number;
   totalPools: number;
-  avgApy: number;
+  avgApy: number | null;
   totalFeesEarned24h: number;
 }
 
-// ---------------------------------------------------------------------------
-// useLiquidity — pool data, positions, and analytics
-// ---------------------------------------------------------------------------
+interface ApiPool {
+  id: string;
+  pair: string;
+  tokenA: string;
+  tokenB: string;
+  reserveA: string;
+  reserveB: string;
+  tvl: string;
+  apy: number | null;
+  feeRate: number;
+  volume24h: string;
+  status: "ACTIVE" | "PAUSED" | "DEPRECATED";
+  createdAt: string;
+}
+
+interface ApiPosition {
+  id: string;
+  poolId: string;
+  liquidityAmount: string;
+  sharePercentage: number;
+  feesEarned: string;
+  impermanentLoss: string | null;
+  createdAt: string;
+}
+
+interface ApiAnalytics {
+  totalTVL: string;
+  totalVolume24h: string;
+  totalFeesGenerated: string;
+  poolCount: number;
+}
 
 export function useLiquidity() {
-  const [pools, setPools] = useState<LiquidityPool[]>([]);
-  const [positions, setPositions] = useState<LPPosition[]>([]);
-  const [analytics, setAnalytics] = useState<PoolAnalytics | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const poolsQuery = useQuery({
+    queryKey: ["liquidity", "pools"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiPool[]>("/v1/liquidity/pools", { signal }),
+  });
+  const positionsQuery = useQuery({
+    queryKey: ["liquidity", "positions"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiPosition[]>("/v1/liquidity/positions", { signal }),
+  });
+  const analyticsQuery = useQuery({
+    queryKey: ["liquidity", "analytics"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiAnalytics>("/v1/liquidity/analytics", { signal }),
+  });
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setPools(MOCK_POOLS);
-      setPositions(MOCK_POSITIONS);
-      setAnalytics({
-        totalTvl: MOCK_POOLS.reduce((sum, p) => sum + p.tvl, 0),
-        totalVolume24h: MOCK_POOLS.reduce((sum, p) => sum + p.volume24h, 0),
-        totalPools: MOCK_POOLS.length,
-        avgApy:
-          MOCK_POOLS.reduce((sum, p) => sum + p.apy, 0) / MOCK_POOLS.length,
-        totalFeesEarned24h: MOCK_POOLS.reduce(
-          (sum, p) => sum + (p.volume24h * p.feeBps) / 10_000,
-          0,
-        ),
-      });
-      setIsLoading(false);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, []);
-
-  const addLiquidity = useCallback(
-    (poolAddress: string, amountA: number, amountB: number) => {
-      setPools((prev) =>
-        prev.map((p) =>
-          p.address === poolAddress
-            ? {
-                ...p,
-                tvl: p.tvl + amountA + amountB,
-                reserveA: p.reserveA + amountA,
-                reserveB: p.reserveB + amountB,
-              }
-            : p,
-        ),
-      );
-    },
-    [],
+  const poolById = useMemo(
+    () => new Map((poolsQuery.data || []).map((pool) => [pool.id, pool])),
+    [poolsQuery.data],
+  );
+  const pools = useMemo<LiquidityPool[]>(
+    () =>
+      (poolsQuery.data || []).map((pool) => ({
+        address: pool.id,
+        name: pool.pair,
+        tokenA: pool.tokenA,
+        tokenB: pool.tokenB,
+        tvl: Number(pool.tvl),
+        volume24h: Number(pool.volume24h),
+        apy: pool.apy,
+        feeBps: pool.feeRate * 10_000,
+        status:
+          pool.status === "ACTIVE"
+            ? "Active"
+            : pool.status === "PAUSED"
+              ? "Paused"
+              : "Deprecated",
+        reserveA: Number(pool.reserveA),
+        reserveB: Number(pool.reserveB),
+        lpCount: (positionsQuery.data || []).filter(
+          (position) => position.poolId === pool.id,
+        ).length,
+        createdAt: Date.parse(pool.createdAt),
+      })),
+    [poolsQuery.data, positionsQuery.data],
+  );
+  const positions = useMemo<LPPosition[]>(
+    () =>
+      (positionsQuery.data || []).map((position) => ({
+        id: position.id,
+        poolAddress: position.poolId,
+        poolName: poolById.get(position.poolId)?.pair || position.poolId,
+        lpTokens: Number(position.liquidityAmount),
+        poolShare: position.sharePercentage,
+        valueUsd: null,
+        unclaimedFees: Number(position.feesEarned),
+        impermanentLoss:
+          position.impermanentLoss === null
+            ? null
+            : Number(position.impermanentLoss),
+        enteredAt: Date.parse(position.createdAt),
+      })),
+    [poolById, positionsQuery.data],
   );
 
-  const removeLiquidity = useCallback((positionId: string) => {
-    setPositions((prev) => prev.filter((p) => p.id !== positionId));
+  const unavailable = useCallback(async () => {
+    throw new ApiError("Liquidity execution is not configured", {
+      status: 501,
+      code: "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+    });
   }, []);
-
-  const claimFees = useCallback((positionId: string) => {
-    setPositions((prev) =>
-      prev.map((p) => (p.id === positionId ? { ...p, unclaimedFees: 0 } : p)),
-    );
-  }, []);
+  const refetch = useCallback(async () => {
+    await Promise.all([
+      poolsQuery.refetch(),
+      positionsQuery.refetch(),
+      analyticsQuery.refetch(),
+    ]);
+  }, [analyticsQuery, poolsQuery, positionsQuery]);
+  const analytics: PoolAnalytics | null = analyticsQuery.data
+    ? {
+        totalTvl: Number(analyticsQuery.data.totalTVL),
+        totalVolume24h: Number(analyticsQuery.data.totalVolume24h),
+        totalPools: analyticsQuery.data.poolCount,
+        avgApy: (() => {
+          const quoted = pools.filter(
+            (pool): pool is LiquidityPool & { apy: number } =>
+              pool.apy !== null,
+          );
+          return quoted.length
+            ? quoted.reduce((sum, pool) => sum + pool.apy, 0) / quoted.length
+            : null;
+        })(),
+        totalFeesEarned24h: Number(analyticsQuery.data.totalFeesGenerated),
+      }
+    : null;
 
   return {
     pools,
     positions,
     analytics,
-    isLoading,
-    addLiquidity,
-    removeLiquidity,
-    claimFees,
+    isLoading:
+      poolsQuery.isLoading ||
+      positionsQuery.isLoading ||
+      analyticsQuery.isLoading,
+    isMutating: false,
+    error:
+      poolsQuery.error || positionsQuery.error || analyticsQuery.error || null,
+    refetch,
+    mutationsEnabled: false,
+    mutationReason:
+      "On-chain pool changes remain disabled until transaction receipts can be verified.",
+    addLiquidity: unavailable,
+    removeLiquidity: unavailable,
+    claimFees: unavailable,
   };
 }

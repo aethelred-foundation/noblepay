@@ -1,103 +1,147 @@
-/**
- * WebSocket Hook — Real-time event subscription for NoblePay.
- *
- * Manages a WebSocket connection to the NoblePay event server,
- * with automatic reconnection, typed event subscriptions, and
- * connection status tracking.
- */
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { useState, useEffect, useRef, useCallback } from "react";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/** WebSocket connection state */
 export type WSConnectionState =
-  | "connecting"
-  | "connected"
-  | "disconnected"
-  | "reconnecting";
+  "connecting" | "connected" | "disconnected" | "reconnecting";
 
-/** Supported WebSocket event types */
 export type WSEventType =
-  | "payment:initiated"
-  | "payment:settled"
-  | "payment:flagged"
-  | "compliance:screening"
-  | "compliance:decision"
-  | "stream:update"
-  | "pool:tvl"
-  | "fx:rate"
-  | "crosschain:status"
-  | "treasury:proposal"
-  | "invoice:status";
+  | "payment_update"
+  | "compliance_decision"
+  | "stream_tick"
+  | "alert"
+  | "risk_update"
+  | "treasury_event"
+  | "liquidity_update"
+  | "crosschain_update"
+  | "system_event";
 
-/** WebSocket event payload */
-export interface WSEvent<T = unknown> {
+export type WSChannel =
+  | "payments"
+  | "compliance"
+  | "treasury"
+  | "streams"
+  | "alerts"
+  | "risk"
+  | "liquidity"
+  | "crosschain"
+  | "system";
+
+export interface WSEvent<T = Record<string, unknown>> {
   type: WSEventType;
-  data: T;
-  timestamp: number;
+  channel: WSChannel;
+  payload: T;
+  timestamp: string;
+  correlationId: string;
 }
 
-/** Subscription callback */
-export type WSSubscriptionCallback<T = unknown> = (event: WSEvent<T>) => void;
+export type WSSubscriptionCallback<T = Record<string, unknown>> = (
+  event: WSEvent<T>,
+) => void;
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
-
-const DEFAULT_WS_URL = "ws://localhost:3003";
+const FALLBACK_WS_URL = "ws://localhost:4008/ws";
 const RECONNECT_DELAY_MS = 3_000;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-// ---------------------------------------------------------------------------
-// useWebSocket — WebSocket connection with subscriptions
-// ---------------------------------------------------------------------------
+const EVENT_TYPES = new Set<WSEventType>([
+  "payment_update",
+  "compliance_decision",
+  "stream_tick",
+  "alert",
+  "risk_update",
+  "treasury_event",
+  "liquidity_update",
+  "crosschain_update",
+  "system_event",
+]);
 
+const CHANNELS = new Set<WSChannel>([
+  "payments",
+  "compliance",
+  "treasury",
+  "streams",
+  "alerts",
+  "risk",
+  "liquidity",
+  "crosschain",
+  "system",
+]);
+
+function ensureWsPath(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+      parsed.protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+    }
+    if (parsed.pathname === "/" || parsed.pathname === "") {
+      parsed.pathname = "/ws";
+    }
+    return parsed.toString();
+  } catch {
+    return value;
+  }
+}
+
+function defaultWebSocketUrl(): string {
+  const configured = process.env.NEXT_PUBLIC_WS_URL;
+  if (configured) return ensureWsPath(configured);
+
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+  if (apiUrl) return ensureWsPath(apiUrl);
+
+  if (typeof window !== "undefined") {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}/ws`;
+  }
+
+  return FALLBACK_WS_URL;
+}
+
+function isServerEvent(value: unknown): value is WSEvent {
+  if (!value || typeof value !== "object") return false;
+  const event = value as Partial<WSEvent>;
+  return (
+    typeof event.type === "string" &&
+    EVENT_TYPES.has(event.type as WSEventType) &&
+    typeof event.channel === "string" &&
+    CHANNELS.has(event.channel as WSChannel) &&
+    !!event.payload &&
+    typeof event.payload === "object" &&
+    typeof event.timestamp === "string" &&
+    typeof event.correlationId === "string"
+  );
+}
+
+/**
+ * Cookie-authenticated NoblePay WebSocket client.
+ *
+ * Browser WebSocket handshakes automatically include eligible session cookies;
+ * no bearer token is put in the URL or a browser-readable store.
+ */
 export function useWebSocket(url?: string) {
-  const wsUrl = url || process.env.NEXT_PUBLIC_WS_URL || DEFAULT_WS_URL;
-
+  const wsUrl = ensureWsPath(url || defaultWebSocketUrl());
   const [connectionState, setConnectionState] =
     useState<WSConnectionState>("disconnected");
   const [lastEvent, setLastEvent] = useState<WSEvent | null>(null);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
 
   const wsRef = useRef<WebSocket | null>(null);
-  const subscriptionsRef = useRef<
-    Map<WSEventType, Set<WSSubscriptionCallback>>
-  >(new Map());
+  const mountedRef = useRef(false);
+  const manualDisconnectRef = useRef(false);
+  const reconnectAttemptsRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const heartbeatTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const mountedRef = useRef(true);
+  const connectRef = useRef<() => void>(() => undefined);
+  const subscriptionsRef = useRef<Map<WSChannel, Set<WSSubscriptionCallback>>>(
+    new Map(),
+  );
 
-  // Dispatch event to all matching subscribers
-  const dispatch = useCallback((event: WSEvent) => {
-    setLastEvent(event);
-    const subs = subscriptionsRef.current.get(event.type);
-    if (subs) {
-      subs.forEach((cb) => {
-        try {
-          cb(event);
-        } catch (err) {
-          console.error("[NoblePay WS] Subscriber error:", err);
-        }
-      });
+  const clearReconnectTimer = useCallback(() => {
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
     }
   }, []);
 
-  // Start heartbeat to keep connection alive
-  const startHeartbeat = useCallback(() => {
-    if (heartbeatTimerRef.current) clearInterval(heartbeatTimerRef.current);
-    heartbeatTimerRef.current = setInterval(() => {
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "ping" }));
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-  }, []);
-
-  // Stop heartbeat
   const stopHeartbeat = useCallback(() => {
     if (heartbeatTimerRef.current) {
       clearInterval(heartbeatTimerRef.current);
@@ -105,151 +149,204 @@ export function useWebSocket(url?: string) {
     }
   }, []);
 
-  // Connect to WebSocket server
+  const startHeartbeat = useCallback(() => {
+    stopHeartbeat();
+    heartbeatTimerRef.current = setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ action: "ping" }));
+      }
+    }, HEARTBEAT_INTERVAL_MS);
+  }, [stopHeartbeat]);
+
+  const dispatch = useCallback((event: WSEvent) => {
+    setLastEvent(event);
+    const subscribers = subscriptionsRef.current.get(event.channel);
+    subscribers?.forEach((callback) => {
+      try {
+        callback(event);
+      } catch (error) {
+        console.error("[NoblePay WS] Subscriber error:", error);
+      }
+    });
+  }, []);
+
   const connect = useCallback(() => {
     if (!mountedRef.current) return;
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (
+      wsRef.current?.readyState === WebSocket.OPEN ||
+      wsRef.current?.readyState === WebSocket.CONNECTING
+    ) {
+      return;
+    }
+
+    clearReconnectTimer();
+    manualDisconnectRef.current = false;
+    setConnectionState(
+      reconnectAttemptsRef.current > 0 ? "reconnecting" : "connecting",
+    );
 
     try {
-      setConnectionState("connecting");
-      const ws = new WebSocket(wsUrl);
+      const socket = new WebSocket(wsUrl);
+      wsRef.current = socket;
 
-      ws.onopen = () => {
-        if (!mountedRef.current) {
-          ws.close();
+      socket.onopen = () => {
+        if (!mountedRef.current || wsRef.current !== socket) {
+          socket.close();
           return;
         }
-        setConnectionState("connected");
+
+        reconnectAttemptsRef.current = 0;
         setReconnectAttempts(0);
+        setConnectionState("connected");
         startHeartbeat();
 
-        // Re-subscribe to all active event types
-        const types = Array.from(subscriptionsRef.current.keys());
-        if (types.length > 0) {
-          ws.send(JSON.stringify({ action: "subscribe", types }));
+        const channels = Array.from(subscriptionsRef.current.keys());
+        if (channels.length > 0) {
+          socket.send(JSON.stringify({ action: "subscribe", channels }));
         }
       };
 
-      ws.onmessage = (event) => {
+      socket.onmessage = (message) => {
+        if (typeof message.data !== "string") return;
         try {
-          const parsed = JSON.parse(event.data) as WSEvent;
-          if (parsed.type) {
-            dispatch(parsed);
-          }
+          const event: unknown = JSON.parse(message.data);
+          if (isServerEvent(event)) dispatch(event);
         } catch {
-          // Ignore non-JSON messages (e.g. pong)
+          // The server protocol is JSON-only; malformed frames are ignored.
         }
       };
 
-      ws.onclose = () => {
-        if (!mountedRef.current) return;
-        setConnectionState("disconnected");
+      socket.onerror = () => {
+        // The close event owns state changes and reconnect scheduling.
+      };
+
+      socket.onclose = () => {
+        if (wsRef.current === socket) wsRef.current = null;
         stopHeartbeat();
-        wsRef.current = null;
 
-        // Auto-reconnect
-        setReconnectAttempts((prev) => {
-          const next = prev + 1;
-          if (next <= MAX_RECONNECT_ATTEMPTS) {
-            setConnectionState("reconnecting");
-            const delay = RECONNECT_DELAY_MS * Math.min(next, 5);
-            reconnectTimerRef.current = setTimeout(connect, delay);
-          }
-          return next;
-        });
+        if (!mountedRef.current || manualDisconnectRef.current) {
+          setConnectionState("disconnected");
+          return;
+        }
+
+        const nextAttempt = reconnectAttemptsRef.current + 1;
+        reconnectAttemptsRef.current = nextAttempt;
+        setReconnectAttempts(nextAttempt);
+
+        if (nextAttempt > MAX_RECONNECT_ATTEMPTS) {
+          setConnectionState("disconnected");
+          return;
+        }
+
+        setConnectionState("reconnecting");
+        const delay = RECONNECT_DELAY_MS * Math.min(nextAttempt, 5);
+        reconnectTimerRef.current = setTimeout(
+          () => connectRef.current(),
+          delay,
+        );
       };
-
-      ws.onerror = () => {
-        // onclose will fire after onerror, which handles reconnection
-      };
-
-      wsRef.current = ws;
-    } catch (err) {
-      console.error("[NoblePay WS] Connection error:", err);
+    } catch (error) {
+      console.error("[NoblePay WS] Connection error:", error);
       setConnectionState("disconnected");
     }
-  }, [wsUrl, dispatch, startHeartbeat, stopHeartbeat]);
+  }, [clearReconnectTimer, dispatch, startHeartbeat, stopHeartbeat, wsUrl]);
 
-  // Initialize connection on mount
+  connectRef.current = connect;
+
   useEffect(() => {
     mountedRef.current = true;
     connect();
 
     return () => {
       mountedRef.current = false;
+      manualDisconnectRef.current = true;
+      clearReconnectTimer();
       stopHeartbeat();
-      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
-      if (wsRef.current) {
-        wsRef.current.close();
-        wsRef.current = null;
-      }
+      const socket = wsRef.current;
+      wsRef.current = null;
+      socket?.close();
     };
-  }, [connect, stopHeartbeat]);
+  }, [clearReconnectTimer, connect, stopHeartbeat]);
 
-  // Subscribe to a specific event type
   const subscribe = useCallback(
-    <T = unknown>(type: WSEventType, callback: WSSubscriptionCallback<T>) => {
-      if (!subscriptionsRef.current.has(type)) {
-        subscriptionsRef.current.set(type, new Set());
-      }
-      subscriptionsRef.current
-        .get(type)!
-        .add(callback as WSSubscriptionCallback);
+    <T = Record<string, unknown>>(
+      channel: WSChannel,
+      callback: WSSubscriptionCallback<T>,
+    ) => {
+      const existing = subscriptionsRef.current.get(channel);
+      const isNewChannel = !existing;
+      const subscribers = existing || new Set<WSSubscriptionCallback>();
+      subscribers.add(callback as WSSubscriptionCallback);
+      subscriptionsRef.current.set(channel, subscribers);
 
-      // Tell server about new subscription
-      if (wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(
-          JSON.stringify({ action: "subscribe", types: [type] }),
-        );
+      if (isNewChannel && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ action: "subscribe", channel }));
       }
+
+      return () => {
+        const current = subscriptionsRef.current.get(channel);
+        current?.delete(callback as WSSubscriptionCallback);
+        if (current?.size === 0) {
+          subscriptionsRef.current.delete(channel);
+          if (
+            channel !== "system" &&
+            wsRef.current?.readyState === WebSocket.OPEN
+          ) {
+            wsRef.current.send(
+              JSON.stringify({ action: "unsubscribe", channel }),
+            );
+          }
+        }
+      };
     },
     [],
   );
 
-  // Unsubscribe from a specific event type
   const unsubscribe = useCallback(
-    <T = unknown>(type: WSEventType, callback: WSSubscriptionCallback<T>) => {
-      const subs = subscriptionsRef.current.get(type);
-      if (subs) {
-        subs.delete(callback as WSSubscriptionCallback);
-        if (subs.size === 0) {
-          subscriptionsRef.current.delete(type);
-          if (wsRef.current?.readyState === WebSocket.OPEN) {
-            wsRef.current.send(
-              JSON.stringify({ action: "unsubscribe", types: [type] }),
-            );
-          }
+    <T = Record<string, unknown>>(
+      channel: WSChannel,
+      callback: WSSubscriptionCallback<T>,
+    ) => {
+      const subscribers = subscriptionsRef.current.get(channel);
+      subscribers?.delete(callback as WSSubscriptionCallback);
+      if (subscribers?.size === 0) {
+        subscriptionsRef.current.delete(channel);
+        if (
+          channel !== "system" &&
+          wsRef.current?.readyState === WebSocket.OPEN
+        ) {
+          wsRef.current.send(
+            JSON.stringify({ action: "unsubscribe", channel }),
+          );
         }
       }
     },
     [],
   );
 
-  // Send a message to the server
-  const send = useCallback((data: Record<string, unknown>) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(data));
-    }
+  const send = useCallback((data: Record<string, unknown>): boolean => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(JSON.stringify(data));
+    return true;
   }, []);
 
-  // Manual disconnect
   const disconnect = useCallback(() => {
-    if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+    manualDisconnectRef.current = true;
+    clearReconnectTimer();
     stopHeartbeat();
-    if (wsRef.current) {
-      wsRef.current.close();
-      wsRef.current = null;
-    }
-    setConnectionState("disconnected");
+    reconnectAttemptsRef.current = 0;
     setReconnectAttempts(0);
-  }, [stopHeartbeat]);
+    setConnectionState("disconnected");
+    const socket = wsRef.current;
+    wsRef.current = null;
+    socket?.close();
+  }, [clearReconnectTimer, stopHeartbeat]);
 
-  // Manual reconnect
   const reconnect = useCallback(() => {
     disconnect();
-    setReconnectAttempts(0);
-    setTimeout(connect, 100);
-  }, [disconnect, connect]);
+    manualDisconnectRef.current = false;
+    reconnectTimerRef.current = setTimeout(() => connectRef.current(), 100);
+  }, [disconnect]);
 
   return {
     connectionState,

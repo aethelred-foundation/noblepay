@@ -9,9 +9,11 @@
  *   - Wallet not detected: install prompt
  */
 
-import React, { useCallback, useRef, useState, useEffect } from "react";
-import { useAccount, useConnect } from "wagmi";
+import React, { useRef, useState, useEffect } from "react";
+import Link from "next/link";
+import { useConnect } from "wagmi";
 import { useApp } from "@/contexts/AppContext";
+import { useOptionalAuth } from "@/contexts/AuthContext";
 import { truncateAddress, formatNumber, formatCurrency } from "@/lib/utils";
 import { activeChain } from "@/config/wagmi";
 import {
@@ -21,6 +23,7 @@ import {
 
 export function WalletButton() {
   const { wallet, connectWallet, disconnectWallet, switchNetwork } = useApp();
+  const auth = useOptionalAuth();
   const { connectors } = useConnect();
   const walletOptions = orderWalletConnectors(connectors);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -90,7 +93,11 @@ export function WalletButton() {
           onClick={() => setShowDropdown(!showDropdown)}
           className="flex items-center gap-2 rounded-lg bg-gray-800/80 border border-gray-700 px-3 py-2 text-sm font-medium text-gray-200 hover:bg-gray-700/80 hover:border-gray-600 transition-colors"
         >
-          <span className="inline-block h-2 w-2 rounded-full bg-emerald-400" />
+          <span
+            className={`inline-block h-2 w-2 rounded-full ${
+              auth?.isAuthenticated ? "bg-emerald-400" : "bg-amber-400"
+            }`}
+          />
           <span className="font-mono text-xs">
             {truncateAddress(wallet.address, 6, 4)}
           </span>
@@ -118,6 +125,26 @@ export function WalletButton() {
 
             <div className="space-y-2 mb-4">
               <div className="flex items-center justify-between">
+                <span className="text-xs text-gray-500">Session</span>
+                <span
+                  className={`text-xs ${
+                    auth?.isAuthenticated
+                      ? "text-emerald-400"
+                      : "text-amber-300"
+                  }`}
+                >
+                  {auth?.isAuthenticated ? "Signed in" : "Signature required"}
+                </span>
+              </div>
+              {auth?.business && (
+                <div className="flex items-center justify-between gap-4">
+                  <span className="text-xs text-gray-500">Business</span>
+                  <span className="truncate text-xs text-gray-200">
+                    {auth.business.businessName}
+                  </span>
+                </div>
+              )}
+              <div className="flex items-center justify-between">
                 <span className="text-xs text-gray-500">AETHEL</span>
                 <span className="text-sm font-medium text-gray-200">
                   {formatNumber(wallet.balance, 4)}
@@ -143,10 +170,49 @@ export function WalletButton() {
               </div>
             </div>
 
+            {!auth?.isAuthenticated && (
+              <div className="mb-3 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3">
+                <p className="mb-2 text-xs leading-5 text-amber-100">
+                  Sign the one-time challenge to access NoblePay records. This
+                  signature does not submit a transaction or spend funds.
+                </p>
+                <button
+                  type="button"
+                  disabled={auth?.isSigningIn || auth?.isCheckingSession}
+                  onClick={() => void auth?.signIn().catch(() => undefined)}
+                  className="w-full rounded-lg bg-amber-500 px-3 py-2 text-xs font-bold text-slate-950 transition-colors hover:bg-amber-400 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {auth?.isSigningIn
+                    ? "Waiting for signature…"
+                    : "SIGN IN WITH WALLET"}
+                </button>
+                {auth?.error && (
+                  <p
+                    role="alert"
+                    className="mt-2 text-xs leading-5 text-red-300"
+                  >
+                    {auth.error}
+                  </p>
+                )}
+                <Link
+                  href="/businesses"
+                  className="mt-2 block text-center text-xs text-amber-200 underline-offset-2 hover:underline"
+                >
+                  Register a new business
+                </Link>
+              </div>
+            )}
+
             <button
               onClick={() => {
-                disconnectWallet();
-                setShowDropdown(false);
+                void auth?.signOut().finally(() => {
+                  disconnectWallet();
+                  setShowDropdown(false);
+                });
+                if (!auth) {
+                  disconnectWallet();
+                  setShowDropdown(false);
+                }
               }}
               className="w-full rounded-lg border border-red-500/30 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-400 hover:bg-red-500/20 transition-colors"
             >

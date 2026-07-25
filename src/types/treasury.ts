@@ -28,17 +28,17 @@ export interface TreasuryProposal {
   /** Proposer wallet address */
   proposer: string;
   /** Recipient of the funds */
-  recipient: string;
+  recipient: string | null;
   /** Requested amount (human-readable) */
-  amount: number;
+  amount: number | null;
   /** Token symbol for the request (e.g. 'USDC', 'AETHEL') */
-  tokenSymbol: string;
+  tokenSymbol: string | null;
   /** Current proposal status */
   status: ProposalStatus;
   /** Number of votes in favor */
   votesFor: number;
   /** Number of votes against */
-  votesAgainst: number;
+  votesAgainst: number | null;
   /** Quorum threshold required */
   quorum: number;
   /** Proposal creation timestamp (Unix ms) */
@@ -46,7 +46,9 @@ export interface TreasuryProposal {
   /** Voting deadline timestamp (Unix ms) */
   votingDeadline: number;
   /** Execution timestamp (Unix ms), 0 if not executed */
-  executedAt: number;
+  executedAt: number | null;
+  /** Durable spending-policy category, when present */
+  category?: string | null;
   /** On-chain transaction hash, if executed */
   txHash?: string;
 }
@@ -67,7 +69,7 @@ export interface SpendingPolicy {
   /** Policy description */
   description: string;
   /** Maximum single transaction amount (USD) */
-  maxSingleTx: number;
+  maxSingleTx: number | null;
   /** Daily spending limit (USD) */
   dailyLimit: number;
   /** Monthly spending limit (USD) */
@@ -124,7 +126,7 @@ export interface YieldStrategy {
   /** Earned yield to date (USD) */
   earnedToDate: number;
   /** Last rebalance timestamp (Unix ms) */
-  lastRebalance: number;
+  lastRebalance: number | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -139,7 +141,7 @@ export interface TreasuryOverview {
   tokenBalances: {
     symbol: string;
     amount: number;
-    valueUsd: number;
+    valueUsd: number | null;
   }[];
   /** Active proposal count */
   activeProposals: number;
@@ -151,4 +153,10 @@ export interface TreasuryOverview {
   monthlySpend: number;
   /** Pending approval count */
   pendingApprovals: number;
+  /** Number of active durable yield-strategy records */
+  activeStrategies: number;
+  /** Number of distinct recorded proposal approvers */
+  signerCount: number;
+  /** Clarifies that the amounts are raw recorded allocations, not fiat-valued AUM. */
+  valuationScope: "RECORDED_YIELD_ALLOCATIONS_ONLY";
 }

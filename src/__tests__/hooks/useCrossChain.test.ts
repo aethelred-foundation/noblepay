@@ -1,267 +1,157 @@
-import { renderHook, act } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { useCrossChain } from "@/hooks/useCrossChain";
+
+const mockRefetch = jest.fn().mockResolvedValue(undefined);
+const mockApiRequest = jest.fn();
+const mockQueryOptions: Record<string, any> = {};
+const mockQueryStates: Record<string, any> = {};
+
+jest.mock("@tanstack/react-query", () => ({
+  useQuery: (options: any) => {
+    const key = options.queryKey.join(":");
+    mockQueryOptions[key] = options;
+    return {
+      data: mockQueryStates[key]?.data,
+      isLoading: mockQueryStates[key]?.isLoading ?? false,
+      error: mockQueryStates[key]?.error ?? null,
+      refetch: mockRefetch,
+    };
+  },
+}));
+jest.mock("@/lib/api", () => ({
+  ...jest.requireActual("@/lib/api"),
+  apiRequest: (...args: unknown[]) => mockApiRequest(...args),
+}));
 
 describe("useCrossChain", () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    jest.clearAllMocks();
+    Object.keys(mockQueryStates).forEach((key) => delete mockQueryStates[key]);
+    mockQueryStates["crosschain:chains"] = {
+      data: [
+        {
+          id: "aethelred",
+          chainId: 7332,
+          name: "Aethelred Testnet",
+          rpcUrl: "https://rpc.aethelred.example",
+          explorer: "https://explorer.aethelred.example",
+          avgBlockTime: 2,
+          nativeToken: "AETHEL",
+          supportedTokens: ["USDC"],
+          status: "ONLINE",
+          currentGasPrice: null,
+        },
+        {
+          id: "ethereum",
+          chainId: 11155111,
+          name: "Ethereum Sepolia",
+          rpcUrl: "https://rpc.ethereum.example",
+          explorer: "https://explorer.ethereum.example",
+          avgBlockTime: 12,
+          nativeToken: "ETH",
+          supportedTokens: ["USDC"],
+          status: "OFFLINE",
+          currentGasPrice: null,
+        },
+      ],
+    };
+    mockQueryStates["crosschain:transfers"] = {
+      data: [
+        {
+          id: "transfer-1",
+          sourceChain: "aethelred",
+          destinationChain: "ethereum",
+          token: "USDC",
+          amount: "10",
+          sender: "0x1111111111111111111111111111111111111111",
+          recipient: "0x2222222222222222222222222222222222222222",
+          status: "RELAYING",
+          steps: [],
+          bridgeFee: null,
+          estimatedTime: null,
+          createdAt: "2026-07-21T10:00:00.000Z",
+          completedAt: null,
+        },
+      ],
+    };
+    mockQueryStates["crosschain:relays"] = {
+      data: [
+        {
+          id: "relay-1",
+          address: "0x3333333333333333333333333333333333333333",
+          chains: ["aethelred", "ethereum"],
+          stake: "500",
+          uptime: null,
+          successRate: 98.5,
+          relayedCount: 10,
+          avgLatency: 500,
+          status: "ACTIVE",
+        },
+      ],
+    };
   });
 
-  afterEach(() => {
-    jest.useRealTimers();
-  });
-
-  it("returns loading state initially", () => {
+  it("maps verified chain, durable transfer, and relay data without fake values", () => {
     const { result } = renderHook(() => useCrossChain());
 
-    expect(result.current.isLoading).toBe(true);
-    expect(result.current.chains).toEqual([]);
-    expect(result.current.transfers).toEqual([]);
-    expect(result.current.relayNodes).toEqual([]);
+    expect(result.current.chains[0]).toEqual(
+      expect.objectContaining({ status: "Online", gasPrice: null }),
+    );
+    expect(result.current.transfers[0]).toEqual(
+      expect.objectContaining({
+        sourceChainName: "Aethelred Testnet",
+        destChainName: "Ethereum Sepolia",
+        status: "Relaying",
+        bridgeFee: null,
+        estimatedTime: null,
+      }),
+    );
+    expect(result.current.relayNodes[0]).toEqual(
+      expect.objectContaining({
+        successRate: 98.5,
+        uptime: null,
+        lastActiveAt: null,
+      }),
+    );
   });
 
-  it("loads mock data after timeout", () => {
+  it("isolates chain RPC errors from durable history", () => {
+    const chainsError = new Error("chain registry unavailable");
+    mockQueryStates["crosschain:chains"] = { error: chainsError };
     const { result } = renderHook(() => useCrossChain());
 
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.chains.length).toBe(5);
-    expect(result.current.transfers.length).toBe(2);
-    expect(result.current.relayNodes.length).toBe(3);
+    expect(result.current.chainsError).toBe(chainsError);
+    expect(result.current.error).toBeNull();
+    expect(result.current.transfers).toHaveLength(1);
   });
 
-  it("chains have correct structure", () => {
+  it("uses only read endpoints and rejects quote/execution locally", async () => {
     const { result } = renderHook(() => useCrossChain());
+    const signal = new AbortController().signal;
+    await mockQueryOptions["crosschain:chains"].queryFn({ signal });
+    await mockQueryOptions["crosschain:transfers"].queryFn({ signal });
+    await mockQueryOptions["crosschain:relays"].queryFn({ signal });
 
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const chain = result.current.chains[0];
-    expect(chain).toHaveProperty("chainId");
-    expect(chain).toHaveProperty("name");
-    expect(chain).toHaveProperty("symbol");
-    expect(chain).toHaveProperty("rpcUrl");
-    expect(chain).toHaveProperty("explorerUrl");
-    expect(chain).toHaveProperty("status");
-    expect(chain).toHaveProperty("avgBlockTime");
-    expect(chain).toHaveProperty("gasPrice");
-    expect(chain).toHaveProperty("routerAddress");
-    expect(chain).toHaveProperty("supportedTokens");
-    expect(chain).toHaveProperty("logoPath");
-  });
-
-  it("includes Aethelred Mainnet chain", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const aethelred = result.current.chains.find((c) => c.chainId === 7001);
-    expect(aethelred).toBeDefined();
-    expect(aethelred?.name).toBe("Aethelred Mainnet");
-    expect(aethelred?.status).toBe("Online");
-  });
-
-  it("includes a degraded chain (BNB)", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const bnb = result.current.chains.find((c) => c.chainId === 56);
-    expect(bnb).toBeDefined();
-    expect(bnb?.status).toBe("Degraded");
-  });
-
-  it("transfers have correct structure with steps", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const transfer = result.current.transfers[0];
-    expect(transfer).toHaveProperty("id");
-    expect(transfer).toHaveProperty("sourceChainId");
-    expect(transfer).toHaveProperty("destChainId");
-    expect(transfer).toHaveProperty("sender");
-    expect(transfer).toHaveProperty("recipient");
-    expect(transfer).toHaveProperty("status");
-    expect(transfer).toHaveProperty("steps");
-    expect(transfer.steps.length).toBeGreaterThan(0);
-    expect(transfer.steps[0]).toHaveProperty("index");
-    expect(transfer.steps[0]).toHaveProperty("description");
-    expect(transfer.steps[0]).toHaveProperty("status");
-  });
-
-  it("relay nodes have correct structure", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const node = result.current.relayNodes[0];
-    expect(node).toHaveProperty("id");
-    expect(node).toHaveProperty("name");
-    expect(node).toHaveProperty("operator");
-    expect(node).toHaveProperty("supportedChains");
-    expect(node).toHaveProperty("status");
-    expect(node).toHaveProperty("totalRelayed");
-    expect(node).toHaveProperty("successRate");
-    expect(node).toHaveProperty("avgRelayTime");
-    expect(node).toHaveProperty("stakedCollateral");
-    expect(node).toHaveProperty("uptime");
-  });
-
-  it("getRouteOptions returns routes for valid chain pair", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const routes = result.current.getRouteOptions(1, 7001, 100_000);
-    expect(routes.length).toBe(2);
-    expect(routes[0]).toHaveProperty("id");
-    expect(routes[0]).toHaveProperty("name");
-    expect(routes[0]).toHaveProperty("path");
-    expect(routes[0]).toHaveProperty("estimatedTime");
-    expect(routes[0]).toHaveProperty("totalFeeUsd");
-    expect(routes[0]).toHaveProperty("fees");
-    expect(routes[0]).toHaveProperty("slippage");
-    expect(routes[0]).toHaveProperty("recommended");
-  });
-
-  it("getRouteOptions returns direct and multi-hop routes", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const routes = result.current.getRouteOptions(1, 137, 50_000);
-    const direct = routes.find((r) => r.id === "route-direct");
-    const multihop = routes.find((r) => r.id === "route-multihop");
-
-    expect(direct).toBeDefined();
-    expect(direct?.recommended).toBe(true);
-    expect(direct?.path).toEqual([1, 137]);
-
-    expect(multihop).toBeDefined();
-    expect(multihop?.recommended).toBe(false);
-    expect(multihop?.path).toEqual([1, 7001, 137]);
-  });
-
-  it("getRouteOptions returns empty array for invalid chain pair", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const routes = result.current.getRouteOptions(9999, 7001, 100_000);
-    expect(routes).toEqual([]);
-  });
-
-  it("getRouteOptions returns empty array when chains not loaded", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    // Chains not loaded yet
-    const routes = result.current.getRouteOptions(1, 7001, 100_000);
-    expect(routes).toEqual([]);
-  });
-
-  it("initiateTransfer adds a new transfer", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialCount = result.current.transfers.length;
-
-    act(() => {
+    expect(mockApiRequest.mock.calls.map(([path]) => path)).toEqual([
+      "/v1/crosschain/chains",
+      "/v1/crosschain/transfers",
+      "/v1/crosschain/relays",
+    ]);
+    await expect(
+      result.current.getRouteOptions(7332, 11155111, 10, "USDC"),
+    ).rejects.toMatchObject({ status: 503, code: "ROUTE_QUOTE_UNAVAILABLE" });
+    await expect(
       result.current.initiateTransfer({
-        sourceChainId: 1,
-        destChainId: 7001,
-        recipient: "0xrecipient",
+        sourceChainId: 7332,
+        destChainId: 11155111,
+        recipient: "0x2222222222222222222222222222222222222222",
         tokenSymbol: "USDC",
-        amount: 10_000,
-        routeId: "route-direct",
-      });
+        amount: 10,
+        routeId: "disabled",
+      }),
+    ).rejects.toMatchObject({
+      status: 501,
+      code: "BRIDGE_EXECUTION_UNAVAILABLE",
     });
-
-    expect(result.current.transfers.length).toBe(initialCount + 1);
-    const newTransfer = result.current.transfers[0]; // prepended
-    expect(newTransfer.status).toBe("Initiated");
-    expect(newTransfer.sourceChainId).toBe(1);
-    expect(newTransfer.destChainId).toBe(7001);
-    expect(newTransfer.amount).toBe(10_000);
-    expect(newTransfer.tokenSymbol).toBe("USDC");
-    expect(newTransfer.steps.length).toBe(3);
-    expect(newTransfer.sourceChainName).toBe("Ethereum");
-    expect(newTransfer.destChainName).toBe("Aethelred Mainnet");
-  });
-
-  it("initiateTransfer does nothing for invalid source chain", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialCount = result.current.transfers.length;
-
-    act(() => {
-      result.current.initiateTransfer({
-        sourceChainId: 9999,
-        destChainId: 7001,
-        recipient: "0xrecipient",
-        tokenSymbol: "USDC",
-        amount: 10_000,
-        routeId: "route-direct",
-      });
-    });
-
-    expect(result.current.transfers.length).toBe(initialCount);
-  });
-
-  it("initiateTransfer does nothing for invalid dest chain", () => {
-    const { result } = renderHook(() => useCrossChain());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialCount = result.current.transfers.length;
-
-    act(() => {
-      result.current.initiateTransfer({
-        sourceChainId: 1,
-        destChainId: 9999,
-        recipient: "0xrecipient",
-        tokenSymbol: "USDC",
-        amount: 10_000,
-        routeId: "route-direct",
-      });
-    });
-
-    expect(result.current.transfers.length).toBe(initialCount);
-  });
-
-  it("cleans up timer on unmount", () => {
-    const clearTimeoutSpy = jest.spyOn(global, "clearTimeout");
-    const { unmount } = renderHook(() => useCrossChain());
-
-    unmount();
-
-    expect(clearTimeoutSpy).toHaveBeenCalled();
-    clearTimeoutSpy.mockRestore();
   });
 });

@@ -1,9 +1,4 @@
 import {
-  seededRandom,
-  seededRange,
-  seededInt,
-  seededHex,
-  seededAddress,
   formatNumber,
   formatFullNumber,
   truncateAddress,
@@ -11,58 +6,8 @@ import {
   formatCurrency,
   formatDuration,
   getRiskColor,
-  generatePaymentId,
   maskSensitiveData,
 } from "@/lib/utils";
-
-describe("seededRandom", () => {
-  it("returns a number between 0 and 1", () => {
-    const val = seededRandom(42);
-    expect(val).toBeGreaterThanOrEqual(0);
-    expect(val).toBeLessThan(1);
-  });
-
-  it("is deterministic for the same seed", () => {
-    expect(seededRandom(123)).toBe(seededRandom(123));
-  });
-
-  it("produces different values for different seeds", () => {
-    expect(seededRandom(1)).not.toBe(seededRandom(2));
-  });
-});
-
-describe("seededRange", () => {
-  it("returns value within min/max range", () => {
-    const val = seededRange(42, 10, 20);
-    expect(val).toBeGreaterThanOrEqual(10);
-    expect(val).toBeLessThan(20);
-  });
-});
-
-describe("seededInt", () => {
-  it("returns an integer within min/max inclusive range", () => {
-    const val = seededInt(42, 1, 10);
-    expect(Number.isInteger(val)).toBe(true);
-    expect(val).toBeGreaterThanOrEqual(1);
-    expect(val).toBeLessThanOrEqual(10);
-  });
-});
-
-describe("seededHex", () => {
-  it("returns a hex string of specified length", () => {
-    const hex = seededHex(42, 16);
-    expect(hex).toHaveLength(16);
-    expect(/^[0-9a-f]+$/.test(hex)).toBe(true);
-  });
-});
-
-describe("seededAddress", () => {
-  it("returns an address starting with aeth1", () => {
-    const addr = seededAddress(42);
-    expect(addr.startsWith("aeth1")).toBe(true);
-    expect(addr).toHaveLength(43); // 'aeth1' + 38 chars
-  });
-});
 
 describe("formatNumber", () => {
   it("formats billions", () => {
@@ -233,15 +178,6 @@ describe("getRiskColor", () => {
 
   it("returns orange at boundary 75", () => {
     expect(getRiskColor(75)).toBe("#f97316");
-  });
-});
-
-describe("generatePaymentId", () => {
-  it("returns a 0x-prefixed 64-char hex string", () => {
-    const id = generatePaymentId(42);
-    expect(id.startsWith("0x")).toBe(true);
-    expect(id).toHaveLength(66); // 0x + 64
-    expect(/^0x[0-9a-f]{64}$/.test(id)).toBe(true);
   });
 });
 

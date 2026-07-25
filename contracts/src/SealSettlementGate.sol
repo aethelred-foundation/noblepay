@@ -41,16 +41,12 @@ import "./interfaces/ISeal.sol";
 ///         seal. Immutable core + governed parameters; two-step ownership;
 ///         withdrawal-of-trust (revoke) always available. Non-upgradeable.
 ///
-/// @dev    Provenance: this source is a faithful reconstruction whose ABI is
-///         byte-for-byte identical to the reviewed artifact
-///         (scripts/artifacts/SealSettlementGate.{bin,abi}) that the chain repo
-///         runs against the REAL ISeal precompile in
-///         internal/evmhost/noblepay_test.go, and whose behaviour is verified by
-///         test/SealSettlementGate.test.js. Recompiling it yields functionally
-///         equivalent — but not byte-identical — bytecode (different compiler
-///         provenance/metadata), so the vendored `.bin` remains the deploy
-///         artifact of record; edit here and re-vendor if the on-chain bytecode
-///         must change.
+/// @dev    The ABI remains compatible with the historical reviewed artifact,
+///         while this source adds fail-closed emergency-pause settlement
+///         semantics verified by test/SealSettlementGate.test.js. Production
+///         deployment must use the freshly compiled Hardhat artifact from this
+///         source; historical vendored bytecode predating this check is not a
+///         release artifact.
 contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     /// @dev The ISeal precompile (see aethelred repo precompiles/seal).
     ISeal internal constant SEAL = ISeal(0x0000000000000000000000000000000000000900);
@@ -158,8 +154,9 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         return SEAL.verifySeal(c.sealId);
     }
 
-    /// @notice Reverting variant for integrators that want a hard gate.
-    function requireCleared(address payer, address payee) external view {
+    /// @notice Reverting variant for integrators that want a hard gate. An
+    ///         emergency pause halts settlement even for existing clearances.
+    function requireCleared(address payer, address payee) external view whenNotPaused {
         if (!isCleared(payer, payee)) revert NoSuchClearance();
     }
 

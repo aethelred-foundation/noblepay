@@ -175,10 +175,10 @@ describe("WalletButton", () => {
       expect(screen.getByText("0x1234...5678")).toBeInTheDocument();
     });
 
-    it("shows green dot indicator", () => {
+    it("shows an amber indicator until the wallet session is signed", () => {
       const { container } = render(<WalletButton />);
-      const greenDot = container.querySelector(".bg-emerald-400");
-      expect(greenDot).toBeInTheDocument();
+      const pendingSessionDot = container.querySelector(".bg-amber-400");
+      expect(pendingSessionDot).toBeInTheDocument();
     });
 
     it("toggles dropdown on click", () => {

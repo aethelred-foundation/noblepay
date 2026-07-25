@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
 	"time"
 
 	"github.com/aethelred/noblepay-gateway/internal/models"
@@ -13,30 +14,48 @@ import (
 
 // PaymentService handles payment business logic.
 type PaymentService struct {
-	store      store.PaymentStore
-	compliance *ComplianceProxy
-	logger     *zap.Logger
+	store            store.PaymentStore
+	compliance       *ComplianceProxy
+	logger           *zap.Logger
+	mutationsEnabled bool
 }
 
-// NewPaymentService creates a new PaymentService.
+// NewPaymentService creates the isolated legacy mutation service used by unit
+// tests and migration tooling. Production HTTP routing does not construct this
+// variant and never exposes Submit or Cancel.
 func NewPaymentService(s store.PaymentStore, c *ComplianceProxy, logger *zap.Logger) *PaymentService {
 	return &PaymentService{
-		store:      s,
-		compliance: c,
-		logger:     logger,
+		store:            s,
+		compliance:       c,
+		logger:           logger,
+		mutationsEnabled: true,
 	}
+}
+
+// NewPaymentQueryService creates the read-only production service backed by
+// the canonical on-chain projection.
+func NewPaymentQueryService(s store.PaymentStore, logger *zap.Logger) *PaymentService {
+	return &PaymentService{store: s, logger: logger}
 }
 
 // Submit creates a new payment after running compliance checks.
 func (ps *PaymentService) Submit(ctx context.Context, req *models.SubmitPaymentRequest) (*models.Payment, error) {
+	if !ps.mutationsEnabled {
+		return nil, models.ErrOffChainMutationDisabled
+	}
 	if err := req.Validate(); err != nil {
 		return nil, err
 	}
 
 	// Run compliance check via TEE proxy.
-	complianceResult, err := ps.compliance.Check(ctx, req.SenderAddress, req.ReceiverAddress, req.Amount)
+	complianceResult, err := ps.compliance.Check(ctx, req.SenderAddress, req.ReceiverAddress, req.Amount, req.Currency)
 	if err != nil {
-		ps.logger.Warn("compliance check failed, proceeding with flag", zap.Error(err))
+		ps.logger.Warn("compliance check failed; payment rejected", zap.Error(err))
+		return nil, fmt.Errorf("%w: %v", models.ErrComplianceUnavailable, err)
+	}
+	if !complianceResult.Approved {
+		ps.logger.Warn("compliance denied payment", zap.String("reason", complianceResult.Reason))
+		return nil, fmt.Errorf("%w: %s", models.ErrComplianceDenied, complianceResult.Reason)
 	}
 
 	payment := &models.Payment{
@@ -47,7 +66,7 @@ func (ps *PaymentService) Submit(ctx context.Context, req *models.SubmitPaymentR
 		Currency:        req.Currency,
 		Memo:            req.Memo,
 		Status:          models.PaymentStatusPending,
-		ComplianceCheck: complianceResult != nil && complianceResult.Approved,
+		ComplianceCheck: true,
 		CreatedAt:       time.Now().UTC(),
 		UpdatedAt:       time.Now().UTC(),
 	}
@@ -86,6 +105,9 @@ func (ps *PaymentService) List(ctx context.Context, limit, offset int) ([]*model
 
 // Cancel transitions a payment to cancelled if it is still pending.
 func (ps *PaymentService) Cancel(ctx context.Context, id string) (*models.Payment, error) {
+	if !ps.mutationsEnabled {
+		return nil, models.ErrOffChainMutationDisabled
+	}
 	payment, err := ps.store.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
