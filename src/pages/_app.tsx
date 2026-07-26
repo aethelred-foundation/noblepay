@@ -18,6 +18,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ToastContainer, SearchOverlay } from "@/components/SharedComponents";
 import { NetworkAnchorGate } from "@/components/NetworkAnchorGate";
+import { DeploymentConfigurationGate } from "@/components/DeploymentConfigurationGate";
 import "../styles/globals.css";
 
 function AppInner({ Component, pageProps }: AppProps) {
@@ -65,16 +66,18 @@ export default function App(props: AppProps) {
   );
 
   return (
-    <WagmiProvider config={wagmiConfig}>
-      <NetworkAnchorGate>
-        <QueryClientProvider client={queryClient}>
-          <AppProvider>
-            <AuthProvider>
-              <AppInner {...props} />
-            </AuthProvider>
-          </AppProvider>
-        </QueryClientProvider>
-      </NetworkAnchorGate>
-    </WagmiProvider>
+    <DeploymentConfigurationGate>
+      <WagmiProvider config={wagmiConfig}>
+        <NetworkAnchorGate>
+          <QueryClientProvider client={queryClient}>
+            <AppProvider>
+              <AuthProvider>
+                <AppInner {...props} />
+              </AuthProvider>
+            </AppProvider>
+          </QueryClientProvider>
+        </NetworkAnchorGate>
+      </WagmiProvider>
+    </DeploymentConfigurationGate>
   );
 }

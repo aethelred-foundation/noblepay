@@ -6,6 +6,22 @@ const ADDRESS_ENV_VARS = [
   "NEXT_PUBLIC_USDT_TOKEN_ADDRESS",
 ];
 
+const PRODUCTION_PUBLIC_ENV_VARS = [
+  "NEXT_PUBLIC_CHAIN_ENV",
+  "NEXT_PUBLIC_AETHELRED_CHAIN_ID",
+  "NEXT_PUBLIC_AETHELRED_NETWORK_ANCHOR_BLOCK",
+  "NEXT_PUBLIC_AETHELRED_NETWORK_ANCHOR_HASH",
+  "NEXT_PUBLIC_AETHELRED_RPC_URL",
+  "NEXT_PUBLIC_AETHELRED_WS_URL",
+  "NEXT_PUBLIC_AETHELRED_EXPLORER_URL",
+  "NEXT_PUBLIC_API_URL",
+  "NEXT_PUBLIC_WS_URL",
+  "NEXT_PUBLIC_SITE_URL",
+  "NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID",
+  "NEXT_PUBLIC_APP_VERSION",
+  ...ADDRESS_ENV_VARS,
+];
+
 const WALLETCONNECT_CONNECT_ORIGINS = [
   "wss://relay.walletconnect.org",
   "https://relay.walletconnect.org",
@@ -158,8 +174,14 @@ function validateProductionEnvironment() {
   };
 }
 
+const missingProductionPublicEnv = PRODUCTION_PUBLIC_ENV_VARS.filter(
+  (name) => !process.env[name]?.trim(),
+);
+const isUnconfiguredVercelPreview =
+  process.env.VERCEL_ENV === "preview" &&
+  missingProductionPublicEnv.length > 0;
 const productionOrigins =
-  process.env.NODE_ENV === "production"
+  process.env.NODE_ENV === "production" && !isUnconfiguredVercelPreview
     ? validateProductionEnvironment()
     : null;
 
@@ -167,6 +189,11 @@ const productionOrigins =
 const nextConfig = {
   reactStrictMode: true,
   output: "standalone",
+  env: {
+    NEXT_PUBLIC_NOBLEPAY_CONFIGURATION_STATE: isUnconfiguredVercelPreview
+      ? "unconfigured-preview"
+      : "configured",
+  },
 
   images: {
     remotePatterns: [],
@@ -202,7 +229,9 @@ const nextConfig = {
             ? [productionOrigins.sentry.origin]
             : []),
         ]
-      : ["http:", "https:", "ws:", "wss:"];
+      : process.env.NODE_ENV === "production"
+        ? []
+        : ["http:", "https:", "ws:", "wss:"];
     const contentSecurityPolicy = [
       "default-src 'self'",
       "base-uri 'self'",
@@ -213,7 +242,10 @@ const nextConfig = {
       "style-src 'self' 'unsafe-inline'",
       "img-src 'self' data: blob:",
       "font-src 'self' data:",
-      `connect-src 'self' ${[...new Set(productionConnectSources)].join(" ")}`,
+      `connect-src ${[
+        "'self'",
+        ...new Set(productionConnectSources),
+      ].join(" ")}`,
       `frame-src 'self' ${WALLET_FRAME_ORIGINS.join(" ")}`,
       "worker-src 'self' blob:",
       "manifest-src 'self'",

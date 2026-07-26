@@ -37,4 +37,13 @@ export function resolvePublicSiteUrl(
   return parsed.origin;
 }
 
-export const PUBLIC_SITE_URL = resolvePublicSiteUrl();
+const IS_UNCONFIGURED_VERCEL_PREVIEW =
+  process.env.NEXT_PUBLIC_NOBLEPAY_CONFIGURATION_STATE ===
+  "unconfigured-preview";
+
+export const PUBLIC_SITE_URL = resolvePublicSiteUrl(
+  IS_UNCONFIGURED_VERCEL_PREVIEW
+    ? "https://noblepay.vercel.app"
+    : process.env.NEXT_PUBLIC_SITE_URL,
+  IS_UNCONFIGURED_VERCEL_PREVIEW ? "development" : process.env.NODE_ENV,
+);

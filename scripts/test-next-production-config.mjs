@@ -191,4 +191,20 @@ assert.ok(
   ),
 );
 
+const unconfiguredPreview = run(
+  { VERCEL_ENV: "preview" },
+  ["NEXT_PUBLIC_CHAIN_ENV"],
+);
+assert.equal(
+  unconfiguredPreview.status,
+  0,
+  "an unconfigured Vercel preview must build a fail-closed status surface",
+);
+const previewSources = connectSources(unconfiguredPreview.stdout);
+assert.deepEqual(
+  [...previewSources],
+  ["'self'"],
+  "an unconfigured preview must not receive broad network access",
+);
+
 console.log("Next.js production environment and CSP assertions passed");

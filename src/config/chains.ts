@@ -12,6 +12,12 @@ import { resolveNetworkAnchor } from "@/lib/network-anchor";
 export type AethelredChainEnvironment = "mainnet" | "testnet" | "devnet";
 
 const LOCAL_CHAIN_ID = 7332;
+const IS_UNCONFIGURED_VERCEL_PREVIEW =
+  process.env.NEXT_PUBLIC_NOBLEPAY_CONFIGURATION_STATE ===
+  "unconfigured-preview";
+const CONFIGURATION_NODE_ENV = IS_UNCONFIGURED_VERCEL_PREVIEW
+  ? "development"
+  : process.env.NODE_ENV;
 
 const LOCAL_ENDPOINTS = {
   rpc: "http://127.0.0.1:8545",
@@ -100,25 +106,33 @@ export function resolvePublicChainUrl(
 }
 
 const CHAIN_ENV = resolveChainEnvironment();
-const CHAIN_ID = resolveChainId();
-export const activeNetworkAnchor = resolveNetworkAnchor();
+const CHAIN_ID = resolveChainId(
+  process.env.NEXT_PUBLIC_AETHELRED_CHAIN_ID,
+  CONFIGURATION_NODE_ENV,
+);
+export const activeNetworkAnchor = IS_UNCONFIGURED_VERCEL_PREVIEW
+  ? resolveNetworkAnchor("", "", "development")
+  : resolveNetworkAnchor();
 const AETHELRED_RPC_URL = resolvePublicChainUrl(
   "NEXT_PUBLIC_AETHELRED_RPC_URL",
   process.env.NEXT_PUBLIC_AETHELRED_RPC_URL,
   "https:",
   LOCAL_ENDPOINTS.rpc,
+  CONFIGURATION_NODE_ENV,
 );
 const AETHELRED_WS_URL = resolvePublicChainUrl(
   "NEXT_PUBLIC_AETHELRED_WS_URL",
   process.env.NEXT_PUBLIC_AETHELRED_WS_URL,
   "wss:",
   LOCAL_ENDPOINTS.websocket,
+  CONFIGURATION_NODE_ENV,
 );
 const AETHELRED_EXPLORER_URL = resolvePublicChainUrl(
   "NEXT_PUBLIC_AETHELRED_EXPLORER_URL",
   process.env.NEXT_PUBLIC_AETHELRED_EXPLORER_URL,
   "https:",
   LOCAL_ENDPOINTS.explorer,
+  CONFIGURATION_NODE_ENV,
 );
 
 const chainNames = {
