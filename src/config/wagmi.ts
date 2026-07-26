@@ -7,8 +7,10 @@
 
 import { http, createConfig, createStorage } from "wagmi";
 import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
+import type { EIP1193Provider } from "viem";
 import { activeChain } from "./chains";
 import { PUBLIC_SITE_URL } from "./site";
+import { AETHELRED_CONNECTOR_ID } from "./wallet-picker";
 
 // ---------------------------------------------------------------------------
 // WalletConnect Project ID
@@ -22,6 +24,21 @@ const WALLETCONNECT_PROJECT_ID =
 // ---------------------------------------------------------------------------
 
 const connectors = [
+  injected({
+    shimDisconnect: true,
+    target: {
+      id: AETHELRED_CONNECTOR_ID,
+      name: "Aethelred Wallet",
+      provider: () => {
+        if (typeof window === "undefined") return undefined;
+        return (
+          window as Window & {
+            aethelred?: EIP1193Provider;
+          }
+        ).aethelred;
+      },
+    },
+  }),
   injected({
     shimDisconnect: true,
   }),
