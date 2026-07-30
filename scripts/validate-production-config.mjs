@@ -6,6 +6,8 @@ import { isIP } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { FINALIZED_ENVIRONMENT_KEYS } from "./lib/operator-artifacts.mjs";
+
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
 
@@ -25,6 +27,13 @@ const travelRuleAuthorizationMigration = read(
 );
 const deploymentScript = read("scripts/deploy-devnet-core.mjs");
 const deploymentGovernance = read("scripts/lib/deployment-governance.mjs");
+const operatorArtifacts = read("scripts/lib/operator-artifacts.mjs");
+const manifestApplier = read("scripts/apply-finalized-manifest.mjs");
+const governanceAcceptance = read("scripts/prepare-governance-acceptance.mjs");
+const operatorRunbook = read("deploy/PUBLIC_TESTNET_OPERATOR_RUNBOOK.md");
+const deploymentRunbook = read("deploy/README.md");
+const coreDeploymentEnvExample = read("deploy/core-deployment.env.example");
+const productionEnvExample = read("deploy/production.env.example");
 const nodePackages = [
   JSON.parse(read("package.json")),
   JSON.parse(read("backend/package.json")),
@@ -55,6 +64,27 @@ function readEnvFile(path) {
   }
   return values;
 }
+
+const coreDeploymentExampleValues = Object.fromEntries(
+  coreDeploymentEnvExample
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const separator = line.indexOf("=");
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }),
+);
+const productionExampleValues = Object.fromEntries(
+  productionEnvExample
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .map((line) => {
+      const separator = line.indexOf("=");
+      return [line.slice(0, separator), line.slice(separator + 1)];
+    }),
+);
 
 function validateExternalComplianceOrigin(raw) {
   let parsed;
@@ -141,10 +171,41 @@ function validatePublicURL(name, raw, protocol, { originOnly = false } = {}) {
   }
 }
 
+function validatePrivateRPCURL(raw) {
+  assert.ok(raw, "AETHELRED_RPC_URL is required for production validation");
+  let parsed;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new Error("AETHELRED_RPC_URL must be an absolute HTTPS URL");
+  }
+  assert.equal(
+    parsed.protocol,
+    "https:",
+    "AETHELRED_RPC_URL must use HTTPS in release mode; http://54.165.44.130 is explicitly unsupported",
+  );
+  assert.equal(
+    parsed.username,
+    "",
+    "AETHELRED_RPC_URL must not contain embedded credentials",
+  );
+  assert.equal(
+    parsed.password,
+    "",
+    "AETHELRED_RPC_URL must not contain embedded credentials",
+  );
+  assert.equal(
+    parsed.hash,
+    "",
+    "AETHELRED_RPC_URL must not contain a fragment",
+  );
+}
+
 const envFileIndex = process.argv.indexOf("--env-file");
 const deploymentEnv =
   envFileIndex >= 0 ? readEnvFile(process.argv[envFileIndex + 1]) : process.env;
 
+validatePrivateRPCURL(deploymentEnv.AETHELRED_RPC_URL);
 const complianceAPIURL = deploymentEnv.COMPLIANCE_API_URL;
 assert.ok(
   complianceAPIURL,
@@ -290,6 +351,111 @@ validatePublicURL(
 validatePublicURL("PUBLIC_ORIGIN", deploymentEnv.PUBLIC_ORIGIN, "https:", {
   originOnly: true,
 });
+
+for (const requiredCoreInput of [
+  "CHAIN_ENV",
+  "RPC_URL",
+  "AETHELRED_CHAIN_ID",
+  "AETHELRED_NETWORK_ANCHOR_BLOCK",
+  "AETHELRED_NETWORK_ANCHOR_HASH",
+  "DEPLOYER_KEY",
+  "DEPLOYER_ADDRESS",
+  "ADMIN_ADDRESS",
+  "TREASURY_MANAGER_ADDRESS",
+  "BUSINESS_VERIFIER_ADDRESS",
+  "TEE_NODE_ADDRESS",
+  "COMPLIANCE_OFFICER_ADDRESS",
+  "TREASURY_ADDRESS",
+  "SUPPORTED_TOKEN_ADDRESSES",
+  "USDC_TOKEN_ADDRESS",
+  "USDT_TOKEN_ADDRESS",
+  "NOBLEPAY_BASE_FEE",
+  "NOBLEPAY_PERCENTAGE_FEE",
+  "PAYMENT_CHANNEL_FEE_BPS",
+  "CEAP_ALLOWED_BACKENDS",
+  "CEAP_MIN_VERIFICATION",
+  "CEAP_ALLOWED_PLATFORMS",
+  "CEAP_REQUIRE_VENDOR_ROOT",
+  "CEAP_DATA_RESIDENCY",
+  "SEAL_PROBE_ID",
+  "PUBLIC_AETHELRED_RPC_URL",
+  "PUBLIC_AETHELRED_WS_URL",
+  "PUBLIC_AETHELRED_EXPLORER_URL",
+  "FRONTEND_SITE_URL",
+  "FRONTEND_API_URL",
+  "FRONTEND_WS_URL",
+  "WALLETCONNECT_PROJECT_ID",
+  "FRONTEND_APP_VERSION",
+]) {
+  assert.ok(
+    Object.hasOwn(coreDeploymentExampleValues, requiredCoreInput),
+    `core deployment env example must define ${requiredCoreInput}`,
+  );
+}
+assert.ok(
+  !Object.hasOwn(coreDeploymentExampleValues, "BOOTSTRAP_CHECKPOINT_JSON"),
+  "operator checkpoint state must live in the atomic checkpoint file, not the reusable input env",
+);
+for (const finalizedKey of FINALIZED_ENVIRONMENT_KEYS) {
+  assert.ok(
+    Object.hasOwn(productionExampleValues, finalizedKey),
+    `production env example must contain manifest-derived key ${finalizedKey}`,
+  );
+  assert.match(
+    deploymentScript,
+    new RegExp(`${finalizedKey}:`, "u"),
+    `finalized manifest must emit ${finalizedKey}`,
+  );
+}
+for (const secretKey of [
+  "POSTGRES_PASSWORD",
+  "JWT_SECRET",
+  "API_KEY_HASH_SECRET",
+  "COMPLIANCE_API_KEY",
+  "TRAVEL_RULE_ENCRYPTION_KEYS",
+  "GATEWAY_API_KEY",
+  "WEBHOOK_SECRET",
+]) {
+  assert.ok(
+    !FINALIZED_ENVIRONMENT_KEYS.includes(secretKey),
+    `manifest propagation must not overwrite ${secretKey}`,
+  );
+}
+assert.match(operatorArtifacts, /writeSecureJSONFile/u);
+assert.match(operatorArtifacts, /applyFinalizedEnvironmentFile/u);
+assert.match(manifestApplier, /validateFinalizedEnvironment/u);
+assert.match(governanceAcceptance, /acceptOwnership/u);
+for (const requiredRunbookEvidence of [
+  /git checkout --detach/u,
+  /git rev-parse HEAD/u,
+  /node --version/u,
+  /npm --version/u,
+  /npm ci/u,
+  /--bootstrap/u,
+  /--checkpoint-file/u,
+  /--finalize/u,
+  /--manifest-file/u,
+  /apply-finalized-manifest[.]mjs/u,
+  /config --quiet/u,
+  /up -d --wait/u,
+  /127[.]0[.]0[.]1:3008/u,
+  /127[.]0[.]0[.]1:4008\/readyz/u,
+  /127[.]0[.]0[.]1:4018\/readyz/u,
+  /127[.]0[.]0[.]1:8080/u,
+  /54[.]165[.]44[.]130/u,
+  /Never run `docker compose down -v`/u,
+]) {
+  assert.match(
+    operatorRunbook,
+    requiredRunbookEvidence,
+    `operator runbook is missing ${requiredRunbookEvidence}`,
+  );
+}
+assert.match(
+  deploymentRunbook,
+  /PUBLIC_TESTNET_OPERATOR_RUNBOOK[.]md/u,
+  "production deployment guide must route public-testnet operators to the canonical handoff",
+);
 
 assert.match(
   compose,
@@ -642,8 +808,8 @@ assert.match(
 );
 assert.match(
   deploymentScript,
-  /NEXT_PUBLIC_AETHELRED_NETWORK_ANCHOR_HASH=/u,
-  "Finalized frontend environment must include the immutable network anchor",
+  /applicationEnvironment[\s\S]*?AETHELRED_NETWORK_ANCHOR_HASH/u,
+  "Finalized application environment must include the immutable network anchor",
 );
 assert.match(
   deploymentGovernance,
@@ -802,6 +968,7 @@ assert.match(
   "Contract CI must test governance handoff invariants",
 );
 for (const requiredValidatorEnv of [
+  "AETHELRED_RPC_URL",
   "API_KEY_HASH_SECRET",
   "TRAVEL_RULE_THRESHOLD_USD",
   "TRAVEL_RULE_ACTIVE_KEY_ID",
@@ -813,6 +980,11 @@ for (const requiredValidatorEnv of [
     `Production configuration CI must provide ${requiredValidatorEnv}`,
   );
 }
+assert.equal(
+  nodePackages[0].packageManager,
+  "npm@11.16.0",
+  "the repository must pin the npm version bundled with Node 24.18.0",
+);
 assert.match(
   nodePackages[0].scripts?.["validate:contracts"] ?? "",
   /node [.][.]\/scripts\/test-deployment-governance[.]mjs/u,

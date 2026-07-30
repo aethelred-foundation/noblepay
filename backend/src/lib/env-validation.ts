@@ -46,7 +46,10 @@ export function collectProductionEnvErrors(
   if (!env.DATABASE_URL) errors.push("DATABASE_URL is required");
 
   try {
-    loadNoblePayChainConfiguration(env);
+    const chain = loadNoblePayChainConfiguration(env);
+    if (new URL(chain.rpcUrl).protocol !== "https:") {
+      errors.push("AETHELRED_RPC_URL must use HTTPS in production");
+    }
   } catch (error) {
     errors.push((error as Error).message);
   }

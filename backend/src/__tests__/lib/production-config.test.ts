@@ -46,6 +46,20 @@ describe("production configuration", () => {
     expect(collectProductionEnvErrors({ ...VALID_ENV })).toEqual([]);
   });
 
+  it("rejects plaintext release RPC endpoints, including the public testnet host", () => {
+    for (const rpcUrl of [
+      "http://rpc.testnet.aethelred.network",
+      "http://54.165.44.130:8545",
+    ]) {
+      expect(
+        collectProductionEnvErrors({
+          ...VALID_ENV,
+          AETHELRED_RPC_URL: rpcUrl,
+        }).join(" "),
+      ).toMatch(/AETHELRED_RPC_URL must use HTTPS/u);
+    }
+  });
+
   it.each([
     "http://compliance.aethelred.network",
     "https://localhost",

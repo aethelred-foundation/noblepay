@@ -30,6 +30,13 @@ import {
   validateDeploymentCheckpoint,
   validateGovernanceSeparation,
 } from "./lib/deployment-governance.mjs";
+import {
+  assertNewSecureArtifactPath,
+  cliPathOption,
+  loadCheckpointArtifact,
+  validateFinalizedEnvironment,
+  writeSecureJSONFile,
+} from "./lib/operator-artifacts.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CONTRACTS_ROOT = join(here, "..", "contracts");
@@ -91,7 +98,11 @@ function boolEnv(name) {
   return raw === "true";
 }
 
-function publicURL(name, protocol, { originOnly = false } = {}) {
+function publicURL(
+  name,
+  protocol,
+  { allowCredentials = false, originOnly = false } = {},
+) {
   const raw = required(name);
   let parsed;
   try {
@@ -102,7 +113,11 @@ function publicURL(name, protocol, { originOnly = false } = {}) {
   if (parsed.protocol !== protocol) {
     throw new Error(`${name} must use ${protocol.slice(0, -1)}`);
   }
-  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+  if (
+    (!allowCredentials && (parsed.username || parsed.password)) ||
+    parsed.search ||
+    parsed.hash
+  ) {
     throw new Error(
       `${name} must not contain credentials, query parameters, or fragments`,
     );
@@ -223,6 +238,27 @@ const {
 const { privateKeyToAccount } = await import("viem/accounts");
 
 const DEPLOYMENT_MODE = deploymentMode(process.argv);
+const VALIDATE_ONLY = process.argv.includes("--validate-only");
+const CHECKPOINT_FILE = cliPathOption(process.argv, "--checkpoint-file");
+const MANIFEST_FILE = cliPathOption(process.argv, "--manifest-file");
+
+function validateCommandArguments(argv) {
+  const valueOptions = new Set(["--checkpoint-file", "--manifest-file"]);
+  const flagOptions = new Set(["--bootstrap", "--finalize", "--validate-only"]);
+  for (let index = 2; index < argv.length; index += 1) {
+    const argument = argv[index];
+    const optionName = argument.split("=", 1)[0];
+    if (valueOptions.has(optionName)) {
+      if (argument === optionName) index += 1;
+      continue;
+    }
+    if (!flagOptions.has(argument)) {
+      throw new Error(`unsupported deployment argument: ${argument}`);
+    }
+  }
+}
+
+validateCommandArguments(process.argv);
 
 function sameAddress(left, right) {
   return left.toLowerCase() === right.toLowerCase();
@@ -293,6 +329,23 @@ if (!["http:", "https:"].includes(parsedRPCURL.protocol)) {
 if (CHAIN_ENV !== "devnet" && parsedRPCURL.protocol !== "https:") {
   throw new Error("mainnet and testnet deployments require an HTTPS RPC_URL");
 }
+if (CHAIN_ENV !== "devnet" && !CHECKPOINT_FILE) {
+  throw new Error(
+    "testnet and mainnet ceremonies require --checkpoint-file with an absolute path",
+  );
+}
+if (
+  CHAIN_ENV !== "devnet" &&
+  DEPLOYMENT_MODE === "finalize" &&
+  !MANIFEST_FILE
+) {
+  throw new Error(
+    "testnet and mainnet finalization requires --manifest-file with a new absolute archive path",
+  );
+}
+if (DEPLOYMENT_MODE === "bootstrap" && MANIFEST_FILE) {
+  throw new Error("--manifest-file is accepted only with --finalize");
+}
 const FRONTEND_RPC_URL =
   DEPLOYMENT_MODE === "finalize"
     ? publicURL("PUBLIC_AETHELRED_RPC_URL", "https:")
@@ -349,9 +402,26 @@ const FRONTEND_SITE_URL =
     : null;
 const WALLETCONNECT_PROJECT_ID =
   DEPLOYMENT_MODE === "finalize" ? required("WALLETCONNECT_PROJECT_ID") : null;
+if (
+  WALLETCONNECT_PROJECT_ID !== null &&
+  !/^[0-9a-fA-F]{32}$/u.test(WALLETCONNECT_PROJECT_ID)
+) {
+  throw new Error(
+    "WALLETCONNECT_PROJECT_ID must be a 32-character hexadecimal project id",
+  );
+}
 const FRONTEND_APP_VERSION =
   DEPLOYMENT_MODE === "finalize" ? required("FRONTEND_APP_VERSION") : null;
-const FRONTEND_SENTRY_DSN = process.env.FRONTEND_SENTRY_DSN?.trim() ?? "";
+if (
+  FRONTEND_APP_VERSION !== null &&
+  !/^[0-9A-Za-z][0-9A-Za-z._+-]{0,63}$/u.test(FRONTEND_APP_VERSION)
+) {
+  throw new Error("FRONTEND_APP_VERSION has an invalid release identifier");
+}
+const FRONTEND_SENTRY_DSN =
+  DEPLOYMENT_MODE === "finalize" && process.env.FRONTEND_SENTRY_DSN?.trim()
+    ? publicURL("FRONTEND_SENTRY_DSN", "https:", { allowCredentials: true })
+    : "";
 if (
   new Set(TOKENS.map((token) => token.toLowerCase())).size !== TOKENS.length
 ) {
@@ -442,19 +512,17 @@ function emptyDeploymentCheckpoint() {
 }
 
 function deploymentCheckpointEnv() {
-  const raw = process.env.BOOTSTRAP_CHECKPOINT_JSON?.trim() ?? "";
-  if (!raw) {
+  const parsed = loadCheckpointArtifact({
+    checkpointFile: CHECKPOINT_FILE,
+    environmentValue: process.env.BOOTSTRAP_CHECKPOINT_JSON,
+  });
+  if (!parsed) {
     if (DEPLOYMENT_MODE === "finalize") {
-      throw new Error("BOOTSTRAP_CHECKPOINT_JSON is required for --finalize");
+      throw new Error(
+        "a complete checkpoint file or BOOTSTRAP_CHECKPOINT_JSON is required for --finalize",
+      );
     }
     return emptyDeploymentCheckpoint();
-  }
-
-  let parsed;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    throw new Error("BOOTSTRAP_CHECKPOINT_JSON must contain valid JSON");
   }
   return validateDeploymentCheckpoint(parsed, {
     ...CHECKPOINT_METADATA,
@@ -463,6 +531,15 @@ function deploymentCheckpointEnv() {
 }
 
 const DEPLOYMENT_CHECKPOINT = deploymentCheckpointEnv();
+if (MANIFEST_FILE) {
+  assertNewSecureArtifactPath(MANIFEST_FILE, "finalized manifest file");
+}
+if (VALIDATE_ONLY) {
+  console.log(
+    `Validated ${DEPLOYMENT_MODE} inputs without connecting to an RPC or broadcasting a transaction.`,
+  );
+  process.exit(0);
+}
 
 const chain = defineChain({
   id: CHAIN_ID,
@@ -614,8 +691,15 @@ function checkpointContracts(checkpoint) {
 function printDeploymentCheckpoint(checkpoint) {
   console.log(`\nBOOTSTRAP_CHECKPOINT_JSON=${JSON.stringify(checkpoint)}`);
   console.log(
-    "Persist this complete line in the secure deployment environment before continuing.",
+    CHECKPOINT_FILE
+      ? `Checkpoint persisted atomically to ${CHECKPOINT_FILE}.`
+      : "Persist this complete line in the secure deployment environment before continuing.",
   );
+}
+
+function persistDeploymentCheckpoint(checkpoint) {
+  if (!CHECKPOINT_FILE) return;
+  writeSecureJSONFile(CHECKPOINT_FILE, checkpoint, "checkpoint file");
 }
 
 async function verifyCheckpointRecord(
@@ -1642,11 +1726,13 @@ async function bootstrap() {
   const checkpoint = structuredClone(DEPLOYMENT_CHECKPOINT);
   const specs = coreDeploymentSpecs();
   await verifyCheckpointRecords(publicClient, "private RPC", checkpoint);
+  persistDeploymentCheckpoint(checkpoint);
   for (const key of CORE_CONTRACT_KEYS) {
     if (checkpoint.contracts[key]) continue;
     const spec = specs[key];
     checkpoint.contracts[key] = await deploy(spec.name, spec.args);
     validateDeploymentCheckpoint(checkpoint, CHECKPOINT_METADATA);
+    persistDeploymentCheckpoint(checkpoint);
     printDeploymentCheckpoint(checkpoint);
   }
   const contracts = checkpointContracts(checkpoint);
@@ -1829,8 +1915,8 @@ async function bootstrap() {
     contracts,
     bootstrapCheckpoint: checkpoint,
     nextStep: state.gateOwnershipAccepted
-      ? "persist BOOTSTRAP_CHECKPOINT_JSON and run this command again with --finalize"
-      : "ADMIN_ADDRESS must call SealSettlementGate.acceptOwnership, then persist BOOTSTRAP_CHECKPOINT_JSON and run --finalize",
+      ? "run this command again with --finalize and the same checkpoint file"
+      : "ADMIN_ADDRESS must call SealSettlementGate.acceptOwnership, then run --finalize with the same checkpoint file",
   };
   console.log(`\nHANDOFF_PENDING_JSON=${JSON.stringify(handoff)}`);
   console.log(
@@ -1923,6 +2009,40 @@ async function finalize() {
   // as the final asynchronous operation before constructing the manifest.
   await verifyReleasePublicationBoundary(releaseBlock);
 
+  const applicationEnvironment = validateFinalizedEnvironment({
+    PUBLIC_ORIGIN: FRONTEND_SITE_URL,
+    PUBLIC_AETHELRED_RPC_URL: FRONTEND_RPC_URL,
+    PUBLIC_AETHELRED_WS_URL: FRONTEND_CHAIN_WS_URL,
+    PUBLIC_AETHELRED_EXPLORER_URL: FRONTEND_EXPLORER_URL,
+    NOBLEPAY_CHAIN_ID: CHAIN_ID.toString(),
+    AETHELRED_NETWORK_ANCHOR_BLOCK: NETWORK_ANCHOR_BLOCK.toString(),
+    AETHELRED_NETWORK_ANCHOR_HASH: NETWORK_ANCHOR_HASH,
+    NOBLEPAY_CONTRACT_ADDRESS: contracts.noblePay,
+    BUSINESS_REGISTRY_CONTRACT_ADDRESS: contracts.registry,
+    BUSINESS_VERIFIER_ADDRESS: BUSINESS_VERIFIER,
+    PAYMENT_CHANNELS_ADDRESS: contracts.paymentChannels,
+    NOBLEPAY_TOKEN_CONFIG: JSON.stringify({
+      [NAMED_TOKENS.USDC]: {
+        currency: "USDC",
+        currencyCode: "USD",
+        decimals: STABLECOIN_DECIMALS,
+      },
+      [NAMED_TOKENS.USDT]: {
+        currency: "USDT",
+        currencyCode: "USD",
+        decimals: STABLECOIN_DECIMALS,
+      },
+    }),
+    USDC_TOKEN_ADDRESS: NAMED_TOKENS.USDC,
+    USDT_TOKEN_ADDRESS: NAMED_TOKENS.USDT,
+    NEXT_PUBLIC_CHAIN_ENV: CHAIN_ENV,
+    NEXT_PUBLIC_API_URL: FRONTEND_API_URL,
+    NEXT_PUBLIC_WS_URL: FRONTEND_WS_URL,
+    WALLETCONNECT_PROJECT_ID: WALLETCONNECT_PROJECT_ID,
+    NEXT_PUBLIC_SENTRY_DSN: FRONTEND_SENTRY_DSN,
+    NEXT_PUBLIC_APP_VERSION: FRONTEND_APP_VERSION,
+    INDEXER_START_BLOCK: DEPLOYMENT_CHECKPOINT.contracts.noblePay.blockNumber,
+  });
   const manifest = {
     chainId: CHAIN_ID,
     chainEnvironment: CHAIN_ENV,
@@ -1974,45 +2094,23 @@ async function finalize() {
       requireVendorRoot: REQUIRE_VENDOR_ROOT,
       dataResidency: DATA_RESIDENCY,
     },
+    applicationEnvironment,
   };
 
+  if (MANIFEST_FILE) {
+    writeSecureJSONFile(
+      MANIFEST_FILE,
+      manifest,
+      "finalized deployment manifest",
+    );
+  }
   console.log("\nDEPLOYMENT_MANIFEST_JSON=" + JSON.stringify(manifest));
-  console.log("\n# NoblePay finalized production environment");
-  console.log("PORT=3008");
-  console.log(`NEXT_PUBLIC_CHAIN_ENV=${CHAIN_ENV}`);
-  console.log(`NEXT_PUBLIC_AETHELRED_CHAIN_ID=${CHAIN_ID}`);
   console.log(
-    `AETHELRED_NETWORK_ANCHOR_BLOCK=${NETWORK_ANCHOR_BLOCK.toString()}`,
+    "\nFINALIZED_RELEASE_ENV_JSON=" + JSON.stringify(applicationEnvironment),
   );
-  console.log(`AETHELRED_NETWORK_ANCHOR_HASH=${NETWORK_ANCHOR_HASH}`);
-  console.log(
-    `NEXT_PUBLIC_AETHELRED_NETWORK_ANCHOR_BLOCK=${NETWORK_ANCHOR_BLOCK}`,
-  );
-  console.log(
-    `NEXT_PUBLIC_AETHELRED_NETWORK_ANCHOR_HASH=${NETWORK_ANCHOR_HASH}`,
-  );
-  console.log(`NEXT_PUBLIC_AETHELRED_RPC_URL=${FRONTEND_RPC_URL}`);
-  console.log(`NEXT_PUBLIC_AETHELRED_WS_URL=${FRONTEND_CHAIN_WS_URL}`);
-  console.log(`NEXT_PUBLIC_AETHELRED_EXPLORER_URL=${FRONTEND_EXPLORER_URL}`);
-  console.log(
-    `INDEXER_START_BLOCK=${DEPLOYMENT_CHECKPOINT.contracts.noblePay.blockNumber}`,
-  );
-  console.log(`NEXT_PUBLIC_NOBLEPAY_ADDRESS=${contracts.noblePay}`);
-  console.log(`NEXT_PUBLIC_BUSINESS_REGISTRY_ADDRESS=${contracts.registry}`);
-  console.log(
-    `NEXT_PUBLIC_PAYMENT_CHANNELS_ADDRESS=${contracts.paymentChannels}`,
-  );
-  console.log(`NEXT_PUBLIC_SITE_URL=${FRONTEND_SITE_URL}`);
-  console.log(`NEXT_PUBLIC_API_URL=${FRONTEND_API_URL}`);
-  console.log(`NEXT_PUBLIC_WS_URL=${FRONTEND_WS_URL}`);
-  console.log(`NEXT_PUBLIC_USDC_TOKEN_ADDRESS=${NAMED_TOKENS.USDC}`);
-  console.log(`NEXT_PUBLIC_USDT_TOKEN_ADDRESS=${NAMED_TOKENS.USDT}`);
-  console.log(
-    `NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=${WALLETCONNECT_PROJECT_ID}`,
-  );
-  console.log(`NEXT_PUBLIC_APP_VERSION=${FRONTEND_APP_VERSION}`);
-  if (FRONTEND_SENTRY_DSN)
-    console.log(`NEXT_PUBLIC_SENTRY_DSN=${FRONTEND_SENTRY_DSN}`);
+  if (MANIFEST_FILE) {
+    console.log(`Finalized manifest persisted to ${MANIFEST_FILE}.`);
+  }
 }
 
 (DEPLOYMENT_MODE === "bootstrap" ? bootstrap() : finalize()).catch((error) => {

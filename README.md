@@ -100,13 +100,20 @@ NODE_ENV=production PORT=4008 npm run start
 
 The API refuses production startup when required database, chain, contract, compliance, JWT, or CORS configuration is absent or invalid.
 
-For the hardened container topology, secret-file requirements, reverse-proxy routing, sanctions dataset checks, and TEE prerequisite, follow [deploy/README.md](deploy/README.md). Render the Compose configuration before building:
+For the exact US public-testnet checkout, two-phase deployment, resume,
+governance acceptance, manifest propagation, Compose startup, smoke, and
+rollback commands, follow
+[deploy/PUBLIC_TESTNET_OPERATOR_RUNBOOK.md](deploy/PUBLIC_TESTNET_OPERATOR_RUNBOOK.md).
+For the wider container topology, secret-file requirements, reverse-proxy
+routing, sanctions dataset checks, and TEE prerequisite, follow
+[deploy/README.md](deploy/README.md). Render the Compose configuration before
+building:
 
 ```bash
 docker compose \
   --env-file /secure/path/noblepay.env \
   -f compose.production.yml \
-  config
+  config --quiet
 ```
 
 ## Contract deployment

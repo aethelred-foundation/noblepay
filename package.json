@@ -1,6 +1,7 @@
 {
   "name": "@aethelred/noblepay",
   "version": "1.0.0",
+  "packageManager": "npm@11.16.0",
   "description": "NoblePay — Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
   "private": true,
   "scripts": {

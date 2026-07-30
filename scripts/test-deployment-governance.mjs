@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  chmodSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,6 +29,17 @@ import {
   validateDeploymentCheckpoint,
   validateGovernanceSeparation,
 } from "./lib/deployment-governance.mjs";
+import {
+  FINALIZED_ENVIRONMENT_KEYS,
+  applyFinalizedEnvironment,
+  applyFinalizedEnvironmentFile,
+  assertNewSecureArtifactPath,
+  cliPathOption,
+  loadCheckpointArtifact,
+  readSecureJSONFile,
+  validateFinalizedEnvironment,
+  writeSecureJSONFile,
+} from "./lib/operator-artifacts.mjs";
 
 const ANCHOR_HASH = `0x${"ab".repeat(32)}`;
 
@@ -49,6 +69,153 @@ const addresses = {
   teeNode: "0x6666666666666666666666666666666666666666",
   complianceOfficer: "0x7777777777777777777777777777777777777777",
 };
+
+const operatorArtifactDirectory = mkdtempSync(
+  join(tmpdir(), "noblepay-operator-artifacts-"),
+);
+try {
+  const checkpointPath = join(operatorArtifactDirectory, "checkpoint.json");
+  const manifestPath = join(operatorArtifactDirectory, "manifest.json");
+  const environmentPath = join(operatorArtifactDirectory, "production.env");
+  const checkpointFixture = {
+    version: 1,
+    chainId: 7332,
+    contracts: {},
+  };
+
+  assert.equal(
+    cliPathOption(
+      ["node", "script", "--checkpoint-file", checkpointPath],
+      "--checkpoint-file",
+      { required: true },
+    ),
+    checkpointPath,
+  );
+  assert.equal(
+    cliPathOption(
+      ["node", "script", `--manifest-file=${manifestPath}`],
+      "--manifest-file",
+      { required: true },
+    ),
+    manifestPath,
+  );
+  assert.throws(
+    () =>
+      cliPathOption(
+        ["node", "script", "--checkpoint-file", "relative.json"],
+        "--checkpoint-file",
+      ),
+    /absolute path/u,
+  );
+  assert.throws(
+    () =>
+      cliPathOption(
+        [
+          "node",
+          "script",
+          "--checkpoint-file",
+          checkpointPath,
+          `--checkpoint-file=${checkpointPath}`,
+        ],
+        "--checkpoint-file",
+      ),
+    /at most once/u,
+  );
+
+  assertNewSecureArtifactPath(checkpointPath, "checkpoint file");
+  writeSecureJSONFile(checkpointPath, checkpointFixture, "checkpoint file");
+  assert.equal(lstatSync(checkpointPath).mode & 0o077, 0);
+  assert.deepEqual(
+    readSecureJSONFile(checkpointPath, "checkpoint file"),
+    checkpointFixture,
+  );
+  assert.deepEqual(
+    loadCheckpointArtifact({
+      checkpointFile: checkpointPath,
+      environmentValue: JSON.stringify(checkpointFixture),
+    }),
+    checkpointFixture,
+  );
+  assert.throws(
+    () =>
+      loadCheckpointArtifact({
+        checkpointFile: checkpointPath,
+        environmentValue: JSON.stringify({
+          ...checkpointFixture,
+          chainId: 7333,
+        }),
+      }),
+    /different ceremony state/u,
+  );
+  assert.throws(
+    () => assertNewSecureArtifactPath(checkpointPath, "checkpoint file"),
+    /already exists/u,
+  );
+  const insecureDirectory = join(operatorArtifactDirectory, "insecure");
+  mkdirSync(insecureDirectory, { mode: 0o777 });
+  chmodSync(insecureDirectory, 0o777);
+  assert.throws(
+    () =>
+      writeSecureJSONFile(
+        join(insecureDirectory, "checkpoint.json"),
+        checkpointFixture,
+        "checkpoint file",
+      ),
+    /parent must not grant group or other permissions/u,
+  );
+
+  const releaseEnvironment = Object.fromEntries(
+    FINALIZED_ENVIRONMENT_KEYS.map((key) => [key, `value-for-${key}`]),
+  );
+  validateFinalizedEnvironment(releaseEnvironment);
+  assert.throws(
+    () =>
+      validateFinalizedEnvironment({
+        ...releaseEnvironment,
+        UNREVIEWED_VALUE: "true",
+      }),
+    /exact release-derived keys/u,
+  );
+  for (const unsafeValue of [
+    "value\nINJECTED=true",
+    "value # hidden",
+    "${UNREVIEWED_VALUE}",
+    " leading-space",
+    '"quoted-value"',
+  ]) {
+    assert.throws(
+      () =>
+        validateFinalizedEnvironment({
+          ...releaseEnvironment,
+          PUBLIC_ORIGIN: unsafeValue,
+        }),
+      /safe unquoted environment value/u,
+    );
+  }
+  const environmentTemplate = `${FINALIZED_ENVIRONMENT_KEYS.map(
+    (key) => `${key}=replace-me`,
+  ).join("\n")}\nSECRET_VALUE=preserve-me\n`;
+  const applied = applyFinalizedEnvironment(
+    environmentTemplate,
+    releaseEnvironment,
+  );
+  assert.match(applied, /PUBLIC_ORIGIN=value-for-PUBLIC_ORIGIN/u);
+  assert.match(applied, /SECRET_VALUE=preserve-me/u);
+
+  writeFileSync(environmentPath, environmentTemplate, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  chmodSync(environmentPath, 0o600);
+  applyFinalizedEnvironmentFile(environmentPath, releaseEnvironment);
+  assert.equal(lstatSync(environmentPath).mode & 0o077, 0);
+  assert.match(
+    readFileSync(environmentPath, "utf8"),
+    /INDEXER_START_BLOCK=value-for-INDEXER_START_BLOCK/u,
+  );
+} finally {
+  rmSync(operatorArtifactDirectory, { recursive: true, force: true });
+}
 
 assert.equal(deploymentMode(["node", "script", "--bootstrap"]), "bootstrap");
 assert.equal(deploymentMode(["node", "script", "--finalize"]), "finalize");
@@ -399,7 +566,26 @@ assert.match(
   deploymentSource,
   /startBlock: DEPLOYMENT_CHECKPOINT[.]contracts[.]noblePay[.]blockNumber/u,
 );
-assert.match(deploymentSource, /INDEXER_START_BLOCK=/u);
+assert.match(deploymentSource, /INDEXER_START_BLOCK:/u);
+assert.match(deploymentSource, /applicationEnvironment/u);
+assert.match(deploymentSource, /writeSecureJSONFile/u);
+assert.match(deploymentSource, /persistDeploymentCheckpoint/u);
+assert.match(
+  deploymentSource,
+  /testnet and mainnet ceremonies require --checkpoint-file/u,
+);
+assert.match(
+  deploymentSource,
+  /testnet and mainnet finalization requires --manifest-file/u,
+);
+assert.match(
+  deploymentSource,
+  /WALLETCONNECT_PROJECT_ID must be a 32-character hexadecimal project id/u,
+);
+assert.match(
+  deploymentSource,
+  /FRONTEND_APP_VERSION has an invalid release identifier/u,
+);
 assert.match(deploymentSource, /getTransactionReceipt/u);
 assert.match(deploymentSource, /getTransaction/u);
 assert.match(deploymentSource, /encodeDeployData/u);
