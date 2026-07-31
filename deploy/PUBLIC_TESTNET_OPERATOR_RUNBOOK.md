@@ -22,7 +22,9 @@ the approved operator channel and independently checked:
 - a deployed final governance multisig;
 - distinct treasury manager, fee beneficiary, business verifier, compliance
   officer, and dedicated compliance-operator EOA addresses;
-- the real USDC and USDT contracts on that chain, each with six decimals;
+- either chain-operator-confirmed USDC and USDT test contracts or a reviewed
+  manifest from the testnet-only provisioning ceremony below, each with six
+  decimals;
 - approved NoblePay and PaymentChannels fee values and the complete CEAP
   policy;
 - a working ISeal precompile at `0x0000000000000000000000000000000000000900`.
@@ -34,7 +36,9 @@ release endpoint. Both deployment phases and production validation reject
 plaintext testnet RPCs.
 
 The release remains blocked if the TLS endpoints, immutable block anchor,
-governance inputs, or real token contracts are unavailable.
+governance inputs, or independently verified test-token contracts are
+unavailable. Placeholder addresses in an example file are never deployment
+evidence.
 
 ## 2. Immutable checkout and runtime
 
@@ -103,6 +107,86 @@ cd ..
 node scripts/deploy-devnet-core.mjs --verify-artifacts
 ```
 
+## 3a. Resolve or provision USDC and USDT test tokens
+
+Ask the Aethelred network operator for canonical public-testnet USDC and USDT
+addresses first. This repository does not contain canonical addresses:
+`0xaaaa...`, `0x6666...`, and similar values in examples or CI are inert
+placeholders. If the operator supplies canonical contracts, independently
+verify their chain, runtime, `name`, `symbol`, and six-decimal metadata and use
+those addresses. Do not deploy duplicates.
+
+If the activated public testnet has no canonical contracts, use the bounded
+provisioning ceremony. It deploys exactly two instances of the existing
+`contracts/src/MockERC20.sol`: `USDC` and `USDT`, both six decimals and both
+permissionlessly mintable. They are testnet assets with no claim on real USD.
+The command refuses `devnet` and `mainnet`, requires an exact chain ID and
+immutable block anchor, requires HTTPS, verifies a clean reviewed commit and
+fresh Hardhat build information, and never configures NoblePay, mints a
+balance, or grants an allowance.
+
+Prepare the secret-free configuration and a separate restricted signer file:
+
+```bash
+sudo install -m 0600 \
+  deploy/testnet-token-provisioning.env.example \
+  /etc/noblepay/testnet-token-provisioning.env
+sudo chown "$(id -u):$(id -g)" \
+  /etc/noblepay/testnet-token-provisioning.env
+sudo install -m 0400 /secure/operator/token-provisioner.key \
+  /etc/noblepay/token-provisioner.key
+sudo chown "$(id -u):$(id -g)" /etc/noblepay/token-provisioner.key
+```
+
+Populate every placeholder in
+`/etc/noblepay/testnet-token-provisioning.env`, keep the confirmation value
+`false`, and validate without an RPC connection or transaction:
+
+```bash
+export TOKEN_CHECKPOINT=/etc/noblepay/testnet-token-checkpoint.json
+export TOKEN_MANIFEST=/etc/noblepay/testnet-token-manifest."$RELEASE_SHA".json
+
+node --env-file=/etc/noblepay/testnet-token-provisioning.env \
+  scripts/provision-testnet-tokens.mjs \
+  --validate-only \
+  --checkpoint-file "$TOKEN_CHECKPOINT" \
+  --manifest-file "$TOKEN_MANIFEST"
+```
+
+After independent review, change only
+`CONFIRM_TESTNET_TOKEN_PROVISIONING` to the exact value
+`deploy-publicly-mintable-test-tokens` and run:
+
+```bash
+node --env-file=/etc/noblepay/testnet-token-provisioning.env \
+  scripts/provision-testnet-tokens.mjs \
+  --checkpoint-file "$TOKEN_CHECKPOINT" \
+  --manifest-file "$TOKEN_MANIFEST"
+```
+
+Return the confirmation to `false` immediately. The mode-`0600` checkpoint
+records prepared nonces, expected addresses, transaction hashes, canonical
+blocks, and reviewed runtime hashes so an interrupted run can reconcile or
+resume without silently deploying duplicates. The final mode-`0600` manifest
+contains public evidence and exactly these core-ceremony inputs:
+
+```bash
+node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));for(const k of ["SUPPORTED_TOKEN_ADDRESSES","USDC_TOKEN_ADDRESS","USDT_TOKEN_ADDRESS"])console.log(`${k}=${m.coreDeploymentEnvironment[k]}`)' \
+  "$TOKEN_MANIFEST"
+```
+
+Copy those three values exactly into `/etc/noblepay/core.env`. The core
+ceremony, not this provisioning command, enables the tokens in NoblePay and
+PaymentChannels. Test wallets may call each token's permissionless
+`mint(recipient, amountInSmallestUnits)` through an approved wallet or
+explorer; one whole token is `1000000` smallest units. Wallets approve
+NoblePay only when initiating their own ERC-20 payment.
+
+Do not restore or run the removed `scripts/setup-test-token.mjs` helper. It
+combined token deployment, protocol administration, minting, and one wallet's
+unlimited allowance without producing the chain-bound evidence required by
+this handoff.
+
 ## 4. Core ceremony environment
 
 Create host-only files and keep them outside the checkout:
@@ -130,7 +214,7 @@ set is:
 | `BUSINESS_VERIFIER_ADDRESS`           | final BusinessRegistry verifier                                             |
 | `TEE_NODE_ADDRESS`                    | dedicated external compliance-operator EOA with no bytecode                 |
 | `COMPLIANCE_OFFICER_ADDRESS`          | final NoblePay compliance officer                                           |
-| token address variables               | exactly the real six-decimal USDC and USDT contracts                        |
+| token address variables               | exactly the reviewed six-decimal public-testnet USDC and USDT contracts     |
 | NoblePay and channel fee variables    | approved integer fee values                                                 |
 | CEAP variables                        | approved backend, verification, platform, vendor-root, and residency policy |
 | `SEAL_PROBE_ID`                       | operator-confirmed probe identifier for the ISeal read                      |

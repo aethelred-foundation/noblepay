@@ -137,6 +137,13 @@ After `ADMIN_ADDRESS` accepts gate ownership, rerun the command with `--finalize
 
 Start from [deploy/core-deployment.env.example](deploy/core-deployment.env.example) and follow the two-phase ceremony in [deploy/README.md](deploy/README.md). The script intentionally has no defaults for private keys, policy, roles, tokens, or fees. Inject populated values through the operator's secret manager; never commit them. `RPC_URL` must use HTTPS for testnet or mainnet deployment; plaintext HTTP is accepted only for an explicitly selected local `devnet`.
 
+The public-testnet repository contains no canonical USDC or USDT address. Use
+chain-operator-confirmed contracts when they exist; otherwise follow the
+testnet-only, chain-ID-gated provisioning ceremony in
+[deploy/PUBLIC_TESTNET_OPERATOR_RUNBOOK.md](deploy/PUBLIC_TESTNET_OPERATOR_RUNBOOK.md).
+Its manifest supplies the three token variables consumed by the core ceremony
+without containing a key or RPC URL.
+
 ## Validation
 
 Run the complete release gate:
