@@ -773,8 +773,8 @@ assert.match(
 );
 assert.match(
   nodePackages[0].scripts?.["validate:contracts"] ?? "",
-  /npx hardhat clean && npx hardhat compile && node [.][.]\/scripts\/deploy-devnet-core[.]mjs --verify-artifacts && node [.][.]\/scripts\/test-deployment-governance[.]mjs && npx hardhat test/u,
-  "Local contract validation must verify artifacts immediately after a clean compile",
+  /npx hardhat clean && npx hardhat compile && node [.][.]\/scripts\/deploy-devnet-core[.]mjs --verify-artifacts && node [.][.]\/scripts\/test-deployment-governance[.]mjs && node [.][.]\/scripts\/test-testnet-token-provisioning[.]mjs && npx hardhat test/u,
+  "Local contract validation must verify artifacts and the test-token ceremony immediately after a clean compile",
 );
 assert.match(
   deploymentScript,
