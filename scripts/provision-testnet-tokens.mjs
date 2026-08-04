@@ -38,9 +38,10 @@ import {
   buildProvisioningManifest,
   createProvisioningCheckpoint,
   provisioningMetadata,
-  validateProvisioningCheckpoint,
+  restoreProvisioningCheckpoint,
   validateProvisioningEnvironment,
 } from "./lib/testnet-token-provisioning.mjs";
+import { plaintextRpcWarning } from "./lib/rpc-transport-policy.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = realpathSync(join(here, ".."));
@@ -63,7 +64,7 @@ function booleanFlag(argv, name) {
 
 function assertKnownArguments(argv) {
   const valueOptions = new Set(["--checkpoint-file", "--manifest-file"]);
-  const flags = new Set(["--validate-only"]);
+  const flags = new Set(["--validate-only", "--verify-only"]);
   for (let index = 2; index < argv.length; index += 1) {
     const argument = argv[index];
     if (flags.has(argument)) continue;
@@ -100,6 +101,19 @@ function readProvisionerKey(path) {
     );
   }
   return value;
+}
+
+function loadProvisionerAccount(configuration) {
+  const provisionerKey = readProvisionerKey(configuration.keyFile);
+  const account = privateKeyToAccount(provisionerKey);
+  if (
+    !sameAddress(account.address, configuration.publicConfiguration.provisioner)
+  ) {
+    throw new Error(
+      "TOKEN_PROVISIONER_KEY_FILE does not match TOKEN_PROVISIONER_ADDRESS",
+    );
+  }
+  return account;
 }
 
 function assertImmutableSource(expectedCommit) {
@@ -207,6 +221,10 @@ function normalizeHash(value, label) {
 
 assertKnownArguments(process.argv);
 const validateOnly = booleanFlag(process.argv, "--validate-only");
+const verifyOnly = booleanFlag(process.argv, "--verify-only");
+if (validateOnly && verifyOnly) {
+  throw new Error("select at most one of --validate-only and --verify-only");
+}
 const checkpointFile = cliPathOption(process.argv, "--checkpoint-file", {
   required: true,
 });
@@ -217,16 +235,11 @@ if (checkpointFile === manifestFile) {
   throw new Error("--checkpoint-file and --manifest-file must be different");
 }
 const configuration = validateProvisioningEnvironment(process.env, {
-  validateOnly,
+  validateOnly: validateOnly || verifyOnly,
+  requireKeyFile: !verifyOnly,
 });
-const provisionerKey = readProvisionerKey(configuration.keyFile);
-const account = privateKeyToAccount(provisionerKey);
-if (
-  !sameAddress(account.address, configuration.publicConfiguration.provisioner)
-) {
-  throw new Error(
-    "TOKEN_PROVISIONER_KEY_FILE does not match TOKEN_PROVISIONER_ADDRESS",
-  );
+if (configuration.rpcTransportSecurity === "plaintext-evaluation") {
+  console.warn(plaintextRpcWarning());
 }
 assertImmutableSource(configuration.publicConfiguration.sourceCommit);
 if (process.versions.node !== "24.18.0") {
@@ -245,12 +258,15 @@ const restoredCheckpoint = readSecureJSONFile(
   "token provisioning checkpoint",
   { allowMissing: true },
 );
-const checkpoint = restoredCheckpoint
-  ? validateProvisioningCheckpoint(restoredCheckpoint, metadata)
-  : createProvisioningCheckpoint(metadata);
+const restored = restoredCheckpoint
+  ? restoreProvisioningCheckpoint(restoredCheckpoint, metadata)
+  : null;
+const checkpoint =
+  restored?.checkpoint ?? createProvisioningCheckpoint(metadata);
 assertNewSecureArtifactPath(manifestFile, "testnet token manifest");
 
 if (validateOnly) {
+  loadProvisionerAccount(configuration);
   console.log(
     "Token-provisioning validation passed without connecting to RPC.",
   );
@@ -289,7 +305,6 @@ const transport = http(configuration.rpcUrl, {
   timeout: 30_000,
 });
 const publicClient = createPublicClient({ chain, transport });
-const walletClient = createWalletClient({ account, chain, transport });
 
 async function assertNetworkIdentity() {
   const actualChainId = await publicClient.getChainId();
@@ -310,18 +325,82 @@ async function assertNetworkIdentity() {
       "RPC network anchor does not match AETHELRED_NETWORK_ANCHOR_BLOCK/HASH",
     );
   }
-  if ((await publicClient.getBalance({ address: account.address })) === 0n) {
+  if (
+    (await publicClient.getBalance({
+      address: metadata.provisioner,
+    })) === 0n
+  ) {
     throw new Error("TOKEN_PROVISIONER_ADDRESS has no native balance");
   }
 }
 
 async function verifyConfirmedToken(symbol, record) {
   const spec = TESTNET_TOKEN_SPECS[symbol];
+  if (record.origin === "adopted") {
+    const configured = metadata.existingTokens[symbol];
+    if (
+      !configured ||
+      !sameAddress(configured.address, record.address) ||
+      configured.name !== record.name
+    ) {
+      throw new Error(
+        `${symbol} adopted checkpoint does not match the configured existing token`,
+      );
+    }
+    const verificationBlock = await publicClient.getBlock({
+      blockNumber: BigInt(record.blockNumber),
+    });
+    if (
+      !verificationBlock.hash ||
+      normalizeHash(verificationBlock.hash, `${symbol} adoption block hash`) !==
+        record.blockHash
+    ) {
+      throw new Error(`${symbol} adoption block is no longer canonical`);
+    }
+    const runtime = await publicClient.getBytecode({
+      address: getAddress(record.address),
+    });
+    if (
+      !runtime ||
+      runtime.toLowerCase() !== artifact.deployedBytecode.toLowerCase() ||
+      keccak256(runtime).toLowerCase() !== record.runtimeBytecodeHash
+    ) {
+      throw new Error(`${symbol} runtime does not match reviewed MockERC20`);
+    }
+    const [name, tokenSymbol, decimals] = await Promise.all([
+      publicClient.readContract({
+        address: getAddress(record.address),
+        abi: artifact.abi,
+        functionName: "name",
+      }),
+      publicClient.readContract({
+        address: getAddress(record.address),
+        abi: artifact.abi,
+        functionName: "symbol",
+      }),
+      publicClient.readContract({
+        address: getAddress(record.address),
+        abi: artifact.abi,
+        functionName: "decimals",
+      }),
+    ]);
+    if (
+      name !== configured.name ||
+      tokenSymbol !== spec.symbol ||
+      Number(decimals) !== spec.decimals
+    ) {
+      throw new Error(
+        `${symbol} adopted contract metadata does not match the configured name, symbol, and decimals`,
+      );
+    }
+    return record;
+  }
+
   const transaction = await publicClient.getTransaction({
     hash: record.transactionHash,
   });
   if (
-    !sameAddress(transaction.from, account.address) ||
+    !sameAddress(transaction.from, metadata.provisioner) ||
     transaction.to !== null ||
     BigInt(transaction.nonce) !== BigInt(record.nonce)
   ) {
@@ -391,6 +470,114 @@ async function verifyConfirmedToken(symbol, record) {
   return record;
 }
 
+async function inspectExistingToken(symbol, configured) {
+  const spec = TESTNET_TOKEN_SPECS[symbol];
+  const address = getAddress(configured.address);
+  const verificationBlock = await publicClient.getBlock({ blockTag: "latest" });
+  if (
+    verificationBlock.number === null ||
+    verificationBlock.number === undefined ||
+    !verificationBlock.hash
+  ) {
+    throw new Error(
+      `${symbol} existing-token verification block is unavailable`,
+    );
+  }
+  const [runtime, name, tokenSymbol, decimals] = await Promise.all([
+    publicClient.getBytecode({
+      address,
+      blockNumber: verificationBlock.number,
+    }),
+    publicClient.readContract({
+      address,
+      abi: artifact.abi,
+      functionName: "name",
+      blockNumber: verificationBlock.number,
+    }),
+    publicClient.readContract({
+      address,
+      abi: artifact.abi,
+      functionName: "symbol",
+      blockNumber: verificationBlock.number,
+    }),
+    publicClient.readContract({
+      address,
+      abi: artifact.abi,
+      functionName: "decimals",
+      blockNumber: verificationBlock.number,
+    }),
+  ]);
+  if (
+    !runtime ||
+    runtime.toLowerCase() !== artifact.deployedBytecode.toLowerCase()
+  ) {
+    throw new Error(
+      `${symbol} existing contract runtime does not match reviewed MockERC20`,
+    );
+  }
+  if (
+    name !== configured.name ||
+    tokenSymbol !== spec.symbol ||
+    Number(decimals) !== spec.decimals
+  ) {
+    throw new Error(
+      `${symbol} existing contract metadata does not match the configured name, symbol, and decimals`,
+    );
+  }
+  const canonicalBlock = await publicClient.getBlock({
+    blockNumber: verificationBlock.number,
+  });
+  const blockHash = normalizeHash(
+    verificationBlock.hash,
+    `${symbol} verification block hash`,
+  );
+  if (
+    !canonicalBlock.hash ||
+    normalizeHash(canonicalBlock.hash, `${symbol} canonical block hash`) !==
+      blockHash
+  ) {
+    throw new Error(`${symbol} verification block changed during adoption`);
+  }
+  const confirmed = {
+    origin: "adopted",
+    status: "confirmed",
+    address,
+    name: configured.name,
+    blockNumber: verificationBlock.number.toString(),
+    blockHash,
+    runtimeBytecodeHash: keccak256(runtime).toLowerCase(),
+  };
+  return confirmed;
+}
+
+async function adoptExistingToken(symbol, configured) {
+  assertDistinctTokenAddress(symbol, configured.address);
+  const confirmed = await inspectExistingToken(symbol, configured);
+  checkpoint.tokens[symbol] = confirmed;
+  writeSecureJSONFile(
+    checkpointFile,
+    checkpoint,
+    "token provisioning checkpoint",
+  );
+  await verifyConfirmedToken(symbol, confirmed);
+  console.log(
+    `${symbol}: adopted and verified existing contract ${confirmed.address}`,
+  );
+  return confirmed;
+}
+
+function assertDistinctTokenAddress(symbol, candidate) {
+  const otherSymbol = symbol === "USDC" ? "USDT" : "USDC";
+  const otherAddress =
+    checkpoint.tokens[otherSymbol]?.address ??
+    metadata.existingTokens[otherSymbol]?.address;
+  if (otherAddress && sameAddress(candidate, otherAddress)) {
+    throw new Error(
+      `${symbol} candidate address is already assigned to ${otherSymbol}`,
+    );
+  }
+}
+
 async function confirmBroadcast(symbol, record) {
   const receipt = await publicClient.waitForTransactionReceipt({
     hash: record.transactionHash,
@@ -446,6 +633,10 @@ async function provisionToken(symbol) {
   }
 
   if (!record) {
+    const configuredExisting = metadata.existingTokens[symbol];
+    if (configuredExisting) {
+      return adoptExistingToken(symbol, configuredExisting);
+    }
     const pendingNonce = BigInt(
       await publicClient.getTransactionCount({
         address: account.address,
@@ -453,6 +644,7 @@ async function provisionToken(symbol) {
       }),
     );
     record = {
+      origin: "deployed",
       status: "prepared",
       nonce: pendingNonce.toString(),
       expectedAddress: getContractAddress({
@@ -460,6 +652,7 @@ async function provisionToken(symbol) {
         nonce: pendingNonce,
       }),
     };
+    assertDistinctTokenAddress(symbol, record.expectedAddress);
     checkpoint.tokens[symbol] = record;
     writeSecureJSONFile(
       checkpointFile,
@@ -517,6 +710,40 @@ async function provisionToken(symbol) {
 }
 
 const lockFile = `${checkpointFile}.lock`;
+if (verifyOnly) {
+  await assertNetworkIdentity();
+  for (const symbol of Object.keys(TESTNET_TOKEN_SPECS)) {
+    const record = checkpoint.tokens[symbol];
+    const configured = metadata.existingTokens[symbol];
+    if (record?.status === "confirmed") {
+      await verifyConfirmedToken(symbol, record);
+      console.log(
+        `${symbol}: verified checkpointed ${record.origin} contract ${record.address}`,
+      );
+    } else if (record) {
+      console.log(
+        `${symbol}: checkpoint is ${record.status}; transaction-bearing resume is pending`,
+      );
+    } else if (configured) {
+      const verified = await inspectExistingToken(symbol, configured);
+      console.log(
+        `${symbol}: verified existing contract ${verified.address} at block ${verified.blockNumber}`,
+      );
+    } else {
+      console.log(
+        `${symbol}: no existing contract configured; deployment is pending`,
+      );
+    }
+  }
+  console.log(
+    "Existing-token verification passed. No checkpoint or manifest was written and no transaction was broadcast.",
+  );
+  process.exit(0);
+}
+
+const account = loadProvisionerAccount(configuration);
+const walletClient = createWalletClient({ account, chain, transport });
+
 let lockDescriptor;
 try {
   lockDescriptor = openSync(
@@ -535,15 +762,26 @@ try {
 
 try {
   await assertNetworkIdentity();
-  if (!restoredCheckpoint) {
+  if (!restoredCheckpoint || restored?.migrated) {
     writeSecureJSONFile(
       checkpointFile,
       checkpoint,
       "token provisioning checkpoint",
     );
+    if (restored?.migrated) {
+      console.log(
+        "Token checkpoint upgraded from version 1 to version 2 before resume.",
+      );
+    }
   }
   await provisionToken("USDC");
   await provisionToken("USDT");
+
+  if (
+    sameAddress(checkpoint.tokens.USDC.address, checkpoint.tokens.USDT.address)
+  ) {
+    throw new Error("USDC and USDT resolved to the same contract address");
+  }
 
   const manifest = buildProvisioningManifest(metadata, checkpoint);
   assertNewSecureArtifactPath(manifestFile, "testnet token manifest");

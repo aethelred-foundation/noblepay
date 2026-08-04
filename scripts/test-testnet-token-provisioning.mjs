@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { keccak256, stringToHex } from "viem";
+
 import {
   TESTNET_TOKEN_SPECS,
   TOKEN_PROVISIONING_CONFIRMATION,
@@ -13,9 +15,14 @@ import {
   buildProvisioningManifest,
   createProvisioningCheckpoint,
   provisioningMetadata,
+  restoreProvisioningCheckpoint,
   validateProvisioningCheckpoint,
   validateProvisioningEnvironment,
 } from "./lib/testnet-token-provisioning.mjs";
+import {
+  TESTNET_HTTP_RPC_ACKNOWLEDGEMENT,
+  validatePrivateRpcTransport,
+} from "./lib/rpc-transport-policy.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(here, "..");
@@ -28,6 +35,8 @@ const fixtureEnvironment = {
   NOBLEPAY_SOURCE_COMMIT: "cd".repeat(20),
   TOKEN_PROVISIONER_ADDRESS: "0x1111111111111111111111111111111111111111",
   TOKEN_PROVISIONER_KEY_FILE: "/secure/operator/token-provisioner.key",
+  EXISTING_USDC_TOKEN_ADDRESS: "0x2222222222222222222222222222222222222222",
+  EXISTING_USDC_TOKEN_NAME: "USD Coin",
   CONFIRM_TESTNET_TOKEN_PROVISIONING: TOKEN_PROVISIONING_CONFIRMATION,
 };
 
@@ -40,6 +49,20 @@ assert.equal(
   "0x1111111111111111111111111111111111111111",
 );
 assert.equal(validated.keyFile, fixtureEnvironment.TOKEN_PROVISIONER_KEY_FILE);
+assert.deepEqual(validated.publicConfiguration.existingTokens.USDC, {
+  address: "0x2222222222222222222222222222222222222222",
+  name: "USD Coin",
+});
+assert.equal(validated.publicConfiguration.existingTokens.USDT, null);
+
+const verificationEnvironment = { ...fixtureEnvironment };
+delete verificationEnvironment.TOKEN_PROVISIONER_KEY_FILE;
+verificationEnvironment.CONFIRM_TESTNET_TOKEN_PROVISIONING = "false";
+const verificationConfiguration = validateProvisioningEnvironment(
+  verificationEnvironment,
+  { validateOnly: true, requireKeyFile: false },
+);
+assert.equal(verificationConfiguration.keyFile, null);
 
 assert.throws(
   () =>
@@ -53,9 +76,33 @@ assert.throws(
   () =>
     validateProvisioningEnvironment({
       ...fixtureEnvironment,
-      RPC_URL: "http://127.0.0.1:8545",
+      RPC_URL: "http://54.165.44.130:8545",
     }),
-  /requires an HTTPS RPC_URL/u,
+  /plaintext testnet RPC is evaluation-only/u,
+);
+const evaluationRpc = validateProvisioningEnvironment({
+  ...fixtureEnvironment,
+  RPC_URL: "http://54.165.44.130:8545",
+  ALLOW_INSECURE_TESTNET_RPC: TESTNET_HTTP_RPC_ACKNOWLEDGEMENT,
+});
+assert.equal(evaluationRpc.rpcTransportSecurity, "plaintext-evaluation");
+assert.throws(
+  () =>
+    validatePrivateRpcTransport({
+      chainEnvironment: "mainnet",
+      rpcUrl: "http://54.165.44.130:8545",
+      insecureTestnetAcknowledgement: TESTNET_HTTP_RPC_ACKNOWLEDGEMENT,
+    }),
+  /mainnet deployments require an HTTPS RPC_URL/u,
+);
+assert.throws(
+  () =>
+    validatePrivateRpcTransport({
+      chainEnvironment: "testnet",
+      rpcUrl: "http://user:password@54.165.44.130:8545",
+      insecureTestnetAcknowledgement: TESTNET_HTTP_RPC_ACKNOWLEDGEMENT,
+    }),
+  /must not contain credentials/u,
 );
 assert.throws(
   () =>
@@ -80,6 +127,24 @@ assert.throws(
       DEPLOYER_KEY: `0x${"11".repeat(32)}`,
     }),
   /inline private-key variables are prohibited/u,
+);
+assert.throws(
+  () =>
+    validateProvisioningEnvironment({
+      ...fixtureEnvironment,
+      EXISTING_USDC_TOKEN_NAME: "",
+    }),
+  /must be supplied together/u,
+);
+assert.throws(
+  () =>
+    validateProvisioningEnvironment({
+      ...fixtureEnvironment,
+      EXISTING_USDT_TOKEN_ADDRESS:
+        fixtureEnvironment.EXISTING_USDC_TOKEN_ADDRESS,
+      EXISTING_USDT_TOKEN_NAME: "Tether USD",
+    }),
+  /must be different contracts/u,
 );
 assert.doesNotThrow(() =>
   validateProvisioningEnvironment(
@@ -155,33 +220,34 @@ const metadata = provisioningMetadata(validated.publicConfiguration, identity);
 const checkpoint = createProvisioningCheckpoint(metadata);
 validateProvisioningCheckpoint(checkpoint, metadata);
 checkpoint.tokens.USDC = {
-  status: "prepared",
-  nonce: "7",
-  expectedAddress: "0x2222222222222222222222222222222222222222",
-};
-validateProvisioningCheckpoint(checkpoint, metadata);
-checkpoint.tokens.USDC = {
-  ...checkpoint.tokens.USDC,
-  status: "broadcast",
-  transactionHash: `0x${"33".repeat(32)}`,
-};
-validateProvisioningCheckpoint(checkpoint, metadata);
-checkpoint.tokens.USDC = {
-  ...checkpoint.tokens.USDC,
+  origin: "adopted",
   status: "confirmed",
   address: "0x2222222222222222222222222222222222222222",
-  blockNumber: "100",
-  blockHash: `0x${"44".repeat(32)}`,
+  name: "USD Coin",
+  blockNumber: "99",
+  blockHash: `0x${"33".repeat(32)}`,
   runtimeBytecodeHash: identity.runtimeBytecodeHash,
 };
+validateProvisioningCheckpoint(checkpoint, metadata);
 checkpoint.tokens.USDT = {
-  status: "confirmed",
-  nonce: "8",
+  origin: "deployed",
+  status: "prepared",
+  nonce: "7",
   expectedAddress: "0x5555555555555555555555555555555555555555",
-  transactionHash: `0x${"66".repeat(32)}`,
+};
+validateProvisioningCheckpoint(checkpoint, metadata);
+checkpoint.tokens.USDT = {
+  ...checkpoint.tokens.USDT,
+  status: "broadcast",
+  transactionHash: `0x${"44".repeat(32)}`,
+};
+validateProvisioningCheckpoint(checkpoint, metadata);
+checkpoint.tokens.USDT = {
+  ...checkpoint.tokens.USDT,
+  status: "confirmed",
   address: "0x5555555555555555555555555555555555555555",
-  blockNumber: "101",
-  blockHash: `0x${"77".repeat(32)}`,
+  blockNumber: "100",
+  blockHash: `0x${"66".repeat(32)}`,
   runtimeBytecodeHash: identity.runtimeBytecodeHash,
 };
 validateProvisioningCheckpoint(checkpoint, metadata);
@@ -192,6 +258,49 @@ assert.throws(
       chainId: 7333,
     }),
   /does not match the reviewed chain/u,
+);
+
+const noAdoptionEnvironment = validateProvisioningEnvironment({
+  ...fixtureEnvironment,
+  EXISTING_USDC_TOKEN_ADDRESS: "",
+  EXISTING_USDC_TOKEN_NAME: "",
+});
+const versionTwoMetadata = provisioningMetadata(
+  noAdoptionEnvironment.publicConfiguration,
+  identity,
+);
+const versionOneBase = { ...versionTwoMetadata };
+delete versionOneBase.configurationDigest;
+delete versionOneBase.existingTokens;
+versionOneBase.version = 1;
+const versionOneCheckpoint = {
+  ...versionOneBase,
+  configurationDigest: keccak256(stringToHex(JSON.stringify(versionOneBase))),
+  tokens: {
+    USDC: {
+      status: "confirmed",
+      nonce: "7",
+      expectedAddress: "0x8888888888888888888888888888888888888888",
+      transactionHash: `0x${"88".repeat(32)}`,
+      address: "0x8888888888888888888888888888888888888888",
+      blockNumber: "102",
+      blockHash: `0x${"99".repeat(32)}`,
+      runtimeBytecodeHash: identity.runtimeBytecodeHash,
+    },
+    USDT: null,
+  },
+};
+const upgraded = restoreProvisioningCheckpoint(
+  versionOneCheckpoint,
+  versionTwoMetadata,
+);
+assert.equal(upgraded.migrated, true);
+assert.equal(upgraded.checkpoint.version, 2);
+assert.equal(upgraded.checkpoint.tokens.USDC.origin, "deployed");
+assert.equal(upgraded.checkpoint.tokens.USDT, null);
+assert.throws(
+  () => restoreProvisioningCheckpoint(versionOneCheckpoint, metadata),
+  /cannot be combined with existing-token adoption/u,
 );
 
 const manifest = buildProvisioningManifest(metadata, checkpoint);
@@ -208,6 +317,9 @@ assert.equal(
   manifest.tokens.USDT.address,
 );
 assert.equal(manifest.tokens.USDC.mintPolicy, "permissionless-testnet-only");
+assert.equal(manifest.tokens.USDC.name, "USD Coin");
+assert.equal(manifest.tokens.USDC.provenance.type, "adopted-existing-contract");
+assert.equal(manifest.tokens.USDT.provenance.type, "deployed-by-ceremony");
 const serializedManifest = JSON.stringify(manifest);
 assert.doesNotMatch(serializedManifest, /private-rpc/u);
 assert.doesNotMatch(serializedManifest, /token-provisioner\.key/u);
@@ -229,6 +341,29 @@ for (const prohibitedMutation of [
 ]) {
   assert.equal(commandSource.includes(prohibitedMutation), false);
 }
+const tokenProvisioningMutation = commandSource.slice(
+  commandSource.indexOf("async function provisionToken("),
+  commandSource.indexOf("const lockFile ="),
+);
+assert.ok(
+  tokenProvisioningMutation.indexOf("assertDistinctTokenAddress") <
+    tokenProvisioningMutation.indexOf("walletClient.deployContract"),
+  "symbol-address collisions must be rejected before a deployment is broadcast",
+);
+const verifyOnlyPath = commandSource.slice(
+  commandSource.indexOf("if (verifyOnly)"),
+  commandSource.indexOf(
+    "const account = loadProvisionerAccount(configuration)",
+  ),
+);
+assert.doesNotMatch(verifyOnlyPath, /deployContract|writeSecureJSONFile/u);
+assert.doesNotMatch(verifyOnlyPath, /readProvisionerKey|privateKeyToAccount/u);
+const networkIdentityPath = commandSource.slice(
+  commandSource.indexOf("async function assertNetworkIdentity()"),
+  commandSource.indexOf("async function verifyConfirmedToken("),
+);
+assert.match(networkIdentityPath, /address: metadata\.provisioner/u);
+assert.doesNotMatch(networkIdentityPath, /account\.address/u);
 const mockSource = readFileSync(
   join(repositoryRoot, "contracts", "src", "MockERC20.sol"),
   "utf8",
@@ -243,7 +378,7 @@ const runbook = readFileSync(
   "utf8",
 );
 assert.match(runbook, /provision-testnet-tokens\.mjs/u);
-assert.match(runbook, /permissionless.*testnet/iu);
+assert.match(runbook, /permissionless(?:ly)?[\s\S]{0,80}test/iu);
 assert.match(runbook, /SUPPORTED_TOKEN_ADDRESSES/u);
 assert.match(
   runbook,

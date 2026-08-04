@@ -27,6 +27,7 @@ const travelRuleAuthorizationMigration = read(
 );
 const deploymentScript = read("scripts/deploy-devnet-core.mjs");
 const deploymentGovernance = read("scripts/lib/deployment-governance.mjs");
+const rpcTransportPolicy = read("scripts/lib/rpc-transport-policy.mjs");
 const operatorArtifacts = read("scripts/lib/operator-artifacts.mjs");
 const manifestApplier = read("scripts/apply-finalized-manifest.mjs");
 const governanceAcceptance = read("scripts/prepare-governance-acceptance.mjs");
@@ -355,6 +356,7 @@ validatePublicURL("PUBLIC_ORIGIN", deploymentEnv.PUBLIC_ORIGIN, "https:", {
 for (const requiredCoreInput of [
   "CHAIN_ENV",
   "RPC_URL",
+  "ALLOW_INSECURE_TESTNET_RPC",
   "AETHELRED_CHAIN_ID",
   "AETHELRED_NETWORK_ANCHOR_BLOCK",
   "AETHELRED_NETWORK_ANCHOR_HASH",
@@ -787,9 +789,14 @@ assert.match(
   "Deployment must compare on-chain runtime code with the reviewed artifact",
 );
 assert.match(
-  deploymentScript,
-  /mainnet and testnet deployments require an HTTPS RPC_URL/u,
-  "Remote network deployments must require an authenticated HTTPS transport",
+  rpcTransportPolicy,
+  /mainnet deployments require an HTTPS RPC_URL/u,
+  "Mainnet deployment must always require an authenticated HTTPS transport",
+);
+assert.match(
+  rpcTransportPolicy,
+  /acknowledge-evaluation-only-plaintext-rpc/u,
+  "Plaintext testnet RPC must require the explicit evaluation acknowledgement",
 );
 assert.match(
   deploymentScript,

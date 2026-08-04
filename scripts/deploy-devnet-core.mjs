@@ -37,6 +37,10 @@ import {
   validateFinalizedEnvironment,
   writeSecureJSONFile,
 } from "./lib/operator-artifacts.mjs";
+import {
+  plaintextRpcWarning,
+  validatePrivateRpcTransport,
+} from "./lib/rpc-transport-policy.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CONTRACTS_ROOT = join(here, "..", "contracts");
@@ -126,6 +130,25 @@ function publicURL(
     throw new Error(`${name} must be an origin without a path`);
   }
   return parsed.toString().replace(/\/$/, "");
+}
+
+function publicRpcURL(name, chainEnvironment) {
+  const policy = validatePrivateRpcTransport({
+    chainEnvironment,
+    rpcUrl: required(name),
+    insecureTestnetAcknowledgement:
+      process.env.ALLOW_INSECURE_TESTNET_RPC ?? "",
+  });
+  const parsed = new URL(policy.rpcUrl);
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error(
+      `${name} must not contain credentials, query parameters, or fragments`,
+    );
+  }
+  return {
+    ...policy,
+    rpcUrl: parsed.toString().replace(/\/$/, ""),
+  };
 }
 
 function artifact(name, subdir = `${name}.sol`) {
@@ -316,19 +339,12 @@ const CHAIN_ENV = required("CHAIN_ENV");
 if (!["mainnet", "testnet", "devnet"].includes(CHAIN_ENV)) {
   throw new Error("CHAIN_ENV must be mainnet, testnet, or devnet");
 }
-const RPC_URL = required("RPC_URL");
-let parsedRPCURL;
-try {
-  parsedRPCURL = new URL(RPC_URL);
-} catch {
-  throw new Error("RPC_URL must be an absolute HTTP(S) URL");
-}
-if (!["http:", "https:"].includes(parsedRPCURL.protocol)) {
-  throw new Error("RPC_URL must use http or https");
-}
-if (CHAIN_ENV !== "devnet" && parsedRPCURL.protocol !== "https:") {
-  throw new Error("mainnet and testnet deployments require an HTTPS RPC_URL");
-}
+const rpcPolicy = validatePrivateRpcTransport({
+  chainEnvironment: CHAIN_ENV,
+  rpcUrl: required("RPC_URL"),
+  insecureTestnetAcknowledgement: process.env.ALLOW_INSECURE_TESTNET_RPC ?? "",
+});
+const RPC_URL = rpcPolicy.rpcUrl;
 if (CHAIN_ENV !== "devnet" && !CHECKPOINT_FILE) {
   throw new Error(
     "testnet and mainnet ceremonies require --checkpoint-file with an absolute path",
@@ -346,10 +362,17 @@ if (
 if (DEPLOYMENT_MODE === "bootstrap" && MANIFEST_FILE) {
   throw new Error("--manifest-file is accepted only with --finalize");
 }
-const FRONTEND_RPC_URL =
+const frontendRpcPolicy =
   DEPLOYMENT_MODE === "finalize"
-    ? publicURL("PUBLIC_AETHELRED_RPC_URL", "https:")
+    ? publicRpcURL("PUBLIC_AETHELRED_RPC_URL", CHAIN_ENV)
     : null;
+const FRONTEND_RPC_URL = frontendRpcPolicy?.rpcUrl ?? null;
+if (
+  rpcPolicy.transportSecurity === "plaintext-evaluation" ||
+  frontendRpcPolicy?.transportSecurity === "plaintext-evaluation"
+) {
+  console.warn(plaintextRpcWarning());
+}
 const FRONTEND_CHAIN_WS_URL =
   DEPLOYMENT_MODE === "finalize"
     ? publicURL("PUBLIC_AETHELRED_WS_URL", "wss:")

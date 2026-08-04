@@ -2,9 +2,11 @@ import { isDeepStrictEqual } from "node:util";
 
 import { getAddress, isAddress, keccak256, stringToHex } from "viem";
 
+import { validatePrivateRpcTransport } from "./rpc-transport-policy.mjs";
+
 export const TOKEN_PROVISIONING_KIND =
   "noblepay-public-testnet-token-provisioning";
-export const TOKEN_PROVISIONING_VERSION = 1;
+export const TOKEN_PROVISIONING_VERSION = 2;
 export const TOKEN_PROVISIONING_CONFIRMATION =
   "deploy-publicly-mintable-test-tokens";
 
@@ -72,9 +74,31 @@ function normalizedAddress(value, label) {
   return getAddress(value);
 }
 
+function optionalExistingToken(environment, symbol) {
+  const addressName = `EXISTING_${symbol}_TOKEN_ADDRESS`;
+  const tokenNameName = `EXISTING_${symbol}_TOKEN_NAME`;
+  const address = environment[addressName]?.trim() ?? "";
+  const name = environment[tokenNameName]?.trim() ?? "";
+  if (!address && !name) return null;
+  if (!address || !name) {
+    throw new Error(
+      `${addressName} and ${tokenNameName} must be supplied together`,
+    );
+  }
+  if (name.length > 128 || /[\u0000-\u001f\u007f]/u.test(name)) {
+    throw new Error(
+      `${tokenNameName} must be a printable 1-128 character name`,
+    );
+  }
+  return {
+    address: normalizedAddress(address, addressName),
+    name,
+  };
+}
+
 export function validateProvisioningEnvironment(
   environment,
-  { validateOnly = false } = {},
+  { validateOnly = false, requireKeyFile = true } = {},
 ) {
   if (required(environment, "CHAIN_ENV") !== "testnet") {
     throw new Error(
@@ -82,18 +106,12 @@ export function validateProvisioningEnvironment(
     );
   }
 
-  const rpcUrl = required(environment, "RPC_URL");
-  let parsedRpcUrl;
-  try {
-    parsedRpcUrl = new URL(rpcUrl);
-  } catch {
-    throw new Error("RPC_URL must be an absolute HTTPS URL");
-  }
-  if (parsedRpcUrl.protocol !== "https:") {
-    throw new Error(
-      "public-testnet token provisioning requires an HTTPS RPC_URL",
-    );
-  }
+  const rpcPolicy = validatePrivateRpcTransport({
+    chainEnvironment: "testnet",
+    rpcUrl: required(environment, "RPC_URL"),
+    insecureTestnetAcknowledgement:
+      environment.ALLOW_INSECURE_TESTNET_RPC ?? "",
+  });
 
   const chainId = positiveSafeInteger(
     required(environment, "AETHELRED_CHAIN_ID"),
@@ -121,13 +139,31 @@ export function validateProvisioningEnvironment(
     required(environment, "TOKEN_PROVISIONER_ADDRESS"),
     "TOKEN_PROVISIONER_ADDRESS",
   );
-  const keyFile = required(environment, "TOKEN_PROVISIONER_KEY_FILE");
-  if (!keyFile.startsWith("/")) {
+  const configuredKeyFile =
+    environment.TOKEN_PROVISIONER_KEY_FILE?.trim() ?? "";
+  const keyFile = requireKeyFile
+    ? required(environment, "TOKEN_PROVISIONER_KEY_FILE")
+    : configuredKeyFile || null;
+  if (keyFile && !keyFile.startsWith("/")) {
     throw new Error("TOKEN_PROVISIONER_KEY_FILE must be an absolute path");
   }
   if (environment.DEPLOYER_KEY?.trim() || environment.PRIVATE_KEY?.trim()) {
     throw new Error(
       "inline private-key variables are prohibited; use TOKEN_PROVISIONER_KEY_FILE",
+    );
+  }
+  const existingTokens = {
+    USDC: optionalExistingToken(environment, "USDC"),
+    USDT: optionalExistingToken(environment, "USDT"),
+  };
+  if (
+    existingTokens.USDC &&
+    existingTokens.USDT &&
+    existingTokens.USDC.address.toLowerCase() ===
+      existingTokens.USDT.address.toLowerCase()
+  ) {
+    throw new Error(
+      "EXISTING_USDC_TOKEN_ADDRESS and EXISTING_USDT_TOKEN_ADDRESS must be different contracts",
     );
   }
 
@@ -146,7 +182,9 @@ export function validateProvisioningEnvironment(
   }
 
   return {
-    rpcUrl,
+    rpcUrl: rpcPolicy.rpcUrl,
+    rpcTransportSecurity: rpcPolicy.transportSecurity,
+    evaluationOnlyRpc: rpcPolicy.evaluationOnly,
     keyFile,
     publicConfiguration: {
       chainEnvironment: "testnet",
@@ -157,6 +195,7 @@ export function validateProvisioningEnvironment(
       },
       sourceCommit,
       provisioner,
+      existingTokens,
     },
   };
 }
@@ -226,9 +265,51 @@ export function createProvisioningCheckpoint(metadata) {
   };
 }
 
-function validatePreparedRecord(record, symbol) {
+function validateTokenRecord(record, symbol) {
   if (!record || typeof record !== "object" || Array.isArray(record)) {
     throw new Error(`${symbol} checkpoint record must be an object`);
+  }
+
+  if (record.origin === "adopted") {
+    if (record.status !== "confirmed") {
+      throw new Error(`${symbol} adopted checkpoint must be confirmed`);
+    }
+    normalizedAddress(record.address, `${symbol} address`);
+    if (
+      typeof record.name !== "string" ||
+      !record.name ||
+      record.name.length > 128 ||
+      /[\u0000-\u001f\u007f]/u.test(record.name)
+    ) {
+      throw new Error(`${symbol} adopted checkpoint name is invalid`);
+    }
+    if (!/^(?:0|[1-9][0-9]*)$/u.test(record.blockNumber ?? "")) {
+      throw new Error(`${symbol} checkpoint block number is invalid`);
+    }
+    normalizedBlockHash(record.blockHash, `${symbol} checkpoint block hash`);
+    normalizedBlockHash(
+      record.runtimeBytecodeHash,
+      `${symbol} runtime bytecode hash`,
+    );
+    const keys = Object.keys(record).sort();
+    if (
+      !isDeepStrictEqual(keys, [
+        "address",
+        "blockHash",
+        "blockNumber",
+        "name",
+        "origin",
+        "runtimeBytecodeHash",
+        "status",
+      ])
+    ) {
+      throw new Error(`${symbol} adopted checkpoint has unexpected fields`);
+    }
+    return record;
+  }
+
+  if (record.origin !== "deployed") {
+    throw new Error(`${symbol} checkpoint origin is invalid`);
   }
   if (!["prepared", "broadcast", "confirmed"].includes(record.status)) {
     throw new Error(`${symbol} checkpoint record has an invalid status`);
@@ -239,7 +320,9 @@ function validatePreparedRecord(record, symbol) {
   normalizedAddress(record.expectedAddress, `${symbol} expectedAddress`);
   if (record.status === "prepared") {
     const keys = Object.keys(record).sort();
-    if (!isDeepStrictEqual(keys, ["expectedAddress", "nonce", "status"])) {
+    if (
+      !isDeepStrictEqual(keys, ["expectedAddress", "nonce", "origin", "status"])
+    ) {
       throw new Error(`${symbol} prepared checkpoint has unexpected fields`);
     }
     return record;
@@ -253,6 +336,7 @@ function validatePreparedRecord(record, symbol) {
       !isDeepStrictEqual(keys, [
         "expectedAddress",
         "nonce",
+        "origin",
         "status",
         "transactionHash",
       ])
@@ -282,6 +366,7 @@ function validatePreparedRecord(record, symbol) {
       "blockNumber",
       "expectedAddress",
       "nonce",
+      "origin",
       "runtimeBytecodeHash",
       "status",
       "transactionHash",
@@ -290,6 +375,119 @@ function validatePreparedRecord(record, symbol) {
     throw new Error(`${symbol} confirmed checkpoint has unexpected fields`);
   }
   return record;
+}
+
+function validateVersionOneTokenRecord(record, symbol) {
+  if (!record || typeof record !== "object" || Array.isArray(record)) {
+    throw new Error(`${symbol} version-1 checkpoint record must be an object`);
+  }
+  if (!["prepared", "broadcast", "confirmed"].includes(record.status)) {
+    throw new Error(`${symbol} version-1 checkpoint status is invalid`);
+  }
+  if (!/^(?:0|[1-9][0-9]*)$/u.test(record.nonce ?? "")) {
+    throw new Error(`${symbol} version-1 checkpoint nonce is invalid`);
+  }
+  normalizedAddress(record.expectedAddress, `${symbol} expectedAddress`);
+  const expectedKeys =
+    record.status === "prepared"
+      ? ["expectedAddress", "nonce", "status"]
+      : record.status === "broadcast"
+        ? ["expectedAddress", "nonce", "status", "transactionHash"]
+        : [
+            "address",
+            "blockHash",
+            "blockNumber",
+            "expectedAddress",
+            "nonce",
+            "runtimeBytecodeHash",
+            "status",
+            "transactionHash",
+          ];
+  if (!isDeepStrictEqual(Object.keys(record).sort(), expectedKeys)) {
+    throw new Error(`${symbol} version-1 checkpoint has unexpected fields`);
+  }
+  if (record.status !== "prepared") {
+    if (!TRANSACTION_HASH_PATTERN.test(record.transactionHash ?? "")) {
+      throw new Error(
+        `${symbol} version-1 checkpoint transaction hash is invalid`,
+      );
+    }
+  }
+  if (record.status === "confirmed") {
+    normalizedAddress(record.address, `${symbol} address`);
+    if (record.address.toLowerCase() !== record.expectedAddress.toLowerCase()) {
+      throw new Error(
+        `${symbol} version-1 confirmed address differs from expectedAddress`,
+      );
+    }
+    if (!/^(?:0|[1-9][0-9]*)$/u.test(record.blockNumber ?? "")) {
+      throw new Error(`${symbol} version-1 checkpoint block number is invalid`);
+    }
+    normalizedBlockHash(record.blockHash, `${symbol} checkpoint block hash`);
+    normalizedBlockHash(
+      record.runtimeBytecodeHash,
+      `${symbol} runtime bytecode hash`,
+    );
+  }
+  return record;
+}
+
+function versionOneMetadata(metadata) {
+  const legacy = { ...metadata };
+  delete legacy.configurationDigest;
+  delete legacy.existingTokens;
+  legacy.version = 1;
+  return {
+    ...legacy,
+    configurationDigest: keccak256(stringToHex(JSON.stringify(legacy))),
+  };
+}
+
+export function restoreProvisioningCheckpoint(checkpoint, metadata) {
+  if (checkpoint?.version !== 1) {
+    return {
+      checkpoint: validateProvisioningCheckpoint(checkpoint, metadata),
+      migrated: false,
+    };
+  }
+  if (Object.values(metadata.existingTokens).some(Boolean)) {
+    throw new Error(
+      "a version-1 token checkpoint cannot be combined with existing-token adoption; resume it without EXISTING_* inputs or reconcile it manually",
+    );
+  }
+  const { tokens, ...actualMetadata } = checkpoint;
+  if (!isDeepStrictEqual(actualMetadata, versionOneMetadata(metadata))) {
+    throw new Error(
+      "version-1 token checkpoint does not match the reviewed chain, source, provisioner, or artifact",
+    );
+  }
+  if (
+    !tokens ||
+    typeof tokens !== "object" ||
+    Array.isArray(tokens) ||
+    !isDeepStrictEqual(Object.keys(tokens).sort(), ["USDC", "USDT"])
+  ) {
+    throw new Error(
+      "version-1 token checkpoint must contain exactly USDC and USDT records",
+    );
+  }
+  const migratedTokens = {};
+  for (const symbol of Object.keys(TESTNET_TOKEN_SPECS)) {
+    const record = tokens[symbol];
+    migratedTokens[symbol] =
+      record === null
+        ? null
+        : {
+            ...validateVersionOneTokenRecord(record, symbol),
+            origin: "deployed",
+          };
+  }
+  const migratedCheckpoint = {
+    ...metadata,
+    tokens: migratedTokens,
+  };
+  validateProvisioningCheckpoint(migratedCheckpoint, metadata);
+  return { checkpoint: migratedCheckpoint, migrated: true };
 }
 
 export function validateProvisioningCheckpoint(checkpoint, metadata) {
@@ -317,23 +515,59 @@ export function validateProvisioningCheckpoint(checkpoint, metadata) {
     );
   }
   for (const symbol of Object.keys(TESTNET_TOKEN_SPECS)) {
-    if (tokens[symbol] !== null) validatePreparedRecord(tokens[symbol], symbol);
+    if (tokens[symbol] === null) continue;
+    const record = validateTokenRecord(tokens[symbol], symbol);
+    const configuredExisting = metadata.existingTokens[symbol];
+    if (record.origin === "adopted") {
+      if (
+        !configuredExisting ||
+        record.address.toLowerCase() !==
+          configuredExisting.address.toLowerCase() ||
+        record.name !== configuredExisting.name
+      ) {
+        throw new Error(
+          `${symbol} adopted checkpoint does not match the configured existing token`,
+        );
+      }
+    } else if (configuredExisting) {
+      throw new Error(
+        `${symbol} checkpoint deploys a replacement even though an existing token was configured`,
+      );
+    }
   }
   return checkpoint;
 }
 
 function confirmedTokenRecord(record, symbol) {
-  validatePreparedRecord(record, symbol);
+  validateTokenRecord(record, symbol);
   if (record.status !== "confirmed") {
     throw new Error(`${symbol} has not reached confirmed provisioning state`);
   }
-  return {
+  const common = {
     address: getAddress(record.address),
-    name: TESTNET_TOKEN_SPECS[symbol].name,
+    name:
+      record.origin === "adopted"
+        ? record.name
+        : TESTNET_TOKEN_SPECS[symbol].name,
     symbol,
     decimals: TESTNET_TOKEN_SPECS[symbol].decimals,
     mintPolicy: "permissionless-testnet-only",
-    deployment: {
+  };
+  if (record.origin === "adopted") {
+    return {
+      ...common,
+      provenance: {
+        type: "adopted-existing-contract",
+        verificationBlockNumber: record.blockNumber,
+        verificationBlockHash: record.blockHash.toLowerCase(),
+        runtimeBytecodeHash: record.runtimeBytecodeHash.toLowerCase(),
+      },
+    };
+  }
+  return {
+    ...common,
+    provenance: {
+      type: "deployed-by-ceremony",
       transactionHash: record.transactionHash.toLowerCase(),
       blockNumber: record.blockNumber,
       blockHash: record.blockHash.toLowerCase(),
@@ -370,6 +604,9 @@ export function buildProvisioningManifest(metadata, checkpoint) {
   validateProvisioningCheckpoint(checkpoint, metadata);
   const usdc = confirmedTokenRecord(checkpoint.tokens.USDC, "USDC");
   const usdt = confirmedTokenRecord(checkpoint.tokens.USDT, "USDT");
+  if (usdc.address.toLowerCase() === usdt.address.toLowerCase()) {
+    throw new Error("USDC and USDT must resolve to different contracts");
+  }
   const manifest = {
     ...metadata,
     tokens: {

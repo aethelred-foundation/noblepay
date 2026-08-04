@@ -15,8 +15,10 @@ the approved operator channel and independently checked:
 - an activated Aethelred EVM chain ID;
 - one immutable block number and 32-byte block hash retained by every private,
   public, and wallet RPC;
-- a private HTTPS EVM JSON-RPC endpoint;
-- a credential-free public HTTPS EVM JSON-RPC endpoint;
+- a private HTTPS EVM JSON-RPC endpoint, or the explicitly acknowledged
+  evaluation-only HTTP endpoint described below;
+- a credential-free public HTTPS EVM JSON-RPC endpoint, or the same bounded
+  evaluation-only HTTP exception;
 - a credential-free public WSS endpoint and HTTPS explorer;
 - a funded temporary deployer EOA and matching private key;
 - a deployed final governance multisig;
@@ -29,11 +31,18 @@ the approved operator channel and independently checked:
   policy;
 - a working ISeal precompile at `0x0000000000000000000000000000000000000900`.
 
-`http://54.165.44.130:8545` and every other plaintext HTTP RPC are prohibited
-for public-testnet release mode. The validator/RPC host at `54.165.44.130` may
-be useful for internal chain diagnostics, but it is not a supported NoblePay
-release endpoint. Both deployment phases and production validation reject
-plaintext testnet RPCs.
+HTTPS remains the default. While this public testnet is an evaluation network
+without a TLS RPC, the private ceremony endpoint may be
+`http://54.165.44.130:8545` only when the operator sets the exact acknowledgement
+`ALLOW_INSECURE_TESTNET_RPC=acknowledge-evaluation-only-plaintext-rpc`. The
+command still verifies the decimal chain ID and immutable block anchor before
+every mutation. Mainnet always rejects HTTP. The same acknowledgement permits
+the credential-free public evaluation RPC during finalization because that
+client independently verifies the chain ID, anchor, checkpoint evidence, and
+release block. Production runtime validation still rejects plaintext RPC.
+WebSocket, explorer, site, API, and application WebSocket endpoints remain
+HTTPS/WSS-only; the exception does not make the current plaintext application
+release publication-ready.
 
 The release remains blocked if the TLS endpoints, immutable block anchor,
 governance inputs, or independently verified test-token contracts are
@@ -117,13 +126,15 @@ verify their chain, runtime, `name`, `symbol`, and six-decimal metadata and use
 those addresses. Do not deploy duplicates.
 
 If the activated public testnet has no canonical contracts, use the bounded
-provisioning ceremony. It deploys exactly two instances of the existing
-`contracts/src/MockERC20.sol`: `USDC` and `USDT`, both six decimals and both
-permissionlessly mintable. They are testnet assets with no claim on real USD.
-The command refuses `devnet` and `mainnet`, requires an exact chain ID and
-immutable block anchor, requires HTTPS, verifies a clean reviewed commit and
-fresh Hardhat build information, and never configures NoblePay, mints a
-balance, or grants an allowance.
+provisioning ceremony. It can verify and adopt either existing reviewed
+`MockERC20` test contract and deploy only the missing symbol. For the current
+operator state, configure the existing USDC address and exact on-chain name;
+leave the USDT adoption fields empty. The ceremony will verify USDC and deploy
+only one new six-decimal USDT. Both are permissionlessly mintable test assets
+with no claim on real USD. The command refuses `devnet` and `mainnet`, requires
+an exact chain ID and immutable block anchor, defaults to HTTPS, verifies a
+clean reviewed commit and fresh Hardhat build information, and never configures
+NoblePay, mints a balance, or grants an allowance.
 
 Prepare the secret-free configuration and a separate restricted signer file:
 
@@ -138,9 +149,45 @@ sudo install -m 0400 /secure/operator/token-provisioner.key \
 sudo chown "$(id -u):$(id -g)" /etc/noblepay/token-provisioner.key
 ```
 
+`/etc/noblepay/token-provisioner.key` is a plain-text file containing exactly
+one line: `0x` followed by the 64 hexadecimal characters of the funded
+provisioner private key. It must contain no variable name, quotes, spaces, or
+comments. Do not paste that value into the env file, terminal command, shell
+history, transcript, ticket, or repository.
+
 Populate every placeholder in
-`/etc/noblepay/testnet-token-provisioning.env`, keep the confirmation value
-`false`, and validate without an RPC connection or transaction:
+`/etc/noblepay/testnet-token-provisioning.env`. Before setting the existing
+USDC fields, read its exact on-chain name without a signer:
+
+```bash
+node --input-type=module -e \
+  'import {createPublicClient,http,parseAbi} from "viem";const [rpc,address]=process.argv.slice(1);const client=createPublicClient({transport:http(rpc)});console.log(await client.readContract({address,abi:parseAbi(["function name() view returns (string)"]),functionName:"name"}));' \
+  http://54.165.44.130:8545 \
+  0xreplace-with-the-existing-usdc-address
+```
+
+Then set the address and the exact output:
+
+```dotenv
+EXISTING_USDC_TOKEN_ADDRESS=0xreplace-with-the-existing-usdc-address
+EXISTING_USDC_TOKEN_NAME=replace-with-the-exact-name-returned-by-name()
+EXISTING_USDT_TOKEN_ADDRESS=
+EXISTING_USDT_TOKEN_NAME=
+```
+
+Use `RPC_URL=https://...` when TLS is available. For the current evaluation
+endpoint only, use both of these values:
+
+```dotenv
+RPC_URL=http://54.165.44.130:8545
+ALLOW_INSECURE_TESTNET_RPC=acknowledge-evaluation-only-plaintext-rpc
+AETHELRED_CHAIN_ID=7332
+AETHELRED_NETWORK_ANCHOR_BLOCK=450000
+AETHELRED_NETWORK_ANCHOR_HASH=0x1057a62d12eed50d8740fcf51be0cd784db9a4f8f98c9312eee8b8bc7e543ddc
+```
+
+Keep the transaction confirmation value `false`, and validate local inputs
+without an RPC connection or transaction:
 
 ```bash
 export TOKEN_CHECKPOINT=/etc/noblepay/testnet-token-checkpoint.json
@@ -149,6 +196,20 @@ export TOKEN_MANIFEST=/etc/noblepay/testnet-token-manifest."$RELEASE_SHA".json
 node --env-file=/etc/noblepay/testnet-token-provisioning.env \
   scripts/provision-testnet-tokens.mjs \
   --validate-only \
+  --checkpoint-file "$TOKEN_CHECKPOINT" \
+  --manifest-file "$TOKEN_MANIFEST"
+```
+
+Then perform the read-only network, anchor, runtime-bytecode, name, symbol, and
+decimals check. This uses `TOKEN_PROVISIONER_ADDRESS` for the balance check,
+does not open `TOKEN_PROVISIONER_KEY_FILE`, writes neither artifact, and
+broadcasts no transaction. The signer file may be absent on the verification
+host:
+
+```bash
+node --env-file=/etc/noblepay/testnet-token-provisioning.env \
+  scripts/provision-testnet-tokens.mjs \
+  --verify-only \
   --checkpoint-file "$TOKEN_CHECKPOINT" \
   --manifest-file "$TOKEN_MANIFEST"
 ```
@@ -164,11 +225,15 @@ node --env-file=/etc/noblepay/testnet-token-provisioning.env \
   --manifest-file "$TOKEN_MANIFEST"
 ```
 
-Return the confirmation to `false` immediately. The mode-`0600` checkpoint
-records prepared nonces, expected addresses, transaction hashes, canonical
-blocks, and reviewed runtime hashes so an interrupted run can reconcile or
-resume without silently deploying duplicates. The final mode-`0600` manifest
-contains public evidence and exactly these core-ceremony inputs:
+Return the confirmation to `false` immediately. The command adopts the verified
+USDC, then prepares and deploys only USDT. The mode-`0600` checkpoint records
+adoption evidence, prepared nonces, expected addresses, transaction hashes,
+canonical blocks, and reviewed runtime hashes so an interrupted run can
+reconcile or resume without silently deploying duplicates. A legacy version-1
+checkpoint containing only ceremony-deployed tokens is verified and upgraded
+in place before resume; it cannot be combined with new `EXISTING_*` inputs.
+The final mode-`0600` manifest contains public evidence and exactly these
+core-ceremony inputs:
 
 ```bash
 node -e 'const fs=require("node:fs");const m=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));for(const k of ["SUPPORTED_TOKEN_ADDRESSES","USDC_TOKEN_ADDRESS","USDT_TOKEN_ADDRESS"])console.log(`${k}=${m.coreDeploymentEnvironment[k]}`)' \
@@ -204,7 +269,8 @@ set is:
 | Input                                 | Required meaning                                                            |
 | ------------------------------------- | --------------------------------------------------------------------------- |
 | `CHAIN_ENV`                           | `testnet` for this handoff                                                  |
-| `RPC_URL`                             | private HTTPS EVM JSON-RPC; never the plaintext `54.165.44.130` endpoint    |
+| `RPC_URL`                             | private HTTPS EVM JSON-RPC, or acknowledged evaluation-only testnet HTTP    |
+| `ALLOW_INSECURE_TESTNET_RPC`          | `false` for HTTPS; exact documented acknowledgement for evaluation HTTP     |
 | `AETHELRED_CHAIN_ID`                  | operator-confirmed decimal EVM chain ID                                     |
 | `AETHELRED_NETWORK_ANCHOR_BLOCK/HASH` | independently confirmed immutable block identity                            |
 | `DEPLOYER_KEY/ADDRESS`                | temporary funded EOA; key and address must match                            |
@@ -218,11 +284,52 @@ set is:
 | NoblePay and channel fee variables    | approved integer fee values                                                 |
 | CEAP variables                        | approved backend, verification, platform, vendor-root, and residency policy |
 | `SEAL_PROBE_ID`                       | operator-confirmed probe identifier for the ISeal read                      |
-| public RPC/WSS/explorer variables     | credential-free TLS endpoints used by the browser                           |
+| public RPC variable                   | credential-free HTTPS, or the bounded evaluation-only HTTP exception        |
+| public WSS/explorer variables         | credential-free WSS/HTTPS endpoints used by the browser                     |
 | frontend URL/version variables        | final HTTPS/WSS application endpoints and release identifier                |
 
 The configuration digest in the checkpoint binds all governance, custody,
 fee, token, and CEAP values. Changing any of them makes resume/finalize fail.
+
+For the current evaluation testnet without a private TLS RPC, the core env must
+use this exact network block together; do not mix it with another chain ID or
+anchor:
+
+```dotenv
+CHAIN_ENV=testnet
+RPC_URL=http://54.165.44.130:8545
+ALLOW_INSECURE_TESTNET_RPC=acknowledge-evaluation-only-plaintext-rpc
+AETHELRED_CHAIN_ID=7332
+AETHELRED_NETWORK_ANCHOR_BLOCK=450000
+AETHELRED_NETWORK_ANCHOR_HASH=0x1057a62d12eed50d8740fcf51be0cd784db9a4f8f98c9312eee8b8bc7e543ddc
+```
+
+This permits the private bootstrap/finalize transport and may also be applied
+to `PUBLIC_AETHELRED_RPC_URL=http://54.165.44.130:8545` for evaluation evidence.
+It does not relax `PUBLIC_AETHELRED_WS_URL`, explorer, or frontend URL
+requirements. No Ethereum JSON-RPC WebSocket was reachable at the expected
+`54.165.44.130:8546` endpoint during the 2026-08-04 operator check, so do not
+substitute the CometBFT `/websocket` endpoint: it is a different protocol.
+Finalization remains blocked until the network operator supplies a working,
+credential-free WSS Ethereum JSON-RPC endpoint and the remaining TLS endpoints.
+Token provisioning and core bootstrap can proceed now; core finalize cannot.
+
+The network operator's next action is:
+
+1. On the RPC or sentry host, check whether the Ethereum JSON-RPC WebSocket
+   listener is already bound to loopback or a private interface. Prove it with
+   Ethereum `eth_chainId` and `eth_getBlockByNumber` requests; a successful
+   CometBFT status/subscription response is not sufficient.
+2. If that EVM listener already exists, expose it through a credential-free TLS
+   reverse proxy or sentry as WSS. This does not require a validator restart.
+3. Verify chain ID `7332` and block `450000` hash
+   `0x1057a62d12eed50d8740fcf51be0cd784db9a4f8f98c9312eee8b8bc7e543ddc`
+   through the new WSS endpoint, set `PUBLIC_AETHELRED_WS_URL`, and rerun
+   `--finalize --validate-only` before finalize.
+
+If no EVM WebSocket listener exists, stop and return that finding for a separate
+network-operations change. Do not restart validators or fabricate a WSS URL as
+part of this application deployment.
 
 Use Node's env-file parser; do not shell-source this file because it contains
 JSON values:

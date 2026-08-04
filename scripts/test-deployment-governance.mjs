@@ -40,6 +40,10 @@ import {
   validateFinalizedEnvironment,
   writeSecureJSONFile,
 } from "./lib/operator-artifacts.mjs";
+import {
+  TESTNET_HTTP_RPC_ACKNOWLEDGEMENT,
+  validatePrivateRpcTransport,
+} from "./lib/rpc-transport-policy.mjs";
 
 const ANCHOR_HASH = `0x${"ab".repeat(32)}`;
 
@@ -223,6 +227,39 @@ assert.throws(() => deploymentMode(["node", "script"]), /exactly one/u);
 assert.throws(
   () => deploymentMode(["node", "script", "--bootstrap", "--finalize"]),
   /exactly one/u,
+);
+
+assert.equal(
+  validatePrivateRpcTransport({
+    chainEnvironment: "testnet",
+    rpcUrl: "https://private-rpc.example.test",
+  }).transportSecurity,
+  "tls",
+);
+assert.throws(
+  () =>
+    validatePrivateRpcTransport({
+      chainEnvironment: "testnet",
+      rpcUrl: "http://54.165.44.130:8545",
+    }),
+  /plaintext testnet RPC is evaluation-only/u,
+);
+assert.equal(
+  validatePrivateRpcTransport({
+    chainEnvironment: "testnet",
+    rpcUrl: "http://54.165.44.130:8545",
+    insecureTestnetAcknowledgement: TESTNET_HTTP_RPC_ACKNOWLEDGEMENT,
+  }).transportSecurity,
+  "plaintext-evaluation",
+);
+assert.throws(
+  () =>
+    validatePrivateRpcTransport({
+      chainEnvironment: "mainnet",
+      rpcUrl: "http://54.165.44.130:8545",
+      insecureTestnetAcknowledgement: TESTNET_HTTP_RPC_ACKNOWLEDGEMENT,
+    }),
+  /mainnet deployments require an HTTPS RPC_URL/u,
 );
 
 const checkpointMetadata = {
@@ -577,6 +614,18 @@ assert.match(
 assert.match(
   deploymentSource,
   /testnet and mainnet finalization requires --manifest-file/u,
+);
+assert.match(deploymentSource, /ALLOW_INSECURE_TESTNET_RPC/u);
+assert.match(deploymentSource, /plaintextRpcWarning/u);
+assert.match(
+  deploymentSource,
+  /publicRpcURL\("PUBLIC_AETHELRED_RPC_URL", CHAIN_ENV\)/u,
+  "finalization must apply the bounded testnet RPC policy to the public RPC",
+);
+assert.match(
+  deploymentSource,
+  /publicURL\("PUBLIC_AETHELRED_WS_URL", "wss:"\)/u,
+  "finalization must not invent a plaintext EVM WebSocket endpoint",
 );
 assert.match(
   deploymentSource,
