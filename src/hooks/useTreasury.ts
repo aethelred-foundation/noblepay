@@ -15,9 +15,10 @@
  * Writes go through useSafeWriteContract (GAS-01 buffering).
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAccount, usePublicClient } from "wagmi";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAccount } from "wagmi";
 import { useSafeWriteContract } from "./useSafeWriteContract";
+import { useClientRef } from "./useClientRef";
 import { CONTRACT_ADDRESSES, activeChain } from "@/config/chains";
 import { ERC20_ABI } from "@/config/abis";
 import { MULTISIG_TREASURY_ABI } from "@/config/abis.generated";
@@ -35,28 +36,6 @@ type TreasuryReadFn = Extract<
   (typeof MULTISIG_TREASURY_ABI)[number],
   { type: "function"; stateMutability: "view" | "pure" }
 >["name"];
-
-/**
- * Hold the public client in a ref and expose a stable readiness flag.
- *
- * wagmi's usePublicClient returns a fresh object on re-render, so listing it
- * as an effect dependency re-fires that effect on every commit. Because each
- * re-run's cleanup sets `cancelled = true`, a read that is about to resolve
- * gets discarded instead of committing — and while a page with several such
- * hooks is still settling, the cancellations can chain. The treasury console
- * rendered "Proposals (0)" on first load for exactly this reason, with the
- * event fetch succeeding every time.
- *
- * Keying effects on `ready` (a boolean) plus an explicit refetch nonce means
- * they run when the client first becomes available and when asked, not on
- * every render.
- */
-function useClientRef() {
-  const publicClient = usePublicClient({ chainId: activeChain.id });
-  const ref = useRef(publicClient);
-  ref.current = publicClient;
-  return { ref, ready: Boolean(publicClient) };
-}
 
 /**
  * De-duplicate raw event logs. The Aethelred node's eth_getLogs can return the

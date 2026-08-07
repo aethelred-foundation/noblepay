@@ -14,6 +14,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useAccount, usePublicClient } from "wagmi";
 import { useSafeWriteContract } from "./useSafeWriteContract";
+import { useClientRef } from "./useClientRef";
 import { CONTRACT_ADDRESSES, activeChain } from "@/config/chains";
 import { ERC20_ABI, LIQUIDITY_POOL_ABI } from "@/config/abis";
 
@@ -102,13 +103,14 @@ export function usePools(): {
   error: Error | null;
   refetch: () => void;
 } {
-  const publicClient = usePublicClient({ chainId: activeChain.id });
+  const { ref: clientRef, ready } = useClientRef();
   const [pools, setPools] = useState<PoolInfo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
+    const publicClient = clientRef.current;
     if (!publicClient || !POOL) return;
     let cancelled = false;
     (async () => {
@@ -198,7 +200,7 @@ export function usePools(): {
     return () => {
       cancelled = true;
     };
-  }, [publicClient, nonce]);
+  }, [clientRef, ready, nonce]);
 
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
   return { pools, isLoading, error, refetch };
@@ -211,13 +213,14 @@ export function useMyPositions(): {
   refetch: () => void;
 } {
   const { address } = useAccount();
-  const publicClient = usePublicClient({ chainId: activeChain.id });
+  const { ref: clientRef, ready } = useClientRef();
   const [positions, setPositions] = useState<PositionInfo[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const [nonce, setNonce] = useState(0);
 
   useEffect(() => {
+    const publicClient = clientRef.current;
     if (!publicClient || !POOL || !address) {
       setPositions([]);
       return;
@@ -267,7 +270,7 @@ export function useMyPositions(): {
     return () => {
       cancelled = true;
     };
-  }, [publicClient, address, nonce]);
+  }, [clientRef, ready, address, nonce]);
 
   const refetch = useCallback(() => setNonce((n) => n + 1), []);
   return { positions, isLoading, error, refetch };
