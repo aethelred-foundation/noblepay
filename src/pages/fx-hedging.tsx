@@ -1,767 +1,954 @@
 /**
- * NoblePay FX Hedging — Foreign Exchange Hedging Dashboard
+ * NoblePay FX Hedging — currency risk desk
  *
- * Comprehensive FX hedging console featuring live rate tickers,
- * open hedge positions, hedge creation forms, exposure heatmaps,
- * and portfolio VaR calculations.
+ * Every figure is read from the deployed FXHedgingVault. The page previously
+ * generated its own rates, twelve hedges and a per-currency exposure breakdown
+ * with seededRandom, and offered a "Swap" instrument the contract does not
+ * implement.
  *
- * All mock data uses seededRandom for deterministic SSR hydration.
+ * Two things the contract cannot answer, and which this page therefore does
+ * not claim:
+ *
+ *  - Unhedged exposure. The vault knows what has been hedged; it has no idea
+ *    what a business's underlying receivables are. The old page drew a "% of
+ *    exposure hedged" bar against an invented denominator. This one reports
+ *    hedged notional per pair and says where the rest of the number would have
+ *    to come from.
+ *  - Rate history beyond what the oracle published. The chart is built from
+ *    FXRateUpdated events, so a pair updated once shows one point.
  */
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import { SEOHead } from "@/components/SEOHead";
 import {
-  BarChart,
-  Bar,
   LineChart,
   Line,
-  PieChart,
-  Pie,
-  Cell,
   XAxis,
   YAxis,
   CartesianGrid,
   Tooltip as RechartsTooltip,
   ResponsiveContainer,
-  Legend,
-  Area,
-  AreaChart,
 } from "recharts";
 import {
-  DollarSign,
   TrendingUp,
-  TrendingDown,
-  ArrowUpRight,
-  ArrowDownRight,
-  Plus,
   Shield,
-  AlertTriangle,
-  Activity,
-  Gauge,
-  ArrowLeftRight,
-  Globe,
-  BarChart3,
-  Clock,
-  Layers,
-  Target,
-  Zap,
+  AlertCircle,
+  Plus,
   RefreshCw,
+  Clock,
+  XCircle,
+  Layers,
+  Activity,
+  Wallet,
+  ArrowRightLeft,
 } from "lucide-react";
-import { useApp } from "@/contexts/AppContext";
-import { TopNav, Footer, Badge, Modal } from "@/components/SharedComponents";
-import { seededRandom, formatNumber } from "@/lib/utils";
+import { useAccount } from "wagmi";
+import { TopNav, Footer, Modal, Tabs } from "@/components/SharedComponents";
+import { truncateAddress } from "@/lib/utils";
 import { BRAND } from "@/lib/constants";
+import { GlassCard, SectionHeader } from "@/components/PagePrimitives";
 import {
-  GlassCard,
-  SectionHeader,
-  Sparkline,
-} from "@/components/PagePrimitives";
+  useFX,
+  useFXActions,
+  useRateHistory,
+  HEDGE_TYPE,
+  POSITION_STATUS,
+  RATE_DECIMALS,
+  type CurrencyPair,
+  type HedgePosition,
+} from "@/hooks/useFX";
+import { CONTRACT_ADDRESSES } from "@/config/chains";
 
 // =============================================================================
-// CONSTANTS
+// FORMATTING
 // =============================================================================
 
-const CHART_COLORS = [
-  "#DC2626",
-  "#0EA5E9",
-  "#10B981",
-  "#F59E0B",
-  "#8B5CF6",
-  "#EC4899",
-  "#06B6D4",
-  "#F87171",
-];
+/** bigint -> number for display only; never for contract arguments. */
+function toNumber(v: bigint, decimals: number): number {
+  const base = 10n ** BigInt(decimals);
+  return Number(v / base) + Number(v % base) / Number(base);
+}
 
-const CURRENCY_PAIRS = [
-  { pair: "AED/USD", base: "AED", quote: "USD", flag: "🇦🇪" },
-  { pair: "EUR/USD", base: "EUR", quote: "USD", flag: "🇪🇺" },
-  { pair: "GBP/USD", base: "GBP", quote: "USD", flag: "🇬🇧" },
-  { pair: "USD/JPY", base: "USD", quote: "JPY", flag: "🇯🇵" },
-  { pair: "USD/SGD", base: "USD", quote: "SGD", flag: "🇸🇬" },
-  { pair: "USD/CHF", base: "USD", quote: "CHF", flag: "🇨🇭" },
-];
+function formatRate(rate: bigint): string {
+  if (rate === 0n) return "—";
+  return toNumber(rate, RATE_DECIMALS).toFixed(4);
+}
 
-const BASE_RATES: Record<string, number> = {
-  "AED/USD": 0.2723,
-  "EUR/USD": 1.0842,
-  "GBP/USD": 1.2651,
-  "USD/JPY": 149.82,
-  "USD/SGD": 1.3412,
-  "USD/CHF": 0.8821,
+function formatNotional(v: bigint): string {
+  const n = toNumber(v, RATE_DECIMALS);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return n === 0 ? "0" : n.toFixed(2);
+}
+
+function timeAgo(ts: number): string {
+  if (!ts) return "never";
+  const diff = Math.max(0, Date.now() - ts);
+  if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`;
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+  return `${Math.floor(diff / 86_400_000)}d ago`;
+}
+
+function untilMaturity(ts: number): string {
+  const diff = ts - Date.now();
+  if (diff <= 0) return "matured";
+  const days = Math.floor(diff / 86_400_000);
+  if (days > 0) return `${days}d`;
+  return `${Math.floor(diff / 3_600_000)}h`;
+}
+
+const STATUS_STYLES: Record<string, string> = {
+  Active: "bg-emerald-500/20 text-emerald-400",
+  Matured: "bg-blue-500/20 text-blue-400",
+  Settled: "bg-blue-500/20 text-blue-400",
+  Exercised: "bg-purple-500/20 text-purple-400",
+  Expired: "bg-slate-500/20 text-slate-400",
+  Liquidated: "bg-red-500/20 text-red-400",
+  "Emergency unwound": "bg-red-500/20 text-red-400",
 };
 
 // =============================================================================
-// TYPES
+// SMALL COMPONENTS
 // =============================================================================
 
-type HedgeType = "Forward" | "Option" | "Swap";
-type HedgeStatus = "Active" | "Matured" | "Expired" | "Closed";
-
-interface FXRate {
-  pair: string;
-  rate: number;
-  change: number;
-  changePercent: number;
-  high24h: number;
-  low24h: number;
-  flag: string;
-}
-
-interface Hedge {
-  id: string;
-  pair: string;
-  type: HedgeType;
-  direction: "Buy" | "Sell";
-  notional: number;
-  strikeRate: number;
-  currentRate: number;
-  pnl: number;
-  maturityDate: number;
-  status: HedgeStatus;
-}
-
-interface ExposureItem {
-  currency: string;
-  exposure: number;
-  hedged: number;
-  unhedged: number;
-  color: string;
-}
-
-// =============================================================================
-// MOCK DATA GENERATORS
-// =============================================================================
-
-function generateFXRates(): FXRate[] {
-  return CURRENCY_PAIRS.map((cp, i) => {
-    const seed = 5000 + i * 73;
-    const baseRate = BASE_RATES[cp.pair];
-    const change = (seededRandom(seed) - 0.5) * baseRate * 0.02;
-    return {
-      pair: cp.pair,
-      rate: baseRate + (seededRandom(seed + 10) - 0.5) * baseRate * 0.005,
-      change,
-      changePercent: (change / baseRate) * 100,
-      high24h: baseRate * (1 + seededRandom(seed + 20) * 0.01),
-      low24h: baseRate * (1 - seededRandom(seed + 30) * 0.01),
-      flag: cp.flag,
-    };
-  });
-}
-
-function generateHedges(count: number): Hedge[] {
-  const types: HedgeType[] = ["Forward", "Option", "Swap"];
-  const statuses: HedgeStatus[] = [
-    "Active",
-    "Active",
-    "Active",
-    "Matured",
-    "Closed",
-  ];
-  const pairs = CURRENCY_PAIRS.map((cp) => cp.pair);
-  const hedges: Hedge[] = [];
-  for (let i = 0; i < count; i++) {
-    const seed = 6000 + i * 97;
-    const pair = pairs[Math.floor(seededRandom(seed) * pairs.length)];
-    const baseRate = BASE_RATES[pair];
-    const strikeRate = baseRate * (1 + (seededRandom(seed + 10) - 0.5) * 0.04);
-    const currentRate =
-      baseRate * (1 + (seededRandom(seed + 20) - 0.5) * 0.005);
-    const notional = Math.floor(seededRandom(seed + 30) * 5000000) + 500000;
-    const direction =
-      seededRandom(seed + 40) > 0.5 ? ("Buy" as const) : ("Sell" as const);
-    const pnlMultiplier =
-      direction === "Buy" ? currentRate - strikeRate : strikeRate - currentRate;
-    hedges.push({
-      id: `HDG-${String(1000 + i).padStart(5, "0")}`,
-      pair,
-      type: types[Math.floor(seededRandom(seed + 50) * types.length)],
-      direction,
-      notional,
-      strikeRate,
-      currentRate,
-      pnl: pnlMultiplier * notional * 0.01,
-      maturityDate:
-        Date.now() + Math.floor(seededRandom(seed + 60) * 180 * 86400000),
-      status: statuses[Math.floor(seededRandom(seed + 70) * statuses.length)],
-    });
-  }
-  return hedges;
-}
-
-function generateExposureData(): ExposureItem[] {
-  return [
-    {
-      currency: "USD",
-      exposure: 12500000,
-      hedged: 9800000,
-      unhedged: 2700000,
-      color: "#22C55E",
-    },
-    {
-      currency: "EUR",
-      exposure: 8200000,
-      hedged: 6100000,
-      unhedged: 2100000,
-      color: "#3B82F6",
-    },
-    {
-      currency: "GBP",
-      exposure: 5400000,
-      hedged: 4200000,
-      unhedged: 1200000,
-      color: "#8B5CF6",
-    },
-    {
-      currency: "AED",
-      exposure: 4800000,
-      hedged: 4500000,
-      unhedged: 300000,
-      color: "#DC2626",
-    },
-    {
-      currency: "JPY",
-      exposure: 3200000,
-      hedged: 1800000,
-      unhedged: 1400000,
-      color: "#F59E0B",
-    },
-    {
-      currency: "SGD",
-      exposure: 2100000,
-      hedged: 1500000,
-      unhedged: 600000,
-      color: "#06B6D4",
-    },
-  ];
-}
-
-function generateRateHistory(
-  pair: string,
-): Array<{ time: string; rate: number }> {
-  const base = BASE_RATES[pair] || 1;
-  const points: Array<{ time: string; rate: number }> = [];
-  for (let i = 0; i < 24; i++) {
-    points.push({
-      time: `${String(i).padStart(2, "0")}:00`,
-      rate: base * (1 + (seededRandom(7000 + i * 41) - 0.5) * 0.008),
-    });
-  }
-  return points;
-}
-
-// =============================================================================
-// UTILITY FUNCTIONS
-// =============================================================================
-
-function formatUSD(n: number): string {
-  if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
-  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
-  return `$${n.toFixed(2)}`;
-}
-
-function formatPnL(n: number): string {
-  const prefix = n >= 0 ? "+" : "";
-  return `${prefix}${formatUSD(Math.abs(n))}`;
-}
-
-function daysUntil(timestamp: number): string {
-  const diff = Math.floor((timestamp - Date.now()) / 86400000);
-  if (diff <= 0) return "Expired";
-  return `${diff}d`;
-}
-
-// =============================================================================
-// REUSABLE LOCAL COMPONENTS
-// =============================================================================
-
-function HedgeStatusBadge({ status }: { status: HedgeStatus }) {
-  const styles: Record<HedgeStatus, string> = {
-    Active: "bg-emerald-500/20 text-emerald-400",
-    Matured: "bg-blue-500/20 text-blue-400",
-    Expired: "bg-red-500/20 text-red-400",
-    Closed: "bg-slate-500/20 text-slate-400",
-  };
+function StatusBadge({ status }: { status: number }) {
+  const name = POSITION_STATUS[status] ?? "Unknown";
   return (
     <span
-      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${styles[status]}`}
+      className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium ${
+        STATUS_STYLES[name] ?? "bg-slate-500/20 text-slate-400"
+      }`}
     >
       <span className="w-1.5 h-1.5 rounded-full bg-current" />
-      {status}
+      {name}
     </span>
   );
 }
 
-function HedgeTypeBadge({ type }: { type: HedgeType }) {
-  const styles: Record<HedgeType, string> = {
-    Forward: "bg-blue-500/20 text-blue-400",
-    Option: "bg-purple-500/20 text-purple-400",
-    Swap: "bg-cyan-500/20 text-cyan-400",
-  };
+function TypeBadge({ hedgeType }: { hedgeType: number }) {
+  const name = HEDGE_TYPE[hedgeType] ?? "Unknown";
+  const style = hedgeType === 0 ? "bg-blue-500/20 text-blue-400" : "bg-purple-500/20 text-purple-400";
+  return <span className={`px-2 py-0.5 rounded text-xs font-medium ${style}`}>{name}</span>;
+}
+
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  sub,
+}: {
+  icon: React.ElementType;
+  label: string;
+  value: string;
+  sub?: string;
+}) {
   return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${styles[type]}`}>
-      {type}
-    </span>
+    <GlassCard className="p-4" hover={false}>
+      <div className="flex items-center gap-2 mb-1">
+        <Icon className="w-4 h-4 text-slate-400" />
+        <span className="text-xs text-slate-400 truncate">{label}</span>
+      </div>
+      <p className="text-xl font-bold text-white truncate">{value}</p>
+      {sub && <p className="mt-1 text-xs text-slate-500 truncate">{sub}</p>}
+    </GlassCard>
   );
 }
 
-function ExposureBar({ item }: { item: ExposureItem }) {
-  const hedgedPct = (item.hedged / item.exposure) * 100;
+function EmptyState({
+  icon: Icon,
+  title,
+  body,
+}: {
+  icon: React.ElementType;
+  title: string;
+  body: string;
+}) {
   return (
-    <div className="space-y-1">
-      <div className="flex items-center justify-between text-xs">
-        <span className="text-white font-medium">{item.currency}</span>
-        <span className="text-slate-400">{formatUSD(item.exposure)}</span>
+    <div className="flex flex-col items-center justify-center py-12 text-center">
+      <div className="p-3 rounded-xl bg-slate-800/60 border border-slate-700 mb-3">
+        <Icon className="w-6 h-6 text-slate-500" />
       </div>
-      <div className="w-full h-3 rounded-full bg-slate-700/50 overflow-hidden">
-        <div
-          className="h-3 rounded-full transition-all duration-500"
-          style={{ width: `${hedgedPct}%`, backgroundColor: item.color }}
-        />
-      </div>
-      <div className="flex justify-between text-xs text-slate-500">
-        <span>{hedgedPct.toFixed(0)}% hedged</span>
-        <span>{formatUSD(item.unhedged)} unhedged</span>
-      </div>
+      <p className="text-sm font-medium text-slate-300">{title}</p>
+      <p className="mt-1 text-xs text-slate-500 max-w-md">{body}</p>
     </div>
   );
 }
 
 // =============================================================================
-// MAIN PAGE COMPONENT
+// NEW HEDGE MODAL
+// =============================================================================
+
+function NewHedgeModal({
+  open,
+  onClose,
+  pairs,
+  onSubmitted,
+}: {
+  open: boolean;
+  onClose: () => void;
+  pairs: CurrencyPair[];
+  onSubmitted: () => void;
+}) {
+  const { createForward, createOption, pending } = useFXActions();
+  const [pairId, setPairId] = useState<string>("");
+  const [instrument, setInstrument] = useState(0); // index into HEDGE_TYPE
+  const [notional, setNotional] = useState("");
+  const [strike, setStrike] = useState("");
+  const [premium, setPremium] = useState("");
+  const [maturityDays, setMaturityDays] = useState("90");
+  const [collateral, setCollateral] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const collateralToken = CONTRACT_ADDRESSES.usdcToken as `0x${string}`;
+  const selected = pairs.find((p) => p.pairId === pairId) ?? pairs[0];
+
+  useEffect(() => {
+    if (!pairId && pairs.length) setPairId(pairs[0].pairId);
+  }, [pairs, pairId]);
+
+  const toFixedPoint = (v: string) => {
+    const [whole, frac = ""] = v.trim().split(".");
+    const padded = (frac + "0".repeat(RATE_DECIMALS)).slice(0, RATE_DECIMALS);
+    return BigInt(whole || "0") * 10n ** BigInt(RATE_DECIMALS) + BigInt(padded || "0");
+  };
+
+  const submit = async () => {
+    setError(null);
+    if (!pairId) {
+      setError("Select a currency pair.");
+      return;
+    }
+    if (!collateralToken) {
+      setError("No collateral token is configured for this deployment.");
+      return;
+    }
+    let notionalUnits: bigint;
+    let collateralUnits: bigint;
+    try {
+      notionalUnits = toFixedPoint(notional);
+      collateralUnits = toFixedPoint(collateral);
+    } catch {
+      setError("Notional and collateral must be decimal numbers.");
+      return;
+    }
+    if (notionalUnits <= 0n) {
+      setError("Notional must be greater than zero.");
+      return;
+    }
+    if (collateralUnits <= 0n) {
+      setError("Collateral must be greater than zero — positions are margined.");
+      return;
+    }
+    const days = Number(maturityDays);
+    if (!Number.isFinite(days) || days <= 0) {
+      setError("Maturity must be a positive number of days.");
+      return;
+    }
+    const maturityDate = BigInt(Math.floor(Date.now() / 1000) + Math.floor(days * 86_400));
+
+    try {
+      if (instrument === 0) {
+        await createForward({
+          pairId: pairId as `0x${string}`,
+          notionalAmount: notionalUnits,
+          maturityDate,
+          collateralToken,
+          collateralAmount: collateralUnits,
+        });
+      } else {
+        const strikeUnits = toFixedPoint(strike);
+        if (strikeUnits <= 0n) {
+          setError("An option needs a strike rate.");
+          return;
+        }
+        await createOption({
+          pairId: pairId as `0x${string}`,
+          hedgeType: instrument,
+          notionalAmount: notionalUnits,
+          strikeRate: strikeUnits,
+          premium: toFixedPoint(premium),
+          maturityDate,
+          collateralToken,
+          collateralAmount: collateralUnits,
+        });
+      }
+      onSubmitted();
+      onClose();
+    } catch (err) {
+      setError((err as Error)?.message ?? "Transaction failed.");
+    }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="New hedge">
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Currency pair</label>
+            <select
+              value={pairId}
+              onChange={(e) => setPairId(e.target.value)}
+              className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm"
+            >
+              {pairs.map((p) => (
+                <option key={p.pairId} value={p.pairId}>
+                  {p.base}/{p.quote}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Instrument</label>
+            <select
+              value={instrument}
+              onChange={(e) => setInstrument(Number(e.target.value))}
+              className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm"
+            >
+              {HEDGE_TYPE.map((t, i) => (
+                <option key={t} value={i}>
+                  {t}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {selected && (
+          <div className="rounded-lg border border-slate-700 bg-slate-800/40 p-3 text-xs space-y-1">
+            <div className="flex justify-between text-slate-300">
+              <span>Oracle rate</span>
+              <span className="text-white">
+                {formatRate(selected.rate)}
+                {selected.rate === 0n && (
+                  <span className="ml-1 text-amber-400">not yet published</span>
+                )}
+              </span>
+            </div>
+            <div className="flex justify-between text-slate-400">
+              <span>Initial margin</span>
+              <span>{(selected.marginRequirementBps / 100).toFixed(2)}%</span>
+            </div>
+            <div className="flex justify-between text-slate-400">
+              <span>Maintenance margin</span>
+              <span>{(selected.maintenanceMarginBps / 100).toFixed(2)}%</span>
+            </div>
+          </div>
+        )}
+
+        <div className="grid grid-cols-2 gap-3">
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">
+              Notional ({selected ? selected.base : "base"})
+            </label>
+            <input
+              value={notional}
+              onChange={(e) => setNotional(e.target.value)}
+              inputMode="decimal"
+              placeholder="0.00"
+              className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-slate-400 mb-1">Maturity (days)</label>
+            <input
+              value={maturityDays}
+              onChange={(e) => setMaturityDays(e.target.value)}
+              inputMode="numeric"
+              className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm"
+            />
+          </div>
+        </div>
+
+        {instrument !== 0 && (
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">Strike rate</label>
+              <input
+                value={strike}
+                onChange={(e) => setStrike(e.target.value)}
+                inputMode="decimal"
+                placeholder={selected ? formatRate(selected.rate) : "0.0000"}
+                className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-xs text-slate-400 mb-1">Premium</label>
+              <input
+                value={premium}
+                onChange={(e) => setPremium(e.target.value)}
+                inputMode="decimal"
+                placeholder="0.00"
+                className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm"
+              />
+            </div>
+          </div>
+        )}
+
+        <div>
+          <label className="block text-xs text-slate-400 mb-1">Collateral</label>
+          <input
+            value={collateral}
+            onChange={(e) => setCollateral(e.target.value)}
+            inputMode="decimal"
+            placeholder="0.00"
+            className="w-full px-3 py-2 rounded-lg bg-slate-800 border border-slate-700 text-white text-sm"
+          />
+          <p className="mt-1 text-xs text-slate-500">
+            Posted in {truncateAddress(collateralToken || "0x")} and transferred
+            on submission. Falling below maintenance margin makes the position
+            liquidatable.
+          </p>
+        </div>
+
+        {instrument === 0 && (
+          <p className="text-xs text-amber-400/90 flex items-start gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            A forward is an obligation, not a right — it must settle at the
+            locked rate whichever way the market moves.
+          </p>
+        )}
+
+        {error && (
+          <p className="text-xs text-red-400 flex items-start gap-1.5">
+            <XCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+            {error}
+          </p>
+        )}
+
+        <div className="flex justify-end gap-2 pt-2">
+          <button onClick={onClose} className="px-4 py-2 rounded-lg text-sm text-slate-300 hover:bg-slate-800">
+            Cancel
+          </button>
+          <button
+            onClick={submit}
+            disabled={pending !== null}
+            className="px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-500 disabled:opacity-50"
+          >
+            {pending ? "Submitting…" : "Open hedge"}
+          </button>
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
+// =============================================================================
+// RATE CHART
+// =============================================================================
+
+function RateChart({ pair }: { pair: CurrencyPair | undefined }) {
+  const { history, isLoading } = useRateHistory(pair?.pairId);
+
+  const data = useMemo(
+    () =>
+      history.map((p) => ({
+        label: new Date(p.timestamp).toLocaleString(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+        }),
+        rate: toNumber(p.rate, RATE_DECIMALS),
+      })),
+    [history],
+  );
+
+  if (!pair) return null;
+  if (isLoading && data.length === 0) {
+    return <p className="py-8 text-center text-sm text-slate-500">Reading oracle history…</p>;
+  }
+  if (data.length === 0) {
+    return (
+      <EmptyState
+        icon={Activity}
+        title="No rate has been published"
+        body="This chart plots FXRateUpdated events. Until the oracle submits a rate for this pair there is nothing to draw."
+      />
+    );
+  }
+  if (data.length === 1) {
+    return (
+      <div className="py-8 text-center">
+        <p className="text-2xl font-bold text-white">{data[0].rate.toFixed(4)}</p>
+        <p className="mt-1 text-xs text-slate-500">
+          One published rate so far, at {data[0].label}. A line needs a second point.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="h-64">
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={data}>
+          <CartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
+          <XAxis dataKey="label" stroke="#64748b" fontSize={11} />
+          <YAxis stroke="#64748b" fontSize={11} domain={["auto", "auto"]} />
+          <RechartsTooltip
+            contentStyle={{ background: "#1e293b", border: "1px solid #334155", borderRadius: 8, fontSize: 12 }}
+          />
+          <Line type="monotone" dataKey="rate" stroke={BRAND.red} dot={{ r: 2 }} />
+        </LineChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// =============================================================================
+// POSITION ROW
+// =============================================================================
+
+function PositionRow({
+  position,
+  pair,
+  onChanged,
+}: {
+  position: HedgePosition;
+  pair: CurrencyPair | undefined;
+  onChanged: () => void;
+}) {
+  const { settleForward, exerciseOption, expireOption, updateMarkToMarket, pending } =
+    useFXActions();
+  const [error, setError] = useState<string | null>(null);
+
+  const statusName = POSITION_STATUS[position.status];
+  const isForward = position.hedgeType === 0;
+  const matured = Date.now() >= position.maturityDate;
+
+  const run = async (fn: (id: `0x${string}`) => Promise<unknown>) => {
+    setError(null);
+    try {
+      await fn(position.positionId);
+      onChanged();
+    } catch (err) {
+      setError((err as Error)?.message ?? "Transaction failed.");
+    }
+  };
+
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-medium text-white">
+              {pair ? `${pair.base}/${pair.quote}` : truncateAddress(position.pairId)}
+            </span>
+            <TypeBadge hedgeType={position.hedgeType} />
+            <StatusBadge status={position.status} />
+            {position.underMargined && statusName === "Active" && (
+              <span className="px-2 py-0.5 rounded text-xs font-medium bg-red-500/20 text-red-400">
+                under margin
+              </span>
+            )}
+          </div>
+          <p className="mt-2 text-xs text-slate-500">
+            notional {formatNotional(position.notionalAmount)} · locked{" "}
+            {formatRate(position.lockedRate)} · collateral{" "}
+            {formatNotional(position.collateralAmount)}
+          </p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            {matured ? "matured" : `matures in ${untilMaturity(position.maturityDate)}`}
+            {position.lastMtMUpdate > 0 && ` · marked ${timeAgo(position.lastMtMUpdate)}`}
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {statusName === "Active" && (
+            <button
+              onClick={() => run(updateMarkToMarket)}
+              disabled={pending !== null}
+              className="px-2.5 py-1.5 rounded-lg text-xs border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              {pending === "mtm" ? "Marking…" : "Mark to market"}
+            </button>
+          )}
+          {isForward && statusName !== "Settled" && (
+            <button
+              onClick={() => run(settleForward)}
+              disabled={pending !== null || !matured}
+              title={matured ? undefined : "Forwards settle at maturity"}
+              className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-50"
+            >
+              {pending === "settle" ? "Settling…" : "Settle"}
+            </button>
+          )}
+          {!isForward && statusName === "Active" && (
+            <>
+              <button
+                onClick={() => run(exerciseOption)}
+                disabled={pending !== null}
+                className="px-2.5 py-1.5 rounded-lg text-xs font-medium bg-purple-600 text-white hover:bg-purple-500 disabled:opacity-50"
+              >
+                {pending === "exercise" ? "Exercising…" : "Exercise"}
+              </button>
+              <button
+                onClick={() => run(expireOption)}
+                disabled={pending !== null || !matured}
+                title={matured ? undefined : "An option can only expire after maturity"}
+                className="px-2.5 py-1.5 rounded-lg text-xs border border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+              >
+                {pending === "expire" ? "Expiring…" : "Let expire"}
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+      {error && (
+        <p className="mt-2 text-xs text-red-400 flex items-start gap-1.5">
+          <XCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// =============================================================================
+// MAIN PAGE
 // =============================================================================
 
 export default function FXHedgingPage() {
-  const { realTime } = useApp();
   const [mounted, setMounted] = useState(false);
-  const [showCreateHedge, setShowCreateHedge] = useState(false);
-  const [selectedPair, setSelectedPair] = useState("AED/USD");
-  const [hedgeType, setHedgeType] = useState<HedgeType>("Forward");
+  const [activeTab, setActiveTab] = useState("positions");
+  const [showCreate, setShowCreate] = useState(false);
+  const [selectedPairId, setSelectedPairId] = useState<string>("");
+
   useEffect(() => setMounted(true), []);
 
-  const fxRates = useMemo(() => generateFXRates(), []);
-  const hedges = useMemo(() => generateHedges(12), []);
-  const exposureData = useMemo(() => generateExposureData(), []);
-  const rateHistory = useMemo(
-    () => generateRateHistory(selectedPair),
-    [selectedPair],
+  const { isConnected } = useAccount();
+  const { pairs, pairsById, positions, portfolio, atRisk, isLoading, error, refetch } =
+    useFX();
+
+  useEffect(() => {
+    if (!selectedPairId && pairs.length) setSelectedPairId(pairs[0].pairId);
+  }, [pairs, selectedPairId]);
+
+  const selectedPair = pairs.find((p) => p.pairId === selectedPairId);
+  const pairFor = useCallback(
+    (id: string) => pairsById.get(id.toLowerCase()),
+    [pairsById],
   );
 
-  const activeHedges = useMemo(
-    () => hedges.filter((h) => h.status === "Active"),
-    [hedges],
-  );
-  const totalNotional = useMemo(
-    () => activeHedges.reduce((s, h) => s + h.notional, 0),
-    [activeHedges],
-  );
-  const totalPnL = useMemo(
-    () => activeHedges.reduce((s, h) => s + h.pnl, 0),
-    [activeHedges],
-  );
-  const totalExposure = useMemo(
-    () => exposureData.reduce((s, e) => s + e.exposure, 0),
-    [exposureData],
-  );
-  const totalHedged = useMemo(
-    () => exposureData.reduce((s, e) => s + e.hedged, 0),
-    [exposureData],
+  /**
+   * Hedged notional per pair. This is deliberately not a hedge ratio: the
+   * contract knows what has been hedged and nothing about the exposure being
+   * hedged against, so a percentage would need a denominator no one on chain
+   * has.
+   */
+  const hedgedByPair = useMemo(() => {
+    const totals = new Map<string, bigint>();
+    for (const p of positions) {
+      if (POSITION_STATUS[p.status] !== "Active") continue;
+      const key = p.pairId.toLowerCase();
+      totals.set(key, (totals.get(key) ?? 0n) + p.notionalAmount);
+    }
+    return [...totals.entries()]
+      .map(([pairId, notional]) => ({ pair: pairsById.get(pairId), notional }))
+      .filter((e) => e.pair)
+      .sort((a, b) => (b.notional > a.notional ? 1 : -1));
+  }, [positions, pairsById]);
+
+  const openPositions = positions.filter(
+    (p) => POSITION_STATUS[p.status] === "Active",
   );
 
-  // Mock VaR calculation
-  const portfolioVaR = 342000;
-  const varPct = (portfolioVaR / totalNotional) * 100;
+  const tabs = [
+    { id: "positions", label: `Positions (${positions.length})` },
+    { id: "rates", label: `Rates (${pairs.length})` },
+    { id: "exposure", label: "Hedged notional" },
+  ];
+
+  if (!mounted) return null;
 
   return (
     <>
       <SEOHead
-        title="FX Hedging"
-        description="NoblePay FX hedging dashboard for enterprise currency risk management and exposure monitoring."
-        path="/fx-hedging"
+        title="FX Hedging — NoblePay"
+        description="Hedge currency exposure with collateralised forwards and options settled on Aethelred."
       />
+      <div className="min-h-screen bg-slate-950">
+        <TopNav />
 
-      <div className="min-h-screen bg-[#0f172a] text-slate-100">
-        <TopNav activePage="/fx-hedging" />
-
-        <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-          {/* HEADER */}
-          <div className="mb-8">
-            <div className="flex items-start justify-between mb-6">
-              <div>
-                <p className="text-xs uppercase tracking-[0.2em] text-red-400">
-                  NoblePay FX
-                </p>
-                <h1 className="mt-2 text-3xl font-bold text-white">
-                  FX Hedging
-                </h1>
-                <p className="mt-1 text-sm text-slate-400">
-                  Currency risk management, hedging positions, and exposure
-                  monitoring
-                </p>
+        <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
+            <div>
+              <div className="flex items-center gap-2">
+                <ArrowRightLeft className="w-6 h-6 text-red-500" />
+                <h1 className="text-2xl font-bold text-white">FX Hedging</h1>
               </div>
+              <p className="mt-1 text-sm text-slate-400">
+                Collateralised forwards and options on Aethelred, marked against
+                published oracle rates.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
               <button
-                onClick={() => setShowCreateHedge(true)}
-                className="flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-500 transition-colors"
+                onClick={refetch}
+                className="p-2 rounded-lg border border-slate-700 text-slate-300 hover:bg-slate-800"
+                aria-label="Refresh FX data"
+              >
+                <RefreshCw className={`w-4 h-4 ${isLoading ? "animate-spin" : ""}`} />
+              </button>
+              <button
+                onClick={() => setShowCreate(true)}
+                disabled={!isConnected || pairs.length === 0}
+                title={
+                  !isConnected
+                    ? "Connect a wallet to hedge"
+                    : pairs.length === 0
+                      ? "No currency pairs are configured on this vault"
+                      : undefined
+                }
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-red-600 text-white hover:bg-red-500 disabled:opacity-50"
               >
                 <Plus className="w-4 h-4" />
-                Create Hedge
+                New hedge
               </button>
             </div>
           </div>
 
-          {/* LIVE FX RATE TICKER */}
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
-            {fxRates.map((rate) => (
-              <GlassCard
-                key={rate.pair}
-                className={`p-3 cursor-pointer transition-all ${selectedPair === rate.pair ? "ring-1 ring-red-500/50" : ""}`}
-                hover
-                onClick={() => setSelectedPair(rate.pair)}
-              >
-                <div className="flex items-center gap-1.5 mb-1">
-                  <span className="text-base">{rate.flag}</span>
-                  <span className="text-xs font-medium text-slate-400">
-                    {rate.pair}
-                  </span>
-                </div>
-                <p className="text-lg font-bold text-white">
-                  {rate.rate.toFixed(4)}
-                </p>
-                <div
-                  className={`flex items-center gap-1 text-xs ${rate.change >= 0 ? "text-emerald-400" : "text-red-400"}`}
-                >
-                  {rate.change >= 0 ? (
-                    <ArrowUpRight className="w-3 h-3" />
-                  ) : (
-                    <ArrowDownRight className="w-3 h-3" />
-                  )}
-                  {rate.changePercent >= 0 ? "+" : ""}
-                  {rate.changePercent.toFixed(3)}%
-                </div>
-              </GlassCard>
-            ))}
+          {error && (
+            <div className="mb-6 rounded-lg border border-red-500/30 bg-red-500/10 p-4 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 flex-shrink-0" />
+              <div>
+                <p className="text-sm text-red-300">Could not read the FX vault.</p>
+                <p className="text-xs text-red-400/80 mt-0.5">{error.message}</p>
+              </div>
+            </div>
+          )}
+
+          {atRisk.length > 0 && (
+            <div className="mb-6 rounded-lg border border-amber-500/30 bg-amber-500/10 p-4 flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 text-amber-400 mt-0.5 flex-shrink-0" />
+              <p className="text-sm text-amber-300">
+                {atRisk.length} position{atRisk.length === 1 ? " is" : "s are"} below
+                maintenance margin and can be liquidated. Add margin to restore cover.
+              </p>
+            </div>
+          )}
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">
+            <StatCard
+              icon={Layers}
+              label="Total notional"
+              value={portfolio ? formatNotional(portfolio.totalNotional) : "—"}
+              sub={`${openPositions.length} open position(s)`}
+            />
+            <StatCard
+              icon={Wallet}
+              label="Collateral posted"
+              value={portfolio ? formatNotional(portfolio.totalCollateral) : "—"}
+              sub={
+                portfolio && portfolio.totalPremiumPaid > 0n
+                  ? `${formatNotional(portfolio.totalPremiumPaid)} premium paid`
+                  : "no premium paid"
+              }
+            />
+            <StatCard
+              icon={TrendingUp}
+              label="Realised P&L"
+              value={portfolio ? formatNotional(portfolio.totalPnL) : "—"}
+              sub={
+                portfolio
+                  ? `${formatNotional(portfolio.unrealizedPnL)} unrealised`
+                  : undefined
+              }
+            />
+            <StatCard
+              icon={Shield}
+              label="Below maintenance"
+              value={String(atRisk.length)}
+              sub={atRisk.length ? "liquidatable" : "all positions covered"}
+            />
           </div>
 
-          {/* KPI CARDS */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
-            <GlassCard className="p-4" hover={false}>
-              <div className="flex items-center gap-2 mb-1">
-                <Layers className="w-4 h-4 text-slate-400" />
-                <span className="text-xs text-slate-400">Total Notional</span>
-              </div>
-              <p className="text-xl font-bold text-white">
-                {formatUSD(totalNotional)}
-              </p>
-              <div className="text-xs text-slate-500 mt-1">
-                {activeHedges.length} active hedges
-              </div>
-            </GlassCard>
-            <GlassCard className="p-4" hover={false}>
-              <div className="flex items-center gap-2 mb-1">
-                <TrendingUp className="w-4 h-4 text-slate-400" />
-                <span className="text-xs text-slate-400">Portfolio P&L</span>
-              </div>
-              <p
-                className={`text-xl font-bold ${totalPnL >= 0 ? "text-emerald-400" : "text-red-400"}`}
-              >
-                {formatPnL(totalPnL)}
-              </p>
-              <div className="flex items-center gap-1 mt-1 text-xs text-emerald-400">
-                <ArrowUpRight className="w-3 h-3" />
-                +3.2% MTD
-              </div>
-            </GlassCard>
-            <GlassCard className="p-4" hover={false}>
-              <div className="flex items-center gap-2 mb-1">
-                <Shield className="w-4 h-4 text-slate-400" />
-                <span className="text-xs text-slate-400">Hedge Ratio</span>
-              </div>
-              <p className="text-xl font-bold text-white">
-                {((totalHedged / totalExposure) * 100).toFixed(1)}%
-              </p>
-              <div className="w-full h-1.5 rounded-full bg-slate-700/50 overflow-hidden mt-2">
-                <div
-                  className="h-1.5 rounded-full bg-emerald-500"
-                  style={{ width: `${(totalHedged / totalExposure) * 100}%` }}
+          <div className="mb-6">
+            <Tabs tabs={tabs} active={activeTab} onChange={setActiveTab} />
+          </div>
+
+          {activeTab === "positions" && (
+            <GlassCard className="p-5" hover={false}>
+              <SectionHeader
+                title="Your positions"
+                subtitle="Read from getBusinessPositions for the connected account"
+              />
+              {!isConnected ? (
+                <EmptyState
+                  icon={Wallet}
+                  title="No wallet connected"
+                  body="Positions are looked up per hedger address. Connect a wallet to see yours."
                 />
-              </div>
-            </GlassCard>
-            <GlassCard className="p-4" hover={false}>
-              <div className="flex items-center gap-2 mb-1">
-                <AlertTriangle className="w-4 h-4 text-slate-400" />
-                <span className="text-xs text-slate-400">
-                  Portfolio VaR (95%)
-                </span>
-              </div>
-              <p className="text-xl font-bold text-amber-400">
-                {formatUSD(portfolioVaR)}
-              </p>
-              <div className="text-xs text-slate-500 mt-1">
-                {varPct.toFixed(2)}% of notional
-              </div>
-            </GlassCard>
-          </div>
-
-          {/* RATE CHART + EXPOSURE */}
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mb-8">
-            <div className="lg:col-span-2">
-              <GlassCard className="p-6">
-                <SectionHeader title={`${selectedPair} — 24h Rate`} />
-                <div className="mt-4 h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={rateHistory}>
-                      <defs>
-                        <linearGradient
-                          id="rateGradient"
-                          x1="0"
-                          y1="0"
-                          x2="0"
-                          y2="1"
-                        >
-                          <stop
-                            offset="5%"
-                            stopColor="#DC2626"
-                            stopOpacity={0.3}
-                          />
-                          <stop
-                            offset="95%"
-                            stopColor="#DC2626"
-                            stopOpacity={0}
-                          />
-                        </linearGradient>
-                      </defs>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-                      <XAxis
-                        dataKey="time"
-                        tick={{ fill: "#94a3b8", fontSize: 10 }}
-                      />
-                      <YAxis
-                        domain={["auto", "auto"]}
-                        tick={{ fill: "#94a3b8", fontSize: 10 }}
-                      />
-                      <RechartsTooltip
-                        contentStyle={{
-                          backgroundColor: "#1e293b",
-                          border: "1px solid #334155",
-                          borderRadius: "8px",
-                        }}
-                        labelStyle={{ color: "#f8fafc" }}
-                      />
-                      <Area
-                        type="monotone"
-                        dataKey="rate"
-                        stroke="#DC2626"
-                        fill="url(#rateGradient)"
-                        strokeWidth={2}
-                      />
-                    </AreaChart>
-                  </ResponsiveContainer>
-                </div>
-              </GlassCard>
-            </div>
-
-            <GlassCard className="p-6">
-              <SectionHeader title="Exposure by Currency" />
-              <div className="mt-4 space-y-4">
-                {exposureData.map((item) => (
-                  <ExposureBar key={item.currency} item={item} />
-                ))}
-              </div>
-            </GlassCard>
-          </div>
-
-          {/* OPEN HEDGES TABLE */}
-          <GlassCard className="p-0 overflow-hidden mb-8">
-            <div className="flex items-center justify-between p-4 border-b border-slate-700/50">
-              <SectionHeader title="Open Hedges" />
-              <span className="text-xs text-slate-400">
-                {activeHedges.length} active positions
-              </span>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b border-slate-700/50">
-                    <th className="text-left px-4 py-3 text-xs font-medium text-slate-400">
-                      ID
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-slate-400">
-                      Pair
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-slate-400">
-                      Type
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-slate-400">
-                      Dir
-                    </th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-slate-400">
-                      Notional
-                    </th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-slate-400">
-                      Strike
-                    </th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-slate-400">
-                      Current
-                    </th>
-                    <th className="text-right px-4 py-3 text-xs font-medium text-slate-400">
-                      P&L
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-slate-400">
-                      Maturity
-                    </th>
-                    <th className="text-left px-4 py-3 text-xs font-medium text-slate-400">
-                      Status
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {hedges.map((h) => (
-                    <tr
-                      key={h.id}
-                      className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors"
-                    >
-                      <td className="px-4 py-3 font-mono text-xs text-red-400">
-                        {h.id}
-                      </td>
-                      <td className="px-4 py-3 text-white font-medium">
-                        {h.pair}
-                      </td>
-                      <td className="px-4 py-3">
-                        <HedgeTypeBadge type={h.type} />
-                      </td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={
-                            h.direction === "Buy"
-                              ? "text-emerald-400"
-                              : "text-red-400"
-                          }
-                        >
-                          {h.direction}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right text-white">
-                        {formatUSD(h.notional)}
-                      </td>
-                      <td className="px-4 py-3 text-right text-slate-300">
-                        {h.strikeRate.toFixed(4)}
-                      </td>
-                      <td className="px-4 py-3 text-right text-slate-300">
-                        {h.currentRate.toFixed(4)}
-                      </td>
-                      <td
-                        className={`px-4 py-3 text-right font-medium ${h.pnl >= 0 ? "text-emerald-400" : "text-red-400"}`}
-                      >
-                        {formatPnL(h.pnl)}
-                      </td>
-                      <td className="px-4 py-3 text-xs text-slate-400">
-                        {daysUntil(h.maturityDate)}
-                      </td>
-                      <td className="px-4 py-3">
-                        <HedgeStatusBadge status={h.status} />
-                      </td>
-                    </tr>
+              ) : isLoading && positions.length === 0 ? (
+                <p className="py-8 text-center text-sm text-slate-500">
+                  Reading positions from chain…
+                </p>
+              ) : positions.length === 0 ? (
+                <EmptyState
+                  icon={Layers}
+                  title="No hedges yet"
+                  body="Open a forward to lock a rate, or an option to buy the right to one. Both require collateral."
+                />
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {positions.map((p) => (
+                    <PositionRow
+                      key={p.positionId}
+                      position={p}
+                      pair={pairFor(p.pairId)}
+                      onChanged={refetch}
+                    />
                   ))}
-                </tbody>
-              </table>
+                </div>
+              )}
+            </GlassCard>
+          )}
+
+          {activeTab === "rates" && (
+            <div className="space-y-6">
+              <GlassCard className="p-5" hover={false}>
+                <SectionHeader
+                  title="Currency pairs"
+                  subtitle="Configured on the vault, with the latest oracle rate"
+                />
+                {pairs.length === 0 ? (
+                  <EmptyState
+                    icon={ArrowRightLeft}
+                    title="No currency pairs configured"
+                    body="An account with ADMIN_ROLE must add a pair before any hedge can be opened against it."
+                  />
+                ) : (
+                  <div className="mt-4 overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead>
+                        <tr className="text-xs text-slate-400 border-b border-slate-800">
+                          <th className="text-left pb-2">Pair</th>
+                          <th className="text-right pb-2">Rate</th>
+                          <th className="text-right pb-2">Updated</th>
+                          <th className="text-right pb-2">Initial margin</th>
+                          <th className="text-right pb-2">Maintenance</th>
+                          <th className="text-right pb-2">Max hedge</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {pairs.map((p) => (
+                          <tr
+                            key={p.pairId}
+                            onClick={() => setSelectedPairId(p.pairId)}
+                            className={`border-b border-slate-800/60 cursor-pointer hover:bg-slate-800/40 ${
+                              p.pairId === selectedPairId ? "bg-slate-800/30" : ""
+                            }`}
+                          >
+                            <td className="py-2 text-white">
+                              {p.base}/{p.quote}
+                            </td>
+                            <td className="py-2 text-right text-white">
+                              {formatRate(p.rate)}
+                            </td>
+                            <td className="py-2 text-right text-slate-400 text-xs">
+                              {p.rate === 0n ? (
+                                <span className="text-amber-400">never</span>
+                              ) : (
+                                timeAgo(p.rateUpdatedAt)
+                              )}
+                            </td>
+                            <td className="py-2 text-right text-slate-300">
+                              {(p.marginRequirementBps / 100).toFixed(2)}%
+                            </td>
+                            <td className="py-2 text-right text-slate-300">
+                              {(p.maintenanceMarginBps / 100).toFixed(2)}%
+                            </td>
+                            <td className="py-2 text-right text-slate-300">
+                              {(p.maxHedgeRatioBps / 100).toFixed(0)}%
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </GlassCard>
+
+              {pairs.length > 0 && (
+                <GlassCard className="p-5" hover={false}>
+                  <SectionHeader
+                    title={
+                      selectedPair
+                        ? `${selectedPair.base}/${selectedPair.quote} oracle history`
+                        : "Oracle history"
+                    }
+                    subtitle="Every rate the oracle has published for this pair"
+                  />
+                  <div className="mt-4">
+                    <RateChart pair={selectedPair} />
+                  </div>
+                </GlassCard>
+              )}
             </div>
-          </GlassCard>
+          )}
+
+          {activeTab === "exposure" && (
+            <GlassCard className="p-5" hover={false}>
+              <SectionHeader
+                title="Hedged notional by pair"
+                subtitle="Open positions only"
+              />
+              <p className="mt-2 text-xs text-amber-400/90 flex items-start gap-1.5">
+                <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                This is hedged notional, not a hedge ratio. The vault records
+                what you have hedged; it has no view of the underlying
+                receivables you are hedging against, so the share of exposure
+                covered cannot be computed from chain state alone.
+              </p>
+              {hedgedByPair.length === 0 ? (
+                <EmptyState
+                  icon={Layers}
+                  title="Nothing hedged"
+                  body="Open a position and its notional will be totalled here by currency pair."
+                />
+              ) : (
+                <div className="mt-4 space-y-4">
+                  {hedgedByPair.map(({ pair, notional }) => (
+                    <div key={pair!.pairId}>
+                      <div className="flex items-center justify-between text-sm mb-1">
+                        <span className="text-white font-medium">
+                          {pair!.base}/{pair!.quote}
+                        </span>
+                        <span className="text-slate-300">{formatNotional(notional)}</span>
+                      </div>
+                      <div className="w-full h-2.5 rounded-full bg-slate-700/50 overflow-hidden">
+                        <div
+                          className="h-2.5 rounded-full"
+                          style={{
+                            width: `${
+                              (Number(notional) /
+                                Number(hedgedByPair[0].notional || 1n)) *
+                              100
+                            }%`,
+                            backgroundColor: BRAND.red,
+                          }}
+                        />
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        rate {formatRate(pair!.rate)} · maintenance{" "}
+                        {(pair!.maintenanceMarginBps / 100).toFixed(2)}%
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </GlassCard>
+          )}
         </main>
 
         <Footer />
       </div>
 
-      {/* CREATE HEDGE MODAL */}
-      <Modal
-        open={showCreateHedge}
-        onClose={() => setShowCreateHedge(false)}
-        title="Create Hedge Position"
-        maxWidth="max-w-lg"
-      >
-        <div className="space-y-4">
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">
-              Hedge Type
-            </label>
-            <div className="flex gap-2">
-              {(["Forward", "Option", "Swap"] as HedgeType[]).map((t) => (
-                <button
-                  key={t}
-                  onClick={() => setHedgeType(t)}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${
-                    hedgeType === t
-                      ? "bg-red-600/20 text-red-400 border border-red-500/30"
-                      : "bg-slate-800/50 text-slate-400 border border-slate-700/50 hover:text-white"
-                  }`}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">
-              Currency Pair
-            </label>
-            <select className="w-full rounded-lg bg-slate-800/50 border border-slate-700/50 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-red-500/50">
-              {CURRENCY_PAIRS.map((cp) => (
-                <option key={cp.pair} value={cp.pair}>
-                  {cp.pair}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                Notional Amount
-              </label>
-              <input
-                type="number"
-                placeholder="1,000,000"
-                className="w-full rounded-lg bg-slate-800/50 border border-slate-700/50 px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-1 focus:ring-red-500/50"
-              />
-            </div>
-            <div>
-              <label className="block text-xs font-medium text-slate-400 mb-1.5">
-                Maturity Date
-              </label>
-              <input
-                type="date"
-                className="w-full rounded-lg bg-slate-800/50 border border-slate-700/50 px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-red-500/50"
-              />
-            </div>
-          </div>
-          <div>
-            <label className="block text-xs font-medium text-slate-400 mb-1.5">
-              Direction
-            </label>
-            <div className="flex gap-2">
-              <button className="flex-1 px-3 py-2 rounded-lg bg-emerald-600/20 text-emerald-400 border border-emerald-500/30 text-sm font-medium">
-                Buy
-              </button>
-              <button className="flex-1 px-3 py-2 rounded-lg bg-slate-800/50 text-slate-400 border border-slate-700/50 text-sm font-medium hover:text-white">
-                Sell
-              </button>
-            </div>
-          </div>
-          <div className="flex gap-3 pt-2">
-            <button
-              onClick={() => setShowCreateHedge(false)}
-              className="flex-1 rounded-lg border border-slate-700/50 px-4 py-2.5 text-sm font-medium text-slate-300 hover:bg-slate-700/50 transition-colors"
-            >
-              Cancel
-            </button>
-            <button
-              onClick={() => setShowCreateHedge(false)}
-              className="flex-1 rounded-lg bg-red-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-red-500 transition-colors"
-            >
-              Place Hedge
-            </button>
-          </div>
-        </div>
-      </Modal>
+      <NewHedgeModal
+        open={showCreate}
+        onClose={() => setShowCreate(false)}
+        pairs={pairs}
+        onSubmitted={refetch}
+      />
     </>
   );
 }

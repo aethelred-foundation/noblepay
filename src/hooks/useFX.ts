@@ -1,261 +1,613 @@
 /**
- * FX Hooks — Custom React hooks for NoblePay foreign exchange operations.
+ * FX hedging hooks — real reads and writes against the deployed FXHedgingVault.
  *
- * Provides typed hooks for FX rates with simulated real-time updates,
- * hedge management, and exposure reporting.
+ * The vault hedges a currency pair with either a forward (an obligation, which
+ * must settle at the locked rate) or an option (a right, which may be exercised
+ * or left to expire). Both are collateralised, marked to market, and can be
+ * liquidated once collateral falls below the pair's maintenance margin.
+ *
+ * Unlike the treasury, nothing here needs event scraping: getActivePairs() and
+ * getBusinessPositions() are both enumerable on chain.
+ *
+ * Rates and notionals are 8-decimal fixed point (RATE_PRECISION), which is read
+ * from the contract rather than assumed. Margin figures are basis points.
+ *
+ * Writes go through useSafeWriteContract (GAS-01 buffering).
  */
 
-import { useState, useEffect, useCallback, useRef } from "react";
-import type { FXRate, FXHedge, ExposureReport } from "@/types/defi";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { useAccount } from "wagmi";
+import { useSafeWriteContract } from "./useSafeWriteContract";
+import { useClientRef } from "./useClientRef";
+import { CONTRACT_ADDRESSES } from "@/config/chains";
+import { FX_HEDGING_VAULT_ABI } from "@/config/abis.generated";
+
+const VAULT = CONTRACT_ADDRESSES.fxHedgingVault as `0x${string}`;
+
+/** Fixed-point scale for rates and notionals, confirmed against the contract. */
+export const RATE_DECIMALS = 8;
 
 // ---------------------------------------------------------------------------
-// Mock Data
+// Contract enums — mirrored from FXHedgingVault.sol. These are on-chain uint8
+// values; an entry may not be reordered.
 // ---------------------------------------------------------------------------
 
-const INITIAL_RATES: FXRate[] = [
-  {
-    pair: "USD/AED",
-    rate: 3.6725,
-    change24h: 0.02,
-    bid: 3.672,
-    ask: 3.673,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/GBP",
-    rate: 0.7892,
-    change24h: -0.15,
-    bid: 0.789,
-    ask: 0.7894,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/EUR",
-    rate: 0.9215,
-    change24h: -0.08,
-    bid: 0.9213,
-    ask: 0.9217,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/SGD",
-    rate: 1.3412,
-    change24h: 0.11,
-    bid: 1.341,
-    ask: 1.3414,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/JPY",
-    rate: 149.82,
-    change24h: 0.35,
-    bid: 149.8,
-    ask: 149.84,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "USD/INR",
-    rate: 83.12,
-    change24h: -0.04,
-    bid: 83.1,
-    ask: 83.14,
-    updatedAt: Date.now(),
-  },
-  {
-    pair: "AETHEL/USD",
-    rate: 1.5,
-    change24h: 2.1,
-    bid: 1.49,
-    ask: 1.51,
-    updatedAt: Date.now(),
-  },
-];
+export const HEDGE_TYPE = ["Forward", "Call option", "Put option"] as const;
 
-const MOCK_HEDGES: FXHedge[] = [
-  {
-    id: "hedge-001",
-    fromCurrency: "USD",
-    toCurrency: "AED",
-    notionalAmount: 2_000_000,
-    lockedRate: 3.67,
-    currentRate: 3.6725,
-    unrealizedPnl: 1_362,
-    status: "Active",
-    expiryAt: Date.now() + 30 * 86_400_000,
-    createdAt: Date.now() - 15 * 86_400_000,
-    collateral: 200_000,
-  },
-  {
-    id: "hedge-002",
-    fromCurrency: "USD",
-    toCurrency: "GBP",
-    notionalAmount: 500_000,
-    lockedRate: 0.785,
-    currentRate: 0.7892,
-    unrealizedPnl: -2_673,
-    status: "Active",
-    expiryAt: Date.now() + 60 * 86_400_000,
-    createdAt: Date.now() - 10 * 86_400_000,
-    collateral: 50_000,
-  },
-  {
-    id: "hedge-003",
-    fromCurrency: "USD",
-    toCurrency: "EUR",
-    notionalAmount: 1_000_000,
-    lockedRate: 0.918,
-    currentRate: 0.9215,
-    unrealizedPnl: -3_810,
-    status: "Active",
-    expiryAt: Date.now() + 45 * 86_400_000,
-    createdAt: Date.now() - 20 * 86_400_000,
-    collateral: 100_000,
-  },
-];
+export const POSITION_STATUS = [
+  "Active",
+  "Matured",
+  "Settled",
+  "Exercised",
+  "Expired",
+  "Liquidated",
+  "Emergency unwound",
+] as const;
 
-const MOCK_EXPOSURE: ExposureReport = {
-  totalExposure: 5_500_000,
-  hedgedPercentage: 63.6,
-  unhedgedExposure: 2_000_000,
-  byPair: [
-    {
-      pair: "USD/AED",
-      exposure: 3_000_000,
-      hedged: 2_000_000,
-      unhedged: 1_000_000,
-    },
-    {
-      pair: "USD/GBP",
-      exposure: 1_000_000,
-      hedged: 500_000,
-      unhedged: 500_000,
-    },
-    {
-      pair: "USD/EUR",
-      exposure: 1_500_000,
-      hedged: 1_000_000,
-      unhedged: 500_000,
-    },
-  ],
-  valueAtRisk: 82_500,
-  generatedAt: Date.now(),
-};
+export type HedgeTypeName = (typeof HEDGE_TYPE)[number];
+export type PositionStatusName = (typeof POSITION_STATUS)[number];
+
+/** HedgeType values that are options rather than obligations. */
+export const OPTION_TYPES = [1, 2] as const;
 
 // ---------------------------------------------------------------------------
-// useFX — FX rates, hedges, and exposure
+// Types
+// ---------------------------------------------------------------------------
+
+export interface CurrencyPair {
+  pairId: `0x${string}`;
+  /** Decoded from bytes3, e.g. "AED". */
+  base: string;
+  quote: string;
+  active: boolean;
+  maxHedgeRatioBps: number;
+  marginRequirementBps: number;
+  maintenanceMarginBps: number;
+  /** Latest oracle rate, 8dp. Zero when the oracle has never published. */
+  rate: bigint;
+  rateUpdatedAt: number;
+}
+
+export interface HedgePosition {
+  positionId: `0x${string}`;
+  hedger: `0x${string}`;
+  pairId: `0x${string}`;
+  hedgeType: number;
+  status: number;
+  notionalAmount: bigint;
+  lockedRate: bigint;
+  premium: bigint;
+  collateralToken: `0x${string}`;
+  collateralAmount: bigint;
+  createdAt: number;
+  maturityDate: number;
+  settledAt: number;
+  settlementAmount: bigint;
+  markToMarketValue: bigint;
+  lastMtMUpdate: number;
+  /** Live margin check, read alongside the position. */
+  underMargined: boolean;
+}
+
+export interface Portfolio {
+  totalNotional: bigint;
+  totalCollateral: bigint;
+  totalPremiumPaid: bigint;
+  totalPnL: bigint;
+  unrealizedPnL: bigint;
+  positionCount: number;
+  lastRebalanced: number;
+}
+
+/**
+ * Decode a bytes3 currency code into its ASCII form. The contract stores
+ * "AED" as 0x414544; trailing zero bytes are padding, not characters.
+ */
+export function decodeCurrency(hex: string): string {
+  const body = hex.startsWith("0x") ? hex.slice(2) : hex;
+  let out = "";
+  for (let i = 0; i + 1 < body.length; i += 2) {
+    const code = parseInt(body.slice(i, i + 2), 16);
+    if (code === 0) break;
+    out += String.fromCharCode(code);
+  }
+  return out;
+}
+
+interface RawPair {
+  baseCurrency: `0x${string}`;
+  quoteCurrency: `0x${string}`;
+  pairId: `0x${string}`;
+  active: boolean;
+  maxHedgeRatio: bigint;
+  marginRequirementBps: bigint;
+  maintenanceMarginBps: bigint;
+}
+
+interface RawPosition {
+  positionId: `0x${string}`;
+  hedger: `0x${string}`;
+  pairId: `0x${string}`;
+  hedgeType: number;
+  status: number;
+  notionalAmount: bigint;
+  lockedRate: bigint;
+  premium: bigint;
+  collateralToken: `0x${string}`;
+  collateralAmount: bigint;
+  createdAt: bigint;
+  maturityDate: bigint;
+  settledAt: bigint;
+  settlementAmount: bigint;
+  markToMarketValue: bigint;
+  lastMtMUpdate: bigint;
+}
+
+interface RawPortfolio {
+  totalNotional: bigint;
+  totalCollateral: bigint;
+  totalPremiumPaid: bigint;
+  totalPnL: bigint;
+  unrealizedPnL: bigint;
+  positionCount: bigint;
+  lastRebalanced: bigint;
+}
+
+// ---------------------------------------------------------------------------
+// useCurrencyPairs
+// ---------------------------------------------------------------------------
+
+export function useCurrencyPairs(): {
+  pairs: CurrencyPair[];
+  isLoading: boolean;
+  error: Error | null;
+  refetch: () => void;
+} {
+  const { ref: clientRef, ready } = useClientRef();
+  const [pairs, setPairs] = useState<CurrencyPair[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    const publicClient = clientRef.current;
+    if (!publicClient || !VAULT) return;
+    let cancelled = false;
+    (async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const ids = (await publicClient.readContract({
+          address: VAULT,
+          abi: FX_HEDGING_VAULT_ABI,
+          functionName: "getActivePairs",
+        })) as readonly `0x${string}`[];
+
+        const out = await Promise.all(
+          ids.map(async (pairId) => {
+            const pair = (await publicClient.readContract({
+              address: VAULT,
+              abi: FX_HEDGING_VAULT_ABI,
+              functionName: "getCurrencyPair",
+              args: [pairId],
+            })) as RawPair;
+
+            // A pair with no published rate is normal, not an error: the
+            // oracle may simply not have submitted yet. Surface it as a zero
+            // rate so the UI can say so rather than fail the whole read.
+            let rate = 0n;
+            let updatedAt = 0n;
+            try {
+              const latest = (await publicClient.readContract({
+                address: VAULT,
+                abi: FX_HEDGING_VAULT_ABI,
+                functionName: "getLatestRate",
+                args: [pairId],
+              })) as readonly [bigint, bigint];
+              rate = latest[0];
+              updatedAt = latest[1];
+            } catch {
+              /* no rate published */
+            }
+
+            return {
+              pairId,
+              base: decodeCurrency(pair.baseCurrency),
+              quote: decodeCurrency(pair.quoteCurrency),
+              active: pair.active,
+              maxHedgeRatioBps: Number(pair.maxHedgeRatio),
+              marginRequirementBps: Number(pair.marginRequirementBps),
+              maintenanceMarginBps: Number(pair.maintenanceMarginBps),
+              rate,
+              rateUpdatedAt: Number(updatedAt) * 1000,
+            } satisfies CurrencyPair;
+          }),
+        );
+        if (!cancelled) setPairs(out);
+      } catch (err) {
+        if (!cancelled) setError(err as Error);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [clientRef, ready, nonce]);
+
+  const refetch = useCallback(() => setNonce((n) => n + 1), []);
+  return { pairs, isLoading, error, refetch };
+}
+
+// ---------------------------------------------------------------------------
+// useMyPositions
+// ---------------------------------------------------------------------------
+
+export function useMyPositions(): {
+  positions: HedgePosition[];
+  isLoading: boolean;
+  error: Error | null;
+  refetch: () => void;
+} {
+  const { address } = useAccount();
+  const { ref: clientRef, ready } = useClientRef();
+  const [positions, setPositions] = useState<HedgePosition[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    const publicClient = clientRef.current;
+    if (!publicClient || !VAULT || !address) {
+      setPositions([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const ids = (await publicClient.readContract({
+          address: VAULT,
+          abi: FX_HEDGING_VAULT_ABI,
+          functionName: "getBusinessPositions",
+          args: [address],
+        })) as readonly `0x${string}`[];
+
+        const out = await Promise.all(
+          ids.map(async (positionId) => {
+            const [raw, underMargined] = await Promise.all([
+              publicClient.readContract({
+                address: VAULT,
+                abi: FX_HEDGING_VAULT_ABI,
+                functionName: "getPosition",
+                args: [positionId],
+              }) as Promise<RawPosition>,
+              publicClient
+                .readContract({
+                  address: VAULT,
+                  abi: FX_HEDGING_VAULT_ABI,
+                  functionName: "isUnderMargined",
+                  args: [positionId],
+                })
+                .catch(() => false) as Promise<boolean>,
+            ]);
+            return {
+              positionId,
+              hedger: raw.hedger,
+              pairId: raw.pairId,
+              hedgeType: Number(raw.hedgeType),
+              status: Number(raw.status),
+              notionalAmount: raw.notionalAmount,
+              lockedRate: raw.lockedRate,
+              premium: raw.premium,
+              collateralToken: raw.collateralToken,
+              collateralAmount: raw.collateralAmount,
+              createdAt: Number(raw.createdAt) * 1000,
+              maturityDate: Number(raw.maturityDate) * 1000,
+              settledAt: Number(raw.settledAt) * 1000,
+              settlementAmount: raw.settlementAmount,
+              markToMarketValue: raw.markToMarketValue,
+              lastMtMUpdate: Number(raw.lastMtMUpdate) * 1000,
+              underMargined: Boolean(underMargined),
+            } satisfies HedgePosition;
+          }),
+        );
+        if (!cancelled) setPositions(out.reverse());
+      } catch (err) {
+        if (!cancelled) setError(err as Error);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [clientRef, ready, address, nonce]);
+
+  const refetch = useCallback(() => setNonce((n) => n + 1), []);
+  return { positions, isLoading, error, refetch };
+}
+
+// ---------------------------------------------------------------------------
+// usePortfolio
+// ---------------------------------------------------------------------------
+
+export function usePortfolio(): {
+  portfolio: Portfolio | null;
+  isLoading: boolean;
+  error: Error | null;
+  refetch: () => void;
+} {
+  const { address } = useAccount();
+  const { ref: clientRef, ready } = useClientRef();
+  const [portfolio, setPortfolio] = useState<Portfolio | null>(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+  const [nonce, setNonce] = useState(0);
+
+  useEffect(() => {
+    const publicClient = clientRef.current;
+    if (!publicClient || !VAULT || !address) {
+      setPortfolio(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const raw = (await publicClient.readContract({
+          address: VAULT,
+          abi: FX_HEDGING_VAULT_ABI,
+          functionName: "getPortfolio",
+          args: [address],
+        })) as RawPortfolio;
+        if (!cancelled) {
+          setPortfolio({
+            totalNotional: raw.totalNotional,
+            totalCollateral: raw.totalCollateral,
+            totalPremiumPaid: raw.totalPremiumPaid,
+            totalPnL: raw.totalPnL,
+            unrealizedPnL: raw.unrealizedPnL,
+            positionCount: Number(raw.positionCount),
+            lastRebalanced: Number(raw.lastRebalanced) * 1000,
+          });
+        }
+      } catch (err) {
+        if (!cancelled) setError(err as Error);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [clientRef, ready, address, nonce]);
+
+  const refetch = useCallback(() => setNonce((n) => n + 1), []);
+  return { portfolio, isLoading, error, refetch };
+}
+
+// ---------------------------------------------------------------------------
+// Writes
+// ---------------------------------------------------------------------------
+
+export interface CreateForwardInput {
+  pairId: `0x${string}`;
+  /** Base-currency notional, 8dp. */
+  notionalAmount: bigint;
+  /** Unix seconds. */
+  maturityDate: bigint;
+  collateralToken: `0x${string}`;
+  collateralAmount: bigint;
+}
+
+export interface CreateOptionInput extends CreateForwardInput {
+  /** 1 = call, 2 = put. Forwards use createForward instead. */
+  hedgeType: number;
+  strikeRate: bigint;
+  premium: bigint;
+}
+
+export function useFXActions() {
+  const { writeContractAsync } = useSafeWriteContract();
+  const [pending, setPending] = useState<string | null>(null);
+
+  const call = useCallback(
+    async (label: string, functionName: string, args: readonly unknown[]) => {
+      setPending(label);
+      try {
+        return await writeContractAsync({
+          address: VAULT,
+          abi: FX_HEDGING_VAULT_ABI,
+          functionName,
+          args,
+        });
+      } finally {
+        setPending(null);
+      }
+    },
+    [writeContractAsync],
+  );
+
+  const createForward = useCallback(
+    (input: CreateForwardInput) =>
+      call("createForward", "createForward", [
+        input.pairId,
+        input.notionalAmount,
+        input.maturityDate,
+        input.collateralToken,
+        input.collateralAmount,
+      ]),
+    [call],
+  );
+
+  const createOption = useCallback(
+    (input: CreateOptionInput) =>
+      call("createOption", "createOption", [
+        input.pairId,
+        input.hedgeType,
+        input.notionalAmount,
+        input.strikeRate,
+        input.premium,
+        input.maturityDate,
+        input.collateralToken,
+        input.collateralAmount,
+      ]),
+    [call],
+  );
+
+  const settleForward = useCallback(
+    (id: `0x${string}`) => call("settle", "settleForward", [id]),
+    [call],
+  );
+  const exerciseOption = useCallback(
+    (id: `0x${string}`) => call("exercise", "exerciseOption", [id]),
+    [call],
+  );
+  const expireOption = useCallback(
+    (id: `0x${string}`) => call("expire", "expireOption", [id]),
+    [call],
+  );
+  const addMargin = useCallback(
+    (id: `0x${string}`, amount: bigint) => call("margin", "addMargin", [id, amount]),
+    [call],
+  );
+  const updateMarkToMarket = useCallback(
+    (id: `0x${string}`) => call("mtm", "updateMarkToMarket", [id]),
+    [call],
+  );
+
+  return {
+    createForward,
+    createOption,
+    settleForward,
+    exerciseOption,
+    expireOption,
+    addMargin,
+    updateMarkToMarket,
+    pending,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// useRateHistory — the oracle's published rates for one pair, over time
+// ---------------------------------------------------------------------------
+
+export interface RatePoint {
+  rate: bigint;
+  timestamp: number;
+  oracle: `0x${string}`;
+}
+
+/**
+ * Rate history is reconstructed from FXRateUpdated events, so it shows exactly
+ * what the oracle published and nothing more. A pair the oracle has updated
+ * once yields a single point — that is a real answer, not a gap to fill with
+ * interpolation.
+ */
+export function useRateHistory(pairId?: `0x${string}`): {
+  history: RatePoint[];
+  isLoading: boolean;
+  error: Error | null;
+} {
+  const { ref: clientRef, ready } = useClientRef();
+  const [history, setHistory] = useState<RatePoint[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [error, setError] = useState<Error | null>(null);
+
+  useEffect(() => {
+    const publicClient = clientRef.current;
+    if (!publicClient || !VAULT || !pairId) {
+      setHistory([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setIsLoading(true);
+      setError(null);
+      try {
+        const logs = await publicClient.getContractEvents({
+          address: VAULT,
+          abi: FX_HEDGING_VAULT_ABI,
+          eventName: "FXRateUpdated",
+          args: { pairId },
+          fromBlock: 0n,
+          toBlock: "latest",
+        });
+        const seen = new Set<string>();
+        const points: RatePoint[] = [];
+        for (const log of logs) {
+          const key = `${log.transactionHash ?? ""}:${log.logIndex ?? ""}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          const a = log.args as {
+            rate?: bigint;
+            timestamp?: bigint;
+            oracle?: `0x${string}`;
+          };
+          points.push({
+            rate: a.rate ?? 0n,
+            timestamp: Number(a.timestamp ?? 0n) * 1000,
+            oracle: a.oracle ?? "0x",
+          });
+        }
+        points.sort((a, b) => a.timestamp - b.timestamp);
+        if (!cancelled) setHistory(points);
+      } catch (err) {
+        if (!cancelled) setError(err as Error);
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [clientRef, ready, pairId]);
+
+  return { history, isLoading, error };
+}
+
+// ---------------------------------------------------------------------------
+// Composite view
 // ---------------------------------------------------------------------------
 
 export function useFX() {
-  const [rates, setRates] = useState<FXRate[]>([]);
-  const [hedges, setHedges] = useState<FXHedge[]>([]);
-  const [exposure, setExposure] = useState<ExposureReport | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const pairsState = useCurrencyPairs();
+  const positionsState = useMyPositions();
+  const portfolioState = usePortfolio();
 
-  // Initial load
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setRates(INITIAL_RATES);
-      setHedges(MOCK_HEDGES);
-      setExposure(MOCK_EXPOSURE);
-      setIsLoading(false);
-    }, 500);
-    return () => clearTimeout(timer);
-  }, []);
+  const pairsById = useMemo(() => {
+    const map = new Map<string, CurrencyPair>();
+    for (const p of pairsState.pairs) map.set(p.pairId.toLowerCase(), p);
+    return map;
+  }, [pairsState.pairs]);
 
-  // Simulated real-time rate updates every 3 seconds
-  useEffect(() => {
-    if (rates.length === 0) return;
-
-    intervalRef.current = setInterval(() => {
-      setRates((prev) =>
-        prev.map((r) => {
-          // Random walk: +/- 0.01% to 0.05%
-          const delta = (Math.random() - 0.5) * 0.001 * r.rate;
-          const newRate = Math.max(0.0001, r.rate + delta);
-          const spread = r.ask - r.bid;
-          return {
-            ...r,
-            rate: Number(newRate.toFixed(4)),
-            bid: Number((newRate - spread / 2).toFixed(4)),
-            ask: Number((newRate + spread / 2).toFixed(4)),
-            change24h: Number(
-              (r.change24h + (Math.random() - 0.5) * 0.02).toFixed(2),
-            ),
-            updatedAt: Date.now(),
-          };
-        }),
-      );
-    }, 3000);
-
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
-    };
-  }, [rates.length]);
-
-  // Update hedge PnL when rates change
-  useEffect(() => {
-    if (rates.length === 0 || hedges.length === 0) return;
-
-    setHedges((prev) =>
-      prev.map((h) => {
-        const pair = `${h.fromCurrency}/${h.toCurrency}`;
-        const currentRate = rates.find((r) => r.pair === pair);
-        if (!currentRate) return h;
-        const pnl = (currentRate.rate - h.lockedRate) * h.notionalAmount;
-        return {
-          ...h,
-          currentRate: currentRate.rate,
-          unrealizedPnl: Number(pnl.toFixed(2)),
-        };
-      }),
-    );
-  }, [rates, hedges.length]);
-
-  const createHedge = useCallback(
-    (params: {
-      fromCurrency: string;
-      toCurrency: string;
-      notionalAmount: number;
-      collateral: number;
-      durationDays: number;
-    }) => {
-      const pair = `${params.fromCurrency}/${params.toCurrency}`;
-      const currentRate = rates.find((r) => r.pair === pair);
-      const rate = currentRate?.rate || 1;
-
-      const newHedge: FXHedge = {
-        id: `hedge-${String(Date.now()).slice(-6)}`,
-        fromCurrency: params.fromCurrency,
-        toCurrency: params.toCurrency,
-        notionalAmount: params.notionalAmount,
-        lockedRate: rate,
-        currentRate: rate,
-        unrealizedPnl: 0,
-        status: "Active",
-        expiryAt: Date.now() + params.durationDays * 86_400_000,
-        createdAt: Date.now(),
-        collateral: params.collateral,
-      };
-      setHedges((prev) => [newHedge, ...prev]);
-    },
-    [rates],
+  /** Positions that are still open and have fallen below maintenance margin. */
+  const atRisk = useMemo(
+    () =>
+      positionsState.positions.filter(
+        (p) => POSITION_STATUS[p.status] === "Active" && p.underMargined,
+      ),
+    [positionsState.positions],
   );
 
-  const closeHedge = useCallback((hedgeId: string) => {
-    setHedges((prev) =>
-      prev.map((h) =>
-        h.id === hedgeId ? { ...h, status: "Settled" as const } : h,
-      ),
-    );
-  }, []);
+  const refetch = useCallback(() => {
+    pairsState.refetch();
+    positionsState.refetch();
+    portfolioState.refetch();
+  }, [pairsState, positionsState, portfolioState]);
 
   return {
-    rates,
-    hedges,
-    exposure,
-    isLoading,
-    createHedge,
-    closeHedge,
+    pairs: pairsState.pairs,
+    pairsById,
+    positions: positionsState.positions,
+    portfolio: portfolioState.portfolio,
+    atRisk,
+    isLoading:
+      pairsState.isLoading || positionsState.isLoading || portfolioState.isLoading,
+    error: pairsState.error ?? positionsState.error ?? portfolioState.error,
+    refetch,
   };
 }
