@@ -144,6 +144,18 @@ export const CONTRACT_ADDRESSES = {
   liquidityPool: process.env.NEXT_PUBLIC_LIQUIDITY_POOL_ADDRESS || "",
   /** Tiered multi-signature treasury (proposals, budgets, timelocks) */
   multisigTreasury: process.env.NEXT_PUBLIC_MULTISIG_TREASURY_ADDRESS || "",
+  /** Forward and option FX hedging positions against currency pairs */
+  fxHedgingVault: process.env.NEXT_PUBLIC_FX_HEDGING_VAULT_ADDRESS || "",
+  /** Invoice tokenisation, funding and repayment */
+  invoiceFinancing: process.env.NEXT_PUBLIC_INVOICE_FINANCING_ADDRESS || "",
+  /** Bidirectional off-chain payment channels with on-chain settlement */
+  paymentChannels: process.env.NEXT_PUBLIC_PAYMENT_CHANNELS_ADDRESS || "",
+  /** Continuous per-second payment streams */
+  streamingPayments: process.env.NEXT_PUBLIC_STREAMING_PAYMENTS_ADDRESS || "",
+  /** Cross-chain transfer routing and message passing */
+  crossChainRouter: process.env.NEXT_PUBLIC_CROSS_CHAIN_ROUTER_ADDRESS || "",
+  /** Model-scored transaction risk and compliance decisions */
+  aiCompliance: process.env.NEXT_PUBLIC_AI_COMPLIANCE_ADDRESS || "",
 } as const;
 
 /**

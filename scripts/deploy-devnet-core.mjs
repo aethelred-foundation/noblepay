@@ -182,7 +182,66 @@ async function deployLiquidityStack() {
   console.log(`NEXT_PUBLIC_USDT_TOKEN_ADDRESS=${usdt}`);
 }
 
+/**
+ * --services: deploys the eight feature contracts behind the remaining
+ * NoblePay pages.
+ *
+ * All eight take an admin, and the three that charge a protocol fee also take
+ * a treasury and a fee in basis points. The fees below sit well inside each
+ * contract's own ceiling rather than at it: FXHedgingVault reverts above 500,
+ * InvoiceFinancing above 1000, PaymentChannels above 500. They are devnet
+ * defaults — a production deploy must set them deliberately, since these are
+ * commercial terms rather than configuration.
+ *
+ * Admin and treasury both default to the deployer because a devnet has no
+ * separate governance. That is precisely the substitution a production deploy
+ * must not make; SERVICE_TREASURY_ADDRESS overrides the treasury half.
+ */
+async function deployServiceContracts() {
+  const admin = account.address;
+  const treasury = process.env.SERVICE_TREASURY_ADDRESS ?? account.address;
+
+  const FX_SETTLEMENT_FEE_BPS = 25n; // 0.25%, ceiling 500
+  const INVOICE_PROTOCOL_FEE_BPS = 50n; // 0.50%, ceiling 1000
+  const CHANNEL_PROTOCOL_FEE_BPS = 10n; // 0.10%, ceiling 500
+
+  const complianceOracle = await deploy("ComplianceOracle", [admin]);
+  const travelRule = await deploy("TravelRule", [admin]);
+  const aiCompliance = await deploy("AIComplianceModule", [admin]);
+  const streaming = await deploy("StreamingPayments", [admin]);
+  const crossChain = await deploy("CrossChainRouter", [admin, treasury]);
+  const fxHedging = await deploy("FXHedgingVault", [
+    admin,
+    treasury,
+    FX_SETTLEMENT_FEE_BPS,
+  ]);
+  const invoiceFinancing = await deploy("InvoiceFinancing", [
+    admin,
+    treasury,
+    INVOICE_PROTOCOL_FEE_BPS,
+  ]);
+  const paymentChannels = await deploy("PaymentChannels", [
+    admin,
+    treasury,
+    CHANNEL_PROTOCOL_FEE_BPS,
+  ]);
+
+  console.log("\n== NoblePay web .env.local block (service contracts)");
+  console.log(`NEXT_PUBLIC_COMPLIANCE_ORACLE_ADDRESS=${complianceOracle}`);
+  console.log(`NEXT_PUBLIC_TRAVEL_RULE_ADDRESS=${travelRule}`);
+  console.log(`NEXT_PUBLIC_AI_COMPLIANCE_ADDRESS=${aiCompliance}`);
+  console.log(`NEXT_PUBLIC_STREAMING_PAYMENTS_ADDRESS=${streaming}`);
+  console.log(`NEXT_PUBLIC_CROSS_CHAIN_ROUTER_ADDRESS=${crossChain}`);
+  console.log(`NEXT_PUBLIC_FX_HEDGING_VAULT_ADDRESS=${fxHedging}`);
+  console.log(`NEXT_PUBLIC_INVOICE_FINANCING_ADDRESS=${invoiceFinancing}`);
+  console.log(`NEXT_PUBLIC_PAYMENT_CHANNELS_ADDRESS=${paymentChannels}`);
+}
+
 async function main() {
+  if (process.argv.includes("--services")) {
+    await deployServiceContracts();
+    return;
+  }
   if (process.argv.includes("--multisig")) {
     await deployMultiSigTreasury();
     return;
