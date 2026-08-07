@@ -150,10 +150,27 @@ function formatAmount(n: number, symbol: string): string {
               // rounded to a whole unit.
               n.toFixed(2)
             : // Below one unit, two places would round most balances to 0.00,
-              // so show six and drop only the padding zeros.
-              n.toFixed(6).replace(/\.?0+$/, "");
+              // so show six and drop only the padding zeros. A non-zero amount
+              // that still rounds away must not render as a flat "0" — dust is
+              // not nothing, and on a treasury screen the difference matters.
+              n === 0
+              ? "0"
+              : abs < 0.000001
+                ? "<0.000001"
+                : n.toFixed(6).replace(/\.?0+$/, "");
   return symbol ? `${body} ${symbol}` : body;
 }
+
+/**
+ * The contract's tier thresholds (SMALL_TX_THRESHOLD = 10_000 * 1e6) are
+ * written as USD at six decimal places, but createProposal compares the raw
+ * `_amount` against them — the same value it later passes to safeTransfer.
+ * The comparison is therefore only meaningful for a $1-pegged six-decimal
+ * token such as USDC. For any other asset the tier is computed from a number
+ * in that token's own units, so the approval requirement does not correspond
+ * to the value being moved. The UI must not present it as though it does.
+ */
+const TIER_REFERENCE_DECIMALS = USD_DECIMALS;
 
 function formatUSD(n: number): string {
   if (n >= 1_000_000_000) return `$${(n / 1_000_000_000).toFixed(2)}B`;
@@ -664,6 +681,11 @@ function ProposalDetail({
                 <span className="ml-1 text-xs text-amber-400">emergency</span>
               )}
             </p>
+            {!proposal.isEmergency && asset.decimals !== TIER_REFERENCE_DECIMALS && (
+              <p className="mt-0.5 text-xs text-amber-400/90">
+                derived from raw units, not value
+              </p>
+            )}
           </div>
           <div>
             <p className="text-xs text-slate-400">Recipient</p>
@@ -1218,6 +1240,17 @@ export default function TreasuryPage() {
                     title="Approval matrix"
                     subtitle="Read from the contract's own thresholds and timelocks"
                   />
+                  <p className="mt-2 text-xs text-amber-400/90 flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 mt-0.5 flex-shrink-0" />
+                    <span>
+                      The contract compares a proposal&apos;s raw amount against
+                      these bounds, so they only read as US dollars for a
+                      six-decimal, dollar-pegged token such as USDC. For any
+                      other asset, native {NATIVE_SYMBOL} included, the tier is
+                      derived from that token&apos;s own units and does not
+                      track the value being moved.
+                    </span>
+                  </p>
                   <div className="mt-4 overflow-x-auto">
                     {tiers.length === 0 ? (
                       <p className="text-xs text-slate-500 py-2">
@@ -1228,7 +1261,7 @@ export default function TreasuryPage() {
                         <thead>
                           <tr className="text-xs text-slate-400 border-b border-slate-800">
                             <th className="text-left pb-2">Tier</th>
-                            <th className="text-left pb-2">Range (USD)</th>
+                            <th className="text-left pb-2">Amount bound</th>
                             <th className="text-right pb-2">Signatures</th>
                             <th className="text-right pb-2">Timelock</th>
                           </tr>
@@ -1240,10 +1273,12 @@ export default function TreasuryPage() {
                               <td className="py-2 text-slate-300 text-xs">
                                 {t.tier === "Emergency"
                                   ? "any (flagged)"
-                                  : `${formatUSD(toNumber(t.minAmount, USD_DECIMALS))} – ${
+                                  : `${formatUSD(toNumber(t.minAmount, TIER_REFERENCE_DECIMALS))} – ${
                                       t.maxAmount === null
                                         ? "∞"
-                                        : formatUSD(toNumber(t.maxAmount, USD_DECIMALS))
+                                        : formatUSD(
+                                            toNumber(t.maxAmount, TIER_REFERENCE_DECIMALS),
+                                          )
                                     }`}
                               </td>
                               <td className="py-2 text-right text-white">

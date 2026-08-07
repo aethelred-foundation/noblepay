@@ -315,6 +315,51 @@ describe("proposal authority", () => {
   });
 });
 
+describe("amount and tier honesty", () => {
+  /**
+   * MultiSigTreasury.createProposal compares the raw `_amount` against
+   * SMALL_TX_THRESHOLD (10_000 * 1e6, written as USD at six decimals) and then
+   * passes that same value straight to safeTransfer. The tier therefore only
+   * means "US dollars" for a six-decimal, dollar-pegged token. For an
+   * 18-decimal asset the number is wei, and the approval requirement stops
+   * tracking the value being moved. The UI must not launder that into a
+   * confident dollar range.
+   */
+  it("warns that tier bounds are not dollars for other assets", () => {
+    render(<TreasuryPage />);
+    expect(
+      screen.getByText(/only read as US dollars for a/i),
+    ).toBeInTheDocument();
+  });
+
+  it("labels a tier derived from a non-six-decimal asset", () => {
+    render(<TreasuryPage />);
+    fireEvent.click(screen.getByText(/Proposals \(1\)/));
+    fireEvent.click(screen.getByText("Fund the compliance node"));
+    expect(screen.getByText(/derived from raw units, not value/i)).toBeInTheDocument();
+  });
+
+  it("does not render a non-zero dust amount as plain zero", () => {
+    // 5e10 wei of an 18-decimal asset is 0.00000005 — real, but it rounds
+    // away at six places. Showing "0 AETHEL" for a live proposal would be a
+    // lie about a transfer that will actually move funds.
+    mockTreasuryState.treasury = defaultTreasury({
+      proposals: [proposal({ amount: 50_000_000_000n })],
+    });
+    render(<TreasuryPage />);
+    fireEvent.click(screen.getByText(/Proposals \(1\)/));
+    expect(screen.getByText(/<0\.000001 AETHEL/)).toBeInTheDocument();
+  });
+
+  it("renders an exact zero as zero", () => {
+    mockTreasuryState.treasury = defaultTreasury({
+      summary: { ...defaultTreasury().summary, nativeBalance: 0n },
+    });
+    render(<TreasuryPage />);
+    expect(screen.getByText(/^0 AETHEL$/)).toBeInTheDocument();
+  });
+});
+
 describe("new proposal form", () => {
   const openForm = () => {
     render(<TreasuryPage />);
