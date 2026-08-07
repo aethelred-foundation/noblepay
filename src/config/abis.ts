@@ -362,3 +362,646 @@ export const TRAVEL_RULE_ABI = [
     ],
   },
 ] as const;
+
+// ---------------------------------------------------------------------------
+// ERC-20 (approve/allowance surface used by the liquidity flows)
+// ---------------------------------------------------------------------------
+
+export const ERC20_ABI = [
+  {
+    name: "approve",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "spender", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
+    outputs: [{ name: "", type: "bool" }],
+  },
+  {
+    name: "allowance",
+    type: "function",
+    stateMutability: "view",
+    inputs: [
+      { name: "owner", type: "address" },
+      { name: "spender", type: "address" },
+    ],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    name: "balanceOf",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    name: "decimals",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "uint8" }],
+  },
+  {
+    name: "symbol",
+    type: "function",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "string" }],
+  },
+] as const;
+
+// ---------------------------------------------------------------------------
+// LiquidityPool — mirrors contracts/src/LiquidityPool.sol
+// ---------------------------------------------------------------------------
+
+export const LIQUIDITY_POOL_ABI = [
+  // --- Views ---
+  {
+    name: "getPool",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "_poolId", type: "bytes32" }],
+    outputs: [
+      {
+        type: "tuple",
+        components: [
+          { name: "token0", type: "address" },
+          { name: "token1", type: "address" },
+          { name: "reserveToken0", type: "uint256" },
+          { name: "reserveToken1", type: "uint256" },
+          { name: "totalLiquidity", type: "uint256" },
+          { name: "feeRateBP", type: "uint256" },
+          { name: "flashFeeRateBP", type: "uint256" },
+          { name: "currentTick", type: "int24" },
+          { name: "createdAt", type: "uint256" },
+          { name: "active", type: "bool" },
+        ],
+      },
+    ],
+  },
+  {
+    name: "getPosition",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "_positionId", type: "bytes32" }],
+    outputs: [
+      {
+        type: "tuple",
+        components: [
+          { name: "provider", type: "address" },
+          { name: "amountToken0", type: "uint256" },
+          { name: "amountToken1", type: "uint256" },
+          { name: "tickLower", type: "int24" },
+          { name: "tickUpper", type: "int24" },
+          { name: "feesEarnedToken0", type: "uint256" },
+          { name: "feesEarnedToken1", type: "uint256" },
+          { name: "createdAt", type: "uint256" },
+          { name: "lastUpdatedAt", type: "uint256" },
+          { name: "active", type: "bool" },
+        ],
+      },
+    ],
+  },
+  {
+    name: "getPoolTVL",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "_poolId", type: "bytes32" }],
+    outputs: [
+      { name: "token0", type: "uint256" },
+      { name: "token1", type: "uint256" },
+    ],
+  },
+  {
+    name: "getPoolUtilization",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "_poolId", type: "bytes32" }],
+    outputs: [{ name: "ratioBP", type: "uint256" }],
+  },
+  {
+    name: "getPoolHealth",
+    type: "function",
+    stateMutability: "view",
+    inputs: [{ name: "_poolId", type: "bytes32" }],
+    outputs: [{ name: "", type: "uint8" }],
+  },
+  // --- Writes ---
+  {
+    name: "addLiquidity",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "_poolId", type: "bytes32" },
+      { name: "_amountToken0", type: "uint256" },
+      { name: "_amountToken1", type: "uint256" },
+      { name: "_tickLower", type: "int24" },
+      { name: "_tickUpper", type: "int24" },
+    ],
+    outputs: [{ name: "positionId", type: "bytes32" }],
+  },
+  {
+    name: "removeLiquidity",
+    type: "function",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "_poolId", type: "bytes32" },
+      { name: "_positionId", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+  // --- Events ---
+  {
+    name: "PoolCreated",
+    type: "event",
+    inputs: [
+      { name: "poolId", type: "bytes32", indexed: true },
+      { name: "token0", type: "address", indexed: true },
+      { name: "token1", type: "address", indexed: true },
+      { name: "feeRateBP", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    name: "LiquidityAdded",
+    type: "event",
+    inputs: [
+      { name: "positionId", type: "bytes32", indexed: true },
+      { name: "poolId", type: "bytes32", indexed: true },
+      { name: "provider", type: "address", indexed: true },
+      { name: "amountToken0", type: "uint256", indexed: false },
+      { name: "amountToken1", type: "uint256", indexed: false },
+      { name: "tickLower", type: "int24", indexed: false },
+      { name: "tickUpper", type: "int24", indexed: false },
+    ],
+  },
+  {
+    name: "LiquidityRemoved",
+    type: "event",
+    inputs: [
+      { name: "positionId", type: "bytes32", indexed: true },
+      { name: "poolId", type: "bytes32", indexed: true },
+      { name: "provider", type: "address", indexed: true },
+      { name: "amountToken0", type: "uint256", indexed: false },
+      { name: "amountToken1", type: "uint256", indexed: false },
+    ],
+  },
+] as const;
+
+// ---------------------------------------------------------------------------
+// MultiSigTreasury — generated from
+// contracts/artifacts/src/MultiSigTreasury.sol/MultiSigTreasury.json.
+//
+// Generated rather than hand-written on purpose: a hand-maintained tuple that
+// drifts from the deployed struct decodes silently wrong (see the TerraQura
+// getMetadata incident). Regenerate with scripts/gen-multisig-abi.mjs after any
+// contract change.
+//
+// Approval tiers are amount-based and 6-decimal denominated (USDC/USDT):
+//   <= SMALL_TX_THRESHOLD (10,000)   -> smallThreshold approvals
+//   <= LARGE_TX_THRESHOLD (100,000)  -> mediumThreshold approvals
+//    > LARGE_TX_THRESHOLD            -> largeThreshold approvals + 48h timelock
+// ---------------------------------------------------------------------------
+
+export const MULTISIG_TREASURY_ABI = [
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "proposalId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "signer",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "approvalCount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "required",
+        "type": "uint256"
+      }
+    ],
+    "name": "ProposalApproved",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "proposalId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "proposer",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "recipient",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum MultiSigTreasury.TxTier",
+        "name": "tier",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "isEmergency",
+        "type": "bool"
+      }
+    ],
+    "name": "ProposalCreated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "bytes32",
+        "name": "proposalId",
+        "type": "bytes32"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "executor",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "executedAt",
+        "type": "uint256"
+      }
+    ],
+    "name": "ProposalExecuted",
+    "type": "event"
+  },
+  {
+    "inputs": [],
+    "name": "ADMIN_ROLE",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "LARGE_TX_THRESHOLD",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "SIGNER_ROLE",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "SMALL_TX_THRESHOLD",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_proposalId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "approveProposal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_proposalId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "cancelProposal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "_recipient",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "_token",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "_amount",
+        "type": "uint256"
+      },
+      {
+        "internalType": "enum MultiSigTreasury.SpendingCategory",
+        "name": "_category",
+        "type": "uint8"
+      },
+      {
+        "internalType": "string",
+        "name": "_description",
+        "type": "string"
+      },
+      {
+        "internalType": "bool",
+        "name": "_isEmergency",
+        "type": "bool"
+      },
+      {
+        "internalType": "bytes32",
+        "name": "_budgetId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "createProposal",
+    "outputs": [
+      {
+        "internalType": "bytes32",
+        "name": "proposalId",
+        "type": "bytes32"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_proposalId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "executeProposal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_proposalId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "getProposal",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "bytes32",
+            "name": "proposalId",
+            "type": "bytes32"
+          },
+          {
+            "internalType": "address",
+            "name": "proposer",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "recipient",
+            "type": "address"
+          },
+          {
+            "internalType": "address",
+            "name": "token",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "amount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "enum MultiSigTreasury.SpendingCategory",
+            "name": "category",
+            "type": "uint8"
+          },
+          {
+            "internalType": "string",
+            "name": "description",
+            "type": "string"
+          },
+          {
+            "internalType": "enum MultiSigTreasury.TxTier",
+            "name": "tier",
+            "type": "uint8"
+          },
+          {
+            "internalType": "enum MultiSigTreasury.ProposalStatus",
+            "name": "status",
+            "type": "uint8"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvalCount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "rejectionCount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "requiredApprovals",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "createdAt",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "timelockExpiry",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "expiresAt",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bool",
+            "name": "isEmergency",
+            "type": "bool"
+          },
+          {
+            "internalType": "bytes32",
+            "name": "budgetId",
+            "type": "bytes32"
+          }
+        ],
+        "internalType": "struct MultiSigTreasury.Proposal",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "role",
+        "type": "bytes32"
+      },
+      {
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      }
+    ],
+    "name": "hasRole",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "bytes32",
+        "name": "_proposalId",
+        "type": "bytes32"
+      }
+    ],
+    "name": "rejectProposal",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "signerConfig",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "totalSigners",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "smallThreshold",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "mediumThreshold",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "largeThreshold",
+        "type": "uint256"
+      },
+      {
+        "internalType": "uint256",
+        "name": "emergencyThreshold",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "name": "signers",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+] as const;

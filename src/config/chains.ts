@@ -140,6 +140,10 @@ export const CONTRACT_ADDRESSES = {
   usdtToken: process.env.NEXT_PUBLIC_USDT_TOKEN_ADDRESS || "",
   /** Native AETHEL token (ERC-20 wrapper) */
   aethelToken: process.env.NEXT_PUBLIC_AETHEL_TOKEN_ADDRESS || "",
+  /** Concentrated-liquidity pool for stablecoin pairs */
+  liquidityPool: process.env.NEXT_PUBLIC_LIQUIDITY_POOL_ADDRESS || "",
+  /** Tiered multi-signature treasury (proposals, budgets, timelocks) */
+  multisigTreasury: process.env.NEXT_PUBLIC_MULTISIG_TREASURY_ADDRESS || "",
 } as const;
 
 /**

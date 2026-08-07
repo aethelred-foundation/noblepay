@@ -63,7 +63,134 @@ async function deploy(name, args) {
   return receipt.contractAddress;
 }
 
+/**
+ * --multisig: deploys MultiSigTreasury.
+ *
+ * The constructor encodes a governance decision, not a devnet default: who
+ * administers the treasury, which addresses may sign, and how many approvals
+ * each spend tier needs. Everything is therefore env-configurable, with a
+ * documented 3-signer devnet default so the contract can be exercised locally.
+ *
+ * Approval tiers are amount-based, denominated in 6 decimals (USDC/USDT):
+ *   <= 10,000    SMALL    smallThreshold approvals,   standard timelock
+ *   <= 100,000   MEDIUM   mediumThreshold approvals,  standard timelock
+ *    > 100,000   LARGE    largeThreshold approvals,   48h timelock
+ *
+ * Constructor invariants (enforced on-chain; pre-validated here so a bad
+ * config fails with a readable message instead of an opaque revert):
+ *   admin != 0, signers >= 2, every signer != 0,
+ *   0 < small <= medium <= large <= signerCount.
+ *
+ * Env:
+ *   MULTISIG_ADMIN                 default: deployer
+ *   MULTISIG_SIGNERS               comma-separated; default: 3 devnet accounts
+ *   MULTISIG_SMALL_THRESHOLD       default: 1
+ *   MULTISIG_MEDIUM_THRESHOLD      default: 2
+ *   MULTISIG_LARGE_THRESHOLD       default: 3
+ *   MULTISIG_EMERGENCY_THRESHOLD   default: 2
+ */
+async function deployMultiSigTreasury() {
+  const DEFAULT_SIGNERS = [
+    account.address,
+    "0x90F79bf6EB2c4f870365E785982E1f101E93b906",
+    "0x15d34AAf54267DB7D7c367839AAf71A00a2C6A65",
+  ];
+
+  const admin = process.env.MULTISIG_ADMIN ?? account.address;
+  const signers = process.env.MULTISIG_SIGNERS
+    ? process.env.MULTISIG_SIGNERS.split(",").map((s) => s.trim()).filter(Boolean)
+    : DEFAULT_SIGNERS;
+  const num = (name, fallback) => BigInt(process.env[name] ?? String(fallback));
+  const small = num("MULTISIG_SMALL_THRESHOLD", 1);
+  const medium = num("MULTISIG_MEDIUM_THRESHOLD", 2);
+  const large = num("MULTISIG_LARGE_THRESHOLD", 3);
+  const emergency = num("MULTISIG_EMERGENCY_THRESHOLD", 2);
+
+  const ZERO = "0x0000000000000000000000000000000000000000";
+  if (admin === ZERO) throw new Error("MULTISIG_ADMIN must not be the zero address");
+  if (signers.length < 2) throw new Error("MultiSigTreasury requires at least 2 signers");
+  if (signers.some((s) => s === ZERO)) throw new Error("signer list contains the zero address");
+  if (new Set(signers.map((s) => s.toLowerCase())).size !== signers.length) {
+    throw new Error("signer list contains duplicates - each signer must be distinct");
+  }
+  if (!(small > 0n && small <= medium && medium <= large && large <= BigInt(signers.length))) {
+    throw new Error(
+      `invalid thresholds: need 0 < small(${small}) <= medium(${medium}) <= large(${large}) <= signers(${signers.length})`,
+    );
+  }
+
+  console.log(`admin:      ${admin}`);
+  console.log(`signers:    ${signers.length} - ${signers.join(", ")}`);
+  console.log(`thresholds: small=${small} medium=${medium} large=${large} emergency=${emergency}`);
+
+  const treasury = await deploy("MultiSigTreasury", [
+    admin,
+    signers,
+    small,
+    medium,
+    large,
+    emergency,
+  ]);
+
+  console.log("\n== NoblePay web .env.local addition");
+  console.log(`NEXT_PUBLIC_MULTISIG_TREASURY_ADDRESS=${treasury}`);
+  return treasury;
+}
+
+/**
+ * --liquidity: deploys the LiquidityPool stack — two 6-decimal mock
+ * stables minted to the deployer, the pool contract, a canonical
+ * USDC/USDT pool, and the LIQUIDITY_PROVIDER_ROLE grant the deployer
+ * needs to open a position from the UI.
+ */
+async function deployLiquidityStack() {
+  const usdc = await deploy("MockERC20", ["USD Coin (devnet)", "USDC", 6]);
+  const usdt = await deploy("MockERC20", ["Tether USD (devnet)", "USDT", 6]);
+  const pool = await deploy("LiquidityPool", [account.address, account.address]);
+
+  const erc20 = artifact("MockERC20").abi;
+  const lp = artifact("LiquidityPool").abi;
+  const write = async (address, abi, functionName, args) => {
+    const hash = await wallet.writeContract({ address, abi, functionName, args, gas: GAS });
+    const receipt = await pub.waitForTransactionReceipt({ hash });
+    if (receipt.status !== "success") throw new Error(`${functionName} reverted`);
+    return receipt;
+  };
+
+  const million = 1_000_000n * 10n ** 6n;
+  await write(usdc, erc20, "mint", [account.address, million]);
+  await write(usdt, erc20, "mint", [account.address, million]);
+
+  // 0.30% swap fee, 0.09% flash fee, 50% max imbalance.
+  const receipt = await write(pool, lp, "createPool", [usdc, usdt, 30n, 9n, 5000n]);
+  const created = receipt.logs.find((l) => l.address.toLowerCase() === pool.toLowerCase());
+  const poolId = created?.topics?.[1];
+  console.log(`createPool USDC/USDT: poolId ${poolId}`);
+
+  const providerRole = await pub.readContract({
+    address: pool,
+    abi: lp,
+    functionName: "LIQUIDITY_PROVIDER_ROLE",
+    args: [],
+  });
+  await write(pool, lp, "grantRole", [providerRole, account.address]);
+  console.log(`LIQUIDITY_PROVIDER_ROLE granted to ${account.address}`);
+
+  console.log("\n== NoblePay web .env.local additions");
+  console.log(`NEXT_PUBLIC_LIQUIDITY_POOL_ADDRESS=${pool}`);
+  console.log(`NEXT_PUBLIC_USDC_TOKEN_ADDRESS=${usdc}`);
+  console.log(`NEXT_PUBLIC_USDT_TOKEN_ADDRESS=${usdt}`);
+}
+
 async function main() {
+  if (process.argv.includes("--multisig")) {
+    await deployMultiSigTreasury();
+    return;
+  }
+  if (process.argv.includes("--liquidity")) {
+    await deployLiquidityStack();
+    return;
+  }
   const syncIdx = process.argv.indexOf("--sync");
   const syncBusiness = syncIdx > -1 ? process.argv[syncIdx + 1] : null;
 
