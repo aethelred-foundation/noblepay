@@ -1,5 +1,5 @@
 import { Router, Response } from "express";
-import { getAddress } from "ethers";
+import { getAddress, JsonRpcProvider } from "ethers";
 import { prisma } from "../lib/db";
 import { AuthenticatedRequest, authenticateAPIKey } from "../middleware/auth";
 import {
@@ -8,6 +8,12 @@ import {
   requirePermission,
 } from "../middleware/rbac";
 import { TreasuryService, TreasuryError } from "../services/treasury";
+import {
+  readBudgets,
+  readProposals,
+  readTreasuryOverview,
+} from "../services/treasury-chain";
+import { loadNoblePayChainConfiguration } from "../lib/production-config";
 import { AuditService } from "../services/audit";
 import { logger } from "../lib/logger";
 import {
@@ -44,6 +50,99 @@ router.get(
       res.json({ success: true, data: overview });
     } catch (error) {
       handleError(error, res);
+    }
+  },
+);
+
+// ─── GET /v1/treasury/chain/overview — On-chain treasury state ─────────────
+//
+// Deliberately separate from /overview. That endpoint reports the database
+// ledger (dataSource "DATABASE_LEDGER") — what NoblePay has recorded. This one
+// reports what the MultiSigTreasury contract actually holds
+// (dataSource "CHAIN_MULTISIG_TREASURY"). Merging them into one response would
+// invite exactly the confusion the dataSource discriminator exists to prevent,
+// and the two can legitimately disagree while an indexer lags.
+
+router.get(
+  "/chain/overview",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("treasury:read"),
+  validate(EmptyBodySchema, "query"),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!req.businessId) return unauthorized(res);
+      const config = loadNoblePayChainConfiguration();
+      const overview = await readTreasuryOverview(config);
+      res.json({ success: true, data: overview });
+    } catch (error) {
+      handleChainError(error, res);
+    }
+  },
+);
+
+// ─── GET /v1/treasury/chain/proposals — On-chain proposals ─────────────────
+
+router.get(
+  "/chain/proposals",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("treasury:read"),
+  validate(EmptyBodySchema, "query"),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!req.businessId) return unauthorized(res);
+      const config = loadNoblePayChainConfiguration();
+      const overview = await readTreasuryOverview(config);
+      if (!overview.configured) {
+        res.json({ success: true, data: { configured: false, proposals: [] } });
+        return;
+      }
+      const provider = new JsonRpcProvider(config.rpcUrl);
+      const proposals = await readProposals(
+        provider,
+        overview.address,
+        Number(overview.readAtBlock),
+      );
+      res.json({
+        success: true,
+        data: {
+          configured: true,
+          proposals,
+          amountBasis: overview.amountBasis,
+          dataSource: overview.dataSource,
+          readAtBlock: overview.readAtBlock,
+        },
+      });
+    } catch (error) {
+      handleChainError(error, res);
+    }
+  },
+);
+
+// ─── GET /v1/treasury/chain/budgets — On-chain budgets ─────────────────────
+
+router.get(
+  "/chain/budgets",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("treasury:read"),
+  validate(EmptyBodySchema, "query"),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!req.businessId) return unauthorized(res);
+      const config = loadNoblePayChainConfiguration();
+      const budgets = await readBudgets(config);
+      res.json({
+        success: true,
+        data: {
+          configured: budgets !== null,
+          budgets: budgets ?? [],
+          dataSource: "CHAIN_MULTISIG_TREASURY",
+        },
+      });
+    } catch (error) {
+      handleChainError(error, res);
     }
   },
 );
@@ -248,6 +347,20 @@ function walletSessionRequired(res: Response): void {
     error: "WALLET_SESSION_REQUIRED",
     message:
       "A wallet-authenticated session bound to the registered business wallet is required for treasury mutations",
+  });
+}
+
+function handleChainError(error: unknown, res: Response): void {
+  // A chain read failing is an upstream availability problem, not a client
+  // error and not an internal fault. 503 lets a caller distinguish "the node
+  // is unreachable" from "your request was wrong", which matters because the
+  // correct response to the former is to retry and to the latter is not.
+  logger.error("Treasury chain read failed", {
+    error: (error as Error).message,
+  });
+  res.status(503).json({
+    error: "CHAIN_READ_FAILED",
+    message: "Could not read the treasury contract from the configured RPC",
   });
 }
 
