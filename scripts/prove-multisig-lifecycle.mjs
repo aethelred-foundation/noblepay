@@ -18,7 +18,32 @@
  * All writes carry explicit gas limits — the Aethelred node under-reports
  * eth_estimateGas (GAS-01), so relying on estimation reverts out of gas.
  *
+ * TWO MODES.
+ *
+ *   ATTACH  — set MULTISIG_TREASURY_ADDRESS to verify the treasury you actually
+ *             deployed. Thresholds and the signer set are read from that
+ *             contract rather than assumed, and the signer keys you supply are
+ *             checked against its real SIGNER_ROLE holders before anything is
+ *             submitted.
+ *   DEPLOY  — leave it unset and the script deploys a throwaway treasury with a
+ *             3-signer / 1-2-3 config and proves the lifecycle against that.
+ *
+ * The distinction matters, and an earlier version of this script did not make
+ * it: it deployed unconditionally and ignored MULTISIG_TREASURY_ADDRESS, so a
+ * run that appeared to certify a production deployment had in fact certified a
+ * fresh throwaway contract and never touched the address under test. If you
+ * need assurance about a specific treasury, run in ATTACH mode and confirm the
+ * address echoed in the header is the one you deployed.
+ *
+ * ATTACH MODE WRITES REAL STATE. It sends 5 native units to the treasury and
+ * creates a proposal that reaches APPROVED and then stays there — the timelock
+ * means it cannot be executed within the run, and nothing cancels it
+ * afterwards. On a devnet or testnet that is fine. Do not point it at a
+ * treasury holding real value without accepting that it will leave a funded
+ * balance and a live approved proposal behind.
+ *
  * Env: DEPLOYER_KEY (funded), RPC_URL (default http://127.0.0.1:8545),
+ *      MULTISIG_TREASURY_ADDRESS (optional; enables ATTACH mode),
  *      SIGNER2_KEY / SIGNER3_KEY (default: standard devnet accounts 4 and 5).
  */
 
@@ -85,18 +110,43 @@ async function main() {
   console.log(`chain id ${chainId} @ ${RPC_URL}`);
   console.log(`deployer ${deployer.address}\n`);
 
-  // --- 1. deploy -----------------------------------------------------------
-  const signers = [deployer.address, signer2.address, signer3.address];
-  const deployHash = await wallet(deployer).deployContract({
-    abi: artifact.abi,
-    bytecode: artifact.bytecode,
-    args: [deployer.address, signers, 1n, 2n, 3n, 2n],
-    gas: GAS,
-  });
-  const deployReceipt = await pub.waitForTransactionReceipt({ hash: deployHash });
-  check("deploy MultiSigTreasury", deployReceipt.status === "success", deployReceipt.contractAddress);
-  if (deployReceipt.status !== "success") process.exit(1);
-  const treasury = deployReceipt.contractAddress;
+  // --- 1. attach to the treasury under test, or deploy a throwaway ---------
+  const attachTo = process.env.MULTISIG_TREASURY_ADDRESS;
+  let treasury;
+
+  if (attachTo) {
+    const code = await pub.getBytecode({ address: attachTo });
+    check(
+      "ATTACH: treasury under test has bytecode",
+      Boolean(code) && code !== "0x",
+      attachTo,
+    );
+    if (!code || code === "0x") {
+      console.error(
+        `\nFAIL: no contract at ${attachTo} on chain ${chainId}. ` +
+          `Check MULTISIG_TREASURY_ADDRESS and RPC_URL point at the same network.`,
+      );
+      process.exit(1);
+    }
+    treasury = attachTo;
+    console.log(`mode: ATTACH — verifying the deployed treasury ${treasury}\n`);
+  } else {
+    const signers = [deployer.address, signer2.address, signer3.address];
+    const deployHash = await wallet(deployer).deployContract({
+      abi: artifact.abi,
+      bytecode: artifact.bytecode,
+      args: [deployer.address, signers, 1n, 2n, 3n, 2n],
+      gas: GAS,
+    });
+    const deployReceipt = await pub.waitForTransactionReceipt({ hash: deployHash });
+    check("deploy MultiSigTreasury", deployReceipt.status === "success", deployReceipt.contractAddress);
+    if (deployReceipt.status !== "success") process.exit(1);
+    treasury = deployReceipt.contractAddress;
+    console.log(
+      `mode: DEPLOY — throwaway treasury ${treasury}; ` +
+        `set MULTISIG_TREASURY_ADDRESS to verify a specific deployment instead\n`,
+    );
+  }
 
   const read = (functionName, args = []) =>
     pub.readContract({ address: treasury, abi: artifact.abi, functionName, args });
@@ -111,12 +161,50 @@ async function main() {
     return pub.waitForTransactionReceipt({ hash });
   };
 
+  // Read the config from the contract rather than assuming it. In ATTACH mode
+  // the deployment's thresholds are whatever governance chose; asserting a
+  // hard-coded 1-2-3 would fail a correct treasury, or worse, pass a wrong one
+  // because the numbers happened to coincide.
   const cfg = await read("signerConfig");
+  const totalSigners = Number(cfg[0]);
+  const smallThreshold = Number(cfg[1]);
+  const mediumThreshold = Number(cfg[2]);
+  const largeThreshold = Number(cfg[3]);
+
   check(
-    "constructor recorded the threshold config",
-    String(cfg[0]) === "3" && String(cfg[1]) === "1" && String(cfg[2]) === "2" && String(cfg[3]) === "3",
-    `signers=${cfg[0]} small=${cfg[1]} medium=${cfg[2]} large=${cfg[3]}`,
+    "threshold config is internally consistent",
+    smallThreshold > 0 &&
+      smallThreshold <= mediumThreshold &&
+      mediumThreshold <= largeThreshold &&
+      largeThreshold <= totalSigners,
+    `signers=${totalSigners} small=${smallThreshold} medium=${mediumThreshold} large=${largeThreshold}`,
   );
+
+  // The lifecycle needs enough distinct signers to reach the medium threshold.
+  // Verify the supplied keys really hold SIGNER_ROLE before submitting
+  // anything, so a misconfigured run fails here with a clear message instead of
+  // reverting halfway through with an opaque one.
+  const signerRole = await read("SIGNER_ROLE");
+  const availableSigners = [];
+  for (const acct of [deployer, signer2, signer3]) {
+    const holds = await read("hasRole", [signerRole, acct.address]);
+    if (holds) availableSigners.push(acct);
+  }
+  check(
+    "supplied keys cover the medium threshold",
+    availableSigners.length >= mediumThreshold,
+    `${availableSigners.length} of ${mediumThreshold} required — ${availableSigners
+      .map((a) => a.address)
+      .join(", ") || "none"}`,
+  );
+  if (availableSigners.length < mediumThreshold) {
+    console.error(
+      `\nFAIL: this treasury needs ${mediumThreshold} approvals for a medium-tier ` +
+        `proposal, but only ${availableSigners.length} of the supplied keys hold ` +
+        `SIGNER_ROLE. Set SIGNER2_KEY / SIGNER3_KEY to keys for its real signers.`,
+    );
+    process.exit(1);
+  }
 
   // --- 2. fund the treasury ------------------------------------------------
   const fundHash = await wallet(deployer).sendTransaction({
@@ -126,13 +214,20 @@ async function main() {
   });
   await pub.waitForTransactionReceipt({ hash: fundHash });
   const balance = await pub.getBalance({ address: treasury });
-  check("treasury received native funding", balance === parseEther("5"), `${balance} wei`);
+  // In ATTACH mode the treasury may already hold a balance, so assert it grew
+  // rather than that it equals exactly what we sent.
+  check(
+    "treasury received native funding",
+    balance >= parseEther("5"),
+    `${balance} wei`,
+  );
 
   // --- 3. create a MEDIUM-tier proposal ------------------------------------
   // 50,000 (6dp) sits above SMALL_TX_THRESHOLD (10,000) and at or below
-  // LARGE_TX_THRESHOLD (100,000), so it must require mediumThreshold = 2.
+  // LARGE_TX_THRESHOLD (100,000), so it must require the medium threshold.
   const amount = 50_000n * 10n ** 6n;
-  const createReceipt = await write(deployer, "createProposal", [
+  const proposer = availableSigners[0];
+  const createReceipt = await write(proposer, "createProposal", [
     signer2.address,
     "0x0000000000000000000000000000000000000000",
     amount,
@@ -151,7 +246,11 @@ async function main() {
 
   const p = await read("getProposal", [proposalId]);
   check("tier resolved to MEDIUM for a 50k amount", Number(p.tier) === 1, `tier=${p.tier}`);
-  check("requiredApprovals = mediumThreshold (2)", String(p.requiredApprovals) === "2");
+  check(
+    `requiredApprovals = mediumThreshold (${mediumThreshold})`,
+    Number(p.requiredApprovals) === mediumThreshold,
+    `required=${p.requiredApprovals}`,
+  );
   check("status starts PENDING", Number(p.status) === 0, `status=${p.status}`);
   const now = BigInt(Math.floor(Date.now() / 1000));
   check(
@@ -161,11 +260,16 @@ async function main() {
   );
 
   // --- 4. approvals --------------------------------------------------------
-  await write(deployer, "approveProposal", [proposalId]);
+  // Approve with one signer short of the threshold and assert it is still
+  // PENDING; the point is that the threshold binds, whatever its value.
+  const belowThreshold = mediumThreshold - 1;
+  for (let i = 0; i < belowThreshold; i++) {
+    await write(availableSigners[i], "approveProposal", [proposalId]);
+  }
   const afterFirst = await read("getProposal", [proposalId]);
   check(
-    "one approval leaves it PENDING (below threshold)",
-    Number(afterFirst.status) === 0 && String(afterFirst.approvalCount) === "1",
+    `${belowThreshold} approval(s) leave it PENDING (below threshold of ${mediumThreshold})`,
+    Number(afterFirst.status) === 0 && Number(afterFirst.approvalCount) === belowThreshold,
     `status=${afterFirst.status} approvals=${afterFirst.approvalCount}`,
   );
 
@@ -177,18 +281,18 @@ async function main() {
       abi: artifact.abi,
       functionName: "approveProposal",
       args: [proposalId],
-      account: deployer.address,
+      account: availableSigners[0].address,
     });
   } catch {
     doubleApproveReverted = true;
   }
   check("a signer cannot approve the same proposal twice", doubleApproveReverted);
 
-  await write(signer2, "approveProposal", [proposalId]);
+  await write(availableSigners[belowThreshold], "approveProposal", [proposalId]);
   const afterSecond = await read("getProposal", [proposalId]);
   check(
     "reaching the threshold flips status to APPROVED",
-    Number(afterSecond.status) === 1 && String(afterSecond.approvalCount) === "2",
+    Number(afterSecond.status) === 1 && Number(afterSecond.approvalCount) === mediumThreshold,
     `status=${afterSecond.status} approvals=${afterSecond.approvalCount}`,
   );
 
