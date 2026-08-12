@@ -1,3 +1,10 @@
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 1,
+  }),
+}));
+
 /**
  * Treasury Route Integration Tests
  *
@@ -317,6 +324,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-1/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(403);
@@ -383,6 +396,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-tenant-a/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${tokenTenantB}`);
 
       expect(res.status).toBe(403);
@@ -425,6 +444,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-pending/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(409);
@@ -444,6 +469,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-underapproved/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(409);
@@ -596,6 +627,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-happy-1/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(200);
@@ -607,6 +644,14 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
         "prop-happy-1",
         walletForBusiness("biz-happy"),
         "biz-happy",
+        // The reported settlement, forwarded verbatim for verification.
+        {
+          txHash:
+            "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+          onChainProposalId:
+            "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+        },
+        expect.objectContaining({ minimumConfirmations: expect.any(Number) }),
       );
     });
   });

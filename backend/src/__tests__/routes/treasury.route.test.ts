@@ -14,6 +14,13 @@ let injectedSignerId: string | undefined =
 let injectedApiKeyId: string | undefined;
 
 jest.mock("../../lib/db", () => ({ prisma: {} }));
+// The execute route resolves chain config to hand to the service.
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 1,
+  }),
+}));
 jest.mock("../../services/audit", () => ({ AuditService: jest.fn() }));
 jest.mock("../../services/treasury", () => {
   class TreasuryError extends Error {
@@ -57,6 +64,15 @@ import { TreasuryError } from "../../services/treasury";
 const app = express();
 app.use(express.json());
 app.use("/v1/treasury", router);
+
+// Execution is reported, not requested: the caller names the transaction that
+// settled the proposal on chain. Both fields are bytes32.
+const executeProposal = {
+  txHash:
+    "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+  onChainProposalId:
+    "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+};
 
 const createProposal = {
   title: "Supplier payment",
@@ -201,10 +217,17 @@ describe("treasury routes", () => {
         method === "get"
           ? request(app).get(routePath)
           : request(app).post(routePath);
-      const response =
-        method === "post" && path === "/proposals"
-          ? await operation.send(createProposal)
-          : await operation.send({});
+      // Send a body each route will accept, so the failure under test is the
+      // missing identity rather than a schema rejection. Body validation runs
+      // before the handler's identity check, so an invalid body would 400 and
+      // mask the 401 this test exists to prove.
+      const body =
+        path === "/proposals"
+          ? createProposal
+          : path.endsWith("/execute")
+            ? executeProposal
+            : {};
+      const response = await operation.send(body);
       expect(response.status).toBe(401);
       expect(response.body.error).toBe("UNAUTHORIZED");
     },
@@ -213,7 +236,8 @@ describe("treasury routes", () => {
   it.each([
     ["/proposals", createProposal],
     ["/proposals/proposal-1/approve", {}],
-    ["/proposals/proposal-1/execute", {}],
+    // Execution now reports an on-chain settlement, so it carries a body.
+    ["/proposals/proposal-1/execute", executeProposal],
   ])(
     "rejects API-key treasury mutation %s before service execution",
     async (path, body) => {
@@ -250,7 +274,9 @@ describe("treasury routes", () => {
     mockTreasuryService.executeProposal.mockResolvedValue({ executed: true });
     const [approved, executed] = await Promise.all([
       request(app).post("/v1/treasury/proposals/proposal-1/approve").send({}),
-      request(app).post("/v1/treasury/proposals/proposal-1/execute").send({}),
+      request(app)
+        .post("/v1/treasury/proposals/proposal-1/execute")
+        .send(executeProposal),
     ]);
     expect(approved.status).toBe(200);
     expect(executed.status).toBe(200);
@@ -258,6 +284,8 @@ describe("treasury routes", () => {
       "proposal-1",
       BUSINESS_WALLET,
       "business-1",
+      executeProposal,
+      expect.anything(),
     );
   });
 

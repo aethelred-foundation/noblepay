@@ -624,6 +624,19 @@ export const CreateTreasuryProposalSchema = z
       });
     }
   });
+/**
+ * Execution is reported, not requested. The caller supplies the transaction
+ * that settled the proposal on chain and the on-chain proposal id it settled;
+ * the service verifies both against the chain before recording anything, so
+ * neither field is trusted on receipt.
+ */
+export const ExecuteTreasuryProposalSchema = z
+  .object({
+    txHash: bytes32Hash,
+    onChainProposalId: bytes32Hash,
+  })
+  .strict();
+
 export const TreasuryProposalListQuerySchema = z
   .object({
     status: z
@@ -708,6 +721,9 @@ export type CrossChainTransferListQuery = z.infer<
   typeof CrossChainTransferListQuerySchema
 >;
 export type AdvancedPaginationQuery = z.infer<typeof AdvancedPaginationSchema>;
+export type ExecuteTreasuryProposal = z.infer<
+  typeof ExecuteTreasuryProposalSchema
+>;
 export type TreasuryProposalListQuery = z.infer<
   typeof TreasuryProposalListQuerySchema
 >;

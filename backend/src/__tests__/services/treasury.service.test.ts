@@ -1,4 +1,10 @@
 import { Prisma } from "@prisma/client";
+const mockVerifyTreasuryExecution = jest.fn();
+jest.mock("../../services/treasury-execution", () => ({
+  verifyTreasuryExecution: (...a: unknown[]) => mockVerifyTreasuryExecution(...a),
+  TreasuryExecutionError: class extends Error {},
+}));
+
 import { TreasuryError, TreasuryService } from "../../services/treasury";
 import type { AuditService } from "../../services/audit";
 
@@ -230,13 +236,135 @@ describe("TreasuryService production behavior", () => {
     });
   });
 
-  it("fails treasury execution closed until a receipt verifier exists", async () => {
-    const { service } = setup();
-    await expect(
-      service.executeProposal("proposal-1", signer, "business-1"),
-    ).rejects.toMatchObject({
-      code: "TREASURY_EXECUTION_UNAVAILABLE",
-      statusCode: 501,
+  // Execution is no longer blanket-disabled — a receipt verifier now exists —
+  // but it still fails closed. What changed is that each refusal names a
+  // reason instead of every call returning the same 501.
+  describe("treasury execution", () => {
+    const execution = {
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    };
+    const chainConfig = {
+      rpcUrl: "http://rpc.invalid",
+      minimumConfirmations: 1,
+    } as never;
+
+    it("refuses a proposal that is not APPROVED", async () => {
+      const { prisma, service } = setup();
+      prisma.treasuryProposal.findFirst.mockResolvedValue(
+        proposal({ status: "PENDING" }),
+      );
+      await expect(
+        service.executeProposal(
+          "proposal-1",
+          signer,
+          "business-1",
+          execution,
+          chainConfig,
+        ),
+      ).rejects.toMatchObject({ code: "INVALID_STATE", statusCode: 409 });
+      expect(mockVerifyTreasuryExecution).not.toHaveBeenCalled();
+    });
+
+    it("refuses a proposal that does not exist for this business", async () => {
+      const { prisma, service } = setup();
+      prisma.treasuryProposal.findFirst.mockResolvedValue(null);
+      await expect(
+        service.executeProposal(
+          "proposal-1",
+          signer,
+          "business-1",
+          execution,
+          chainConfig,
+        ),
+      ).rejects.toMatchObject({ code: "PROPOSAL_NOT_FOUND", statusCode: 404 });
+    });
+
+    it("is idempotent when the same transaction is reported twice", async () => {
+      const { prisma, service } = setup();
+      prisma.treasuryProposal.findFirst.mockResolvedValue(
+        proposal({
+          status: "EXECUTED",
+          executionTxHash: execution.txHash.toLowerCase(),
+          onChainProposalId: execution.onChainProposalId.toLowerCase(),
+          executedAt: now,
+        }),
+      );
+      const result = await service.executeProposal(
+        "proposal-1",
+        signer,
+        "business-1",
+        execution,
+        chainConfig,
+      );
+      expect(result.status).toBe("EXECUTED");
+      // No re-verification and no second write for a replayed report.
+      expect(mockVerifyTreasuryExecution).not.toHaveBeenCalled();
+      expect(prisma.treasuryProposal.update).not.toHaveBeenCalled();
+    });
+
+    it("conflicts when a DIFFERENT transaction claims the same proposal", async () => {
+      // Not a retry — a contradiction. Two transactions cannot both have
+      // settled one proposal, and silently accepting the second would
+      // overwrite the evidence for the first.
+      const { prisma, service } = setup();
+      prisma.treasuryProposal.findFirst.mockResolvedValue(
+        proposal({
+          status: "EXECUTED",
+          executionTxHash: `0x${"9".repeat(64)}`,
+        }),
+      );
+      await expect(
+        service.executeProposal(
+          "proposal-1",
+          signer,
+          "business-1",
+          execution,
+          chainConfig,
+        ),
+      ).rejects.toMatchObject({ code: "ALREADY_EXECUTED", statusCode: 409 });
+    });
+
+    it("records the verified receipt, not the caller's claim", async () => {
+      const { prisma, service } = setup();
+      prisma.treasuryProposal.findFirst.mockResolvedValue(
+        proposal({ status: "APPROVED" }),
+      );
+      prisma.treasuryProposal.update.mockResolvedValue(
+        proposal({ status: "EXECUTED" }),
+      );
+      mockVerifyTreasuryExecution.mockResolvedValue({
+        onChainProposalId: execution.onChainProposalId.toLowerCase(),
+        txHash: execution.txHash.toLowerCase(),
+        executor: "0x3333333333333333333333333333333333333333",
+        blockNumber: 4242,
+        blockHash: "0xblock",
+        confirmations: 5,
+        amount: "50000",
+        executedAt: now,
+      });
+
+      const result = await service.executeProposal(
+        "proposal-1",
+        signer,
+        "business-1",
+        execution,
+        chainConfig,
+      );
+
+      expect(result.blockNumber).toBe(4242);
+      // executedAt comes from the block, not from Date.now().
+      expect(prisma.treasuryProposal.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({
+            status: "EXECUTED",
+            executedAt: now,
+            executionTxHash: execution.txHash.toLowerCase(),
+          }),
+        }),
+      );
     });
   });
 

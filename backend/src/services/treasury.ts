@@ -6,6 +6,10 @@ import {
   type YieldStrategy as StoredStrategy,
 } from "@prisma/client";
 import { AuditService } from "./audit";
+import {
+  verifyTreasuryExecution,
+} from "./treasury-execution";
+import type { NoblePayChainConfiguration } from "../lib/production-config";
 
 export type ProposalStatus =
   "PENDING" | "APPROVED" | "EXECUTED" | "REJECTED" | "EXPIRED";
@@ -467,16 +471,109 @@ export class TreasuryService {
     };
   }
 
+  /**
+   * Record that a proposal was executed on chain.
+   *
+   * This does not execute anything. The backend holds no treasury signing key:
+   * execution is authorised by SIGNER_ROLE holders and submitted from their own
+   * wallets. What happens here is verification of a claim — the caller supplies
+   * the transaction they say settled the proposal, and the record is written
+   * only if the chain corroborates it.
+   *
+   * The status is set from the verified receipt rather than from the request,
+   * so a caller cannot mark a proposal executed by asking nicely.
+   */
   async executeProposal(
-    _proposalId: string,
-    _executor: string,
-    _businessId?: string,
-  ): Promise<never> {
-    throw new TreasuryError(
-      "TREASURY_EXECUTION_UNAVAILABLE",
-      "Treasury execution is disabled until an on-chain transaction receipt verifier is configured",
-      501,
-    );
+    proposalId: string,
+    executor: string,
+    businessId: string,
+    execution: { txHash: string; onChainProposalId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<{
+    status: ProposalStatus;
+    txHash: string;
+    onChainProposalId: string;
+    blockNumber: number;
+    confirmations: number;
+    executedAt: Date;
+  }> {
+    const proposal = await this.prisma.treasuryProposal.findFirst({
+      where: { id: proposalId, businessId },
+    });
+    if (!proposal) {
+      throw new TreasuryError("PROPOSAL_NOT_FOUND", "Proposal not found", 404);
+    }
+    if (proposal.status === "EXECUTED") {
+      // Idempotent when the same transaction is replayed, and a conflict when a
+      // different one is offered: a second, different execution of the same
+      // proposal is not a retry, it is a contradiction worth surfacing.
+      if (proposal.executionTxHash === execution.txHash.toLowerCase()) {
+        return {
+          status: proposal.status,
+          txHash: proposal.executionTxHash,
+          onChainProposalId: proposal.onChainProposalId ?? "",
+          blockNumber: 0,
+          confirmations: 0,
+          executedAt: proposal.executedAt ?? new Date(),
+        };
+      }
+      throw new TreasuryError(
+        "ALREADY_EXECUTED",
+        `Proposal was already executed by ${proposal.executionTxHash ?? "an unrecorded transaction"}`,
+        409,
+      );
+    }
+    if (proposal.status !== "APPROVED") {
+      throw new TreasuryError(
+        "INVALID_STATE",
+        `Proposal is in ${proposal.status} state, expected APPROVED`,
+        409,
+      );
+    }
+
+    // Throws TreasuryExecutionError with a specific reason if any check fails.
+    const verified = await verifyTreasuryExecution(config, execution);
+
+    const updated = await this.prisma.treasuryProposal.update({
+      where: { id: proposal.id },
+      data: {
+        status: "EXECUTED",
+        executedAt: verified.executedAt,
+        executionTxHash: verified.txHash,
+        onChainProposalId: verified.onChainProposalId,
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: executor,
+      description: `Treasury proposal executed on chain: ${proposal.title} (${proposal.id}) via ${verified.txHash}`,
+      // Higher than proposal creation: this is the entry that says funds
+      // moved, and it is the one a reviewer will look for first.
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        proposalId: proposal.id,
+        onChainProposalId: verified.onChainProposalId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        blockHash: verified.blockHash,
+        confirmations: verified.confirmations,
+        // The on-chain executor, which need not be the API caller. Recording
+        // both means a later reviewer can see who submitted and who reported.
+        onChainExecutor: verified.executor,
+        amount: verified.amount,
+      },
+    });
+
+    return {
+      status: updated.status,
+      txHash: verified.txHash,
+      onChainProposalId: verified.onChainProposalId,
+      blockNumber: verified.blockNumber,
+      confirmations: verified.confirmations,
+      executedAt: verified.executedAt,
+    };
   }
 
   async validateSpendingPolicy(

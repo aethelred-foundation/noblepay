@@ -409,9 +409,20 @@ model TreasuryProposal {
   expiresAt     DateTime       @map("expires_at")
   metadata      Json?
 
+  // Link to the MultiSigTreasury proposal this record corresponds to. A
+  // database proposal and an on-chain proposal are separate objects created by
+  // separate acts; without these columns there was no way to state which
+  // on-chain proposal a record refers to, which is why execution could not be
+  // recorded at all. Both are set only after the execution transaction has
+  // been verified canonical, so their presence means "this was settled on
+  // chain and we checked", not "someone asserted it was".
+  onChainProposalId String? @map("on_chain_proposal_id")
+  executionTxHash   String? @map("execution_tx_hash")
+
   @@index([status])
   @@index([createdBy])
   @@index([businessId])
+  @@index([executionTxHash])
   @@map("treasury_proposals")
 }
 

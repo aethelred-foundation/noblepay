@@ -1,3 +1,10 @@
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 1,
+  }),
+}));
+
 import { Prisma } from "@prisma/client";
 import crypto from "crypto";
 import { getAddress } from "ethers";
@@ -316,8 +323,14 @@ describe("Treasury HTTP lifecycle with durable workflow", () => {
       .send({});
     const attemptedExecution = await request(app)
       .post(`/v1/treasury/proposals/${created.body.data.id}/execute`)
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
       .set("Authorization", `Bearer ${keyB}`)
-      .send({});
+;
 
     for (const response of [
       attemptedProposal,
@@ -367,17 +380,27 @@ describe("Treasury HTTP lifecycle with durable workflow", () => {
     expect(proposals.get(created.body.data.id).status).toBe("EXPIRED");
   });
 
-  it("fails execution closed until an on-chain receipt verifier is configured", async () => {
+  // The verifier now exists, so this no longer 501s. The guarantee it was
+  // really protecting still holds and is what is asserted: a proposal cannot go
+  // straight from created to executed in the database. Approval comes first,
+  // and after that the chain has to corroborate the receipt.
+  it("refuses to execute a proposal that has not been approved", async () => {
     const created = await request(app)
       .post("/v1/treasury/proposals")
       .set("Authorization", `Bearer ${token("biz-a", "ADMIN", "creator-a")}`)
       .send(validTransfer());
     const response = await request(app)
       .post(`/v1/treasury/proposals/${created.body.data.id}/execute`)
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
       .set("Authorization", `Bearer ${token("biz-a", "ADMIN", "executor-a")}`)
-      .send({});
-    expect(response.status).toBe(501);
-    expect(response.body.error).toBe("TREASURY_EXECUTION_UNAVAILABLE");
+;
+    expect(response.status).toBe(409);
+    expect(response.body.error).toBe("INVALID_STATE");
     expect(proposals.get(created.body.data.id).status).toBe("PENDING");
     expect(mockPrisma.treasuryProposal.update).not.toHaveBeenCalled();
   });

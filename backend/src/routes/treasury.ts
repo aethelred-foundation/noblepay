@@ -8,6 +8,7 @@ import {
   requirePermission,
 } from "../middleware/rbac";
 import { TreasuryService, TreasuryError } from "../services/treasury";
+import { TreasuryExecutionError } from "../services/treasury-execution";
 import {
   readBudgets,
   readProposals,
@@ -21,10 +22,12 @@ import {
   AdvancedResourceParamsSchema,
   CreateTreasuryProposalSchema,
   EmptyBodySchema,
+  ExecuteTreasuryProposalSchema,
   TreasuryAnalyticsQuerySchema,
   TreasuryProposalListQuerySchema,
   validate,
   type AdvancedPaginationQuery,
+  type ExecuteTreasuryProposal,
   type TreasuryAnalyticsQuery,
   type TreasuryProposalListQuery,
 } from "../middleware/validation";
@@ -221,7 +224,12 @@ router.post(
   },
 );
 
-// ─── POST /v1/treasury/proposals/:id/execute — Execute proposal ────────────
+// ─── POST /v1/treasury/proposals/:id/execute — Record an on-chain execution ─
+//
+// This endpoint does not execute the proposal. The API holds no treasury
+// signing key: execution is authorised by SIGNER_ROLE holders and submitted
+// from their own wallets. The caller reports the transaction that settled the
+// proposal, and the record is written only if the chain corroborates it.
 
 router.post(
   "/proposals/:id/execute",
@@ -229,20 +237,24 @@ router.post(
   extractRole,
   requireRole("ADMIN", "TREASURY_MANAGER"),
   validate(AdvancedResourceParamsSchema, "params"),
-  validate(EmptyBodySchema),
+  validate(ExecuteTreasuryProposalSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
       const walletSigner = walletSignerOrReject(req, res);
       if (!walletSigner) return;
+      const { txHash, onChainProposalId } =
+        req.body as unknown as ExecuteTreasuryProposal;
       const result = await treasuryService.executeProposal(
         req.params.id,
         walletSigner,
         req.businessId,
+        { txHash, onChainProposalId },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: result });
     } catch (error) {
-      handleError(error, res);
+      handleExecutionError(error, res);
     }
   },
 );
@@ -348,6 +360,22 @@ function walletSessionRequired(res: Response): void {
     message:
       "A wallet-authenticated session bound to the registered business wallet is required for treasury mutations",
   });
+}
+
+/**
+ * Execution failures carry a specific reason and a status that distinguishes
+ * "not yet" from "not true". A caller retrying a NOT_MINED is behaving
+ * correctly; a caller retrying a CALLDATA_MISMATCH is not, and flattening both
+ * to 500 would hide which is which.
+ */
+function handleExecutionError(error: unknown, res: Response): void {
+  if (error instanceof TreasuryExecutionError) {
+    res
+      .status(error.statusCode)
+      .json({ error: error.reason, message: error.message });
+    return;
+  }
+  handleError(error, res);
 }
 
 function handleChainError(error: unknown, res: Response): void {

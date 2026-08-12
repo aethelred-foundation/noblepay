@@ -1,3 +1,9 @@
+const mockVerifyTreasuryExecution = jest.fn();
+jest.mock("../../services/treasury-execution", () => ({
+  verifyTreasuryExecution: (...a: unknown[]) => mockVerifyTreasuryExecution(...a),
+  TreasuryExecutionError: class extends Error {},
+}));
+
 import { Prisma } from "@prisma/client";
 import { TreasuryService } from "../../services/treasury";
 
@@ -194,12 +200,32 @@ describe("Treasury durable chaos boundaries", () => {
 
   it("never performs a DB-only execution when receipt verification is unavailable", async () => {
     const { prisma, service } = setup();
+    // An APPROVED proposal, so the refusal comes from verification failing
+    // rather than from the state check short-circuiting earlier.
+    prisma.treasuryProposal.findFirst.mockResolvedValue(
+      proposal({ status: "APPROVED" }),
+    );
+    mockVerifyTreasuryExecution.mockRejectedValue(
+      new Error("EXECUTION_RPC_UNAVAILABLE"),
+    );
     await expect(
-      service.executeProposal("proposal-chaos", SIGNER, BUSINESS_ID),
-    ).rejects.toMatchObject({
-      code: "TREASURY_EXECUTION_UNAVAILABLE",
-      statusCode: 501,
-    });
+      service.executeProposal(
+        "proposal-chaos",
+        SIGNER,
+        BUSINESS_ID,
+        {
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    },
+        { rpcUrl: "http://rpc.invalid", minimumConfirmations: 1 } as never,
+      ),
+    ).rejects.toThrow();
+    // The invariant, not the error code: when the chain cannot corroborate the
+    // execution, nothing is written. Asserting the absence of the write is what
+    // makes this a chaos test rather than a message assertion — the reason for
+    // the refusal may change, but a DB-only execution must never appear.
     expect(prisma.$transaction).not.toHaveBeenCalled();
     expect(prisma.treasuryProposal.update).not.toHaveBeenCalled();
   });
