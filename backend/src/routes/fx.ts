@@ -2,6 +2,8 @@ import { Router, Response } from "express";
 import { prisma } from "../lib/db";
 import { AuthenticatedRequest, authenticateAPIKey } from "../middleware/auth";
 import { FXService, FXError } from "../services/fx";
+import { readFXPairs, readHedgerPositions } from "../services/fx-chain";
+import { loadNoblePayChainConfiguration } from "../lib/production-config";
 import { AuditService } from "../services/audit";
 import {
   extractRole,
@@ -135,6 +137,76 @@ router.get(
     }
   },
 );
+
+// ─── GET /v1/fx/chain/pairs — On-chain currency pairs and oracle rates ─────
+//
+// Separate from /rates, which serves the database snapshot
+// (dataSource "DATABASE_SNAPSHOT"). This reports the FXHedgingVault itself.
+// The vault's enums are richer than the database's — three hedge types rather
+// than the DB's FORWARD|OPTION|SWAP, and seven statuses including LIQUIDATED —
+// so chain responses use the contract's own vocabulary rather than being
+// squeezed into the DB's.
+
+router.get(
+  "/chain/pairs",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("fx:read"),
+  validate(EmptyBodySchema, "query"),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!req.businessId) return unauthorized(res);
+      const config = loadNoblePayChainConfiguration();
+      const result = await readFXPairs(config);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      handleChainError(error, res);
+    }
+  },
+);
+
+// ─── GET /v1/fx/chain/positions — On-chain positions for a hedger ──────────
+
+router.get(
+  "/chain/positions",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("fx:read"),
+  validate(EmptyBodySchema, "query"),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!req.businessId) return unauthorized(res);
+      // Positions are keyed by hedger address on chain. Bind to the
+      // wallet-authenticated signer rather than accepting an address from the
+      // query, so one business cannot enumerate another's positions.
+      const hedger = req.signerId;
+      if (!hedger) {
+        res.status(403).json({
+          error: "WALLET_SESSION_REQUIRED",
+          message:
+            "A wallet-authenticated session is required to read on-chain positions",
+        });
+        return;
+      }
+      const config = loadNoblePayChainConfiguration();
+      const result = await readHedgerPositions(config, hedger);
+      res.json({ success: true, data: result });
+    } catch (error) {
+      handleChainError(error, res);
+    }
+  },
+);
+
+function handleChainError(error: unknown, res: Response): void {
+  // Upstream availability, not a client error and not our bug: 503 tells the
+  // caller to retry, which it cannot infer from a 500. The RPC message is
+  // logged but withheld, since it can carry internal host addresses.
+  logger.error("FX chain read failed", { error: (error as Error).message });
+  res.status(503).json({
+    error: "CHAIN_READ_FAILED",
+    message: "Could not read the FX vault from the configured RPC",
+  });
+}
 
 function unauthorized(res: Response): void {
   res.status(401).json({
