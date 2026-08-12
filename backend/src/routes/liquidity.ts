@@ -1,6 +1,9 @@
 import { Router, Response } from "express";
 import { prisma } from "../lib/db";
+import { getAddress } from "ethers";
 import { AuthenticatedRequest, authenticateAPIKey } from "../middleware/auth";
+import { loadNoblePayChainConfiguration } from "../lib/production-config";
+import { LiquiditySettlementError } from "../services/liquidity-execution";
 import {
   LiquidityService,
   LiquidityError,
@@ -77,14 +80,22 @@ router.post(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
+      const wallet = walletSignerOrReject(req, res);
+      if (!wallet) return;
+      const body = req.body as AddLiquidityInput & {
+        txHash: string;
+        onChainPositionId: string;
+      };
       const position = await liquidityService.addLiquidity(
-        { ...(req.body as AddLiquidityInput), poolId: req.params.id },
+        { ...body, poolId: req.params.id },
+        wallet,
         req.businessId,
-        req.businessId,
+        { txHash: body.txHash, onChainPositionId: body.onChainPositionId },
+        loadNoblePayChainConfiguration(),
       );
       res.status(201).json({ success: true, data: position });
     } catch (error) {
-      handleError(error, res);
+      handleSettlementError(error, res);
     }
   },
 );
@@ -99,14 +110,22 @@ router.post(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
+      const wallet = walletSignerOrReject(req, res);
+      if (!wallet) return;
+      const body = req.body as RemoveLiquidityInput & {
+        txHash: string;
+        onChainPositionId: string;
+      };
       const result = await liquidityService.removeLiquidity(
-        req.body as RemoveLiquidityInput,
+        body,
+        wallet,
         req.businessId,
-        req.businessId,
+        { txHash: body.txHash, onChainPositionId: body.onChainPositionId },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: result });
     } catch (error) {
-      handleError(error, res);
+      handleSettlementError(error, res);
     }
   },
 );
@@ -149,15 +168,23 @@ router.post(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
-      const body = req.body as { poolId: string; amount: string };
+      const wallet = walletSignerOrReject(req, res);
+      if (!wallet) return;
+      const body = req.body as {
+        poolId: string;
+        txHash: string;
+        flashLoanId: string;
+      };
       const result = await liquidityService.requestFlashLiquidity(
         body.poolId,
-        body.amount,
+        wallet,
         req.businessId,
+        { txHash: body.txHash, flashLoanId: body.flashLoanId },
+        loadNoblePayChainConfiguration(),
       );
       res.status(201).json({ success: true, data: result });
     } catch (error) {
-      handleError(error, res);
+      handleSettlementError(error, res);
     }
   },
 );
@@ -191,6 +218,55 @@ function handleError(error: unknown, res: Response): void {
   res
     .status(500)
     .json({ error: "INTERNAL_ERROR", message: "An internal error occurred" });
+}
+
+/**
+ * Liquidity settlements are attributed to a wallet address, not a business id.
+ * LPPosition.provider holds an address — getPositions matches it against
+ * business.address — and the on-chain event names an address too, so the
+ * verifier can only compare like with like if the caller is identified by
+ * wallet. The routes previously passed businessId into the provider slot; that
+ * mismatch was never exercised because these methods threw 501 before reaching
+ * it.
+ */
+function walletSignerOrReject(
+  req: AuthenticatedRequest,
+  res: Response,
+): string | null {
+  if (!req.signerId) {
+    res.status(403).json({
+      error: "SIGNER_REQUIRED",
+      message: "A wallet-authenticated session is required for liquidity settlement",
+    });
+    return null;
+  }
+  if (req.apiKeyId || req.signerId.startsWith("apikey:")) {
+    res.status(403).json({
+      error: "WALLET_SESSION_REQUIRED",
+      message:
+        "API-key credentials cannot settle liquidity; a wallet session is required",
+    });
+    return null;
+  }
+  try {
+    return getAddress(req.signerId);
+  } catch {
+    res.status(403).json({
+      error: "WALLET_SESSION_REQUIRED",
+      message: "The session signer is not a valid EVM address",
+    });
+    return null;
+  }
+}
+
+function handleSettlementError(error: unknown, res: Response): void {
+  if (error instanceof LiquiditySettlementError) {
+    res
+      .status(error.statusCode)
+      .json({ error: error.reason, message: error.message });
+    return;
+  }
+  handleError(error, res);
 }
 
 function unauthorized(res: Response): void {

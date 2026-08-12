@@ -1,6 +1,14 @@
 import { Prisma } from "@prisma/client";
 import { LiquidityService } from "../../services/liquidity";
 import type { AuditService } from "../../services/audit";
+const mockVerifyLiquiditySettlement = jest.fn();
+const mockVerifyFlashLoan = jest.fn();
+jest.mock("../../services/liquidity-execution", () => ({
+  verifyLiquiditySettlement: (...a: unknown[]) =>
+    mockVerifyLiquiditySettlement(...a),
+  verifyFlashLoan: (...a: unknown[]) => mockVerifyFlashLoan(...a),
+  LiquiditySettlementError: class extends Error {},
+}));
 
 const wallet = "0x1111111111111111111111111111111111111111";
 const now = new Date("2026-07-21T12:00:00.000Z");
@@ -29,10 +37,18 @@ function setup() {
       findMany: jest.fn(),
       findUnique: jest.fn(),
     },
-    lPPosition: { findMany: jest.fn() },
+    lPPosition: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
     business: { findUnique: jest.fn() },
   };
-  const service = new LiquidityService(prisma as never, {} as AuditService);
+  const service = new LiquidityService(prisma as never, {
+    createAuditEntry: jest.fn(),
+  } as unknown as AuditService);
   return { prisma, service };
 }
 
@@ -202,31 +218,65 @@ describe("LiquidityService production behavior", () => {
     );
   });
 
+  // The mutations are no longer blanket-disabled — a receipt verifier now
+  // exists — but they still fail closed. What is asserted is the invariant
+  // rather than the old 501: when the chain does not corroborate a settlement,
+  // nothing is written.
   it("fails every unverified liquidity mutation closed", async () => {
-    const { service } = setup();
+    const { prisma, service } = setup();
+    prisma.liquidityPool.findUnique.mockResolvedValue(pool());
+    prisma.lPPosition.findFirst.mockResolvedValue(null);
+    prisma.lPPosition.findUnique.mockResolvedValue({
+      id: "position-1",
+      provider: wallet,
+      poolId: "pool-1",
+    });
+    mockVerifyLiquiditySettlement.mockRejectedValue(
+      new Error("SETTLEMENT_RPC_UNAVAILABLE"),
+    );
+    mockVerifyFlashLoan.mockRejectedValue(new Error("FLASH_LOAN_NOT_REPAID"));
+
+    const settlement = {
+      txHash: `0x${"e".repeat(64)}`,
+      onChainPositionId: `0x${"b".repeat(64)}`,
+    };
+    const chainConfig = {
+      rpcUrl: "http://rpc.invalid",
+      minimumConfirmations: 1,
+    } as never;
+
     await expect(
       service.addLiquidity(
         { poolId: "pool-1", amountA: "1", amountB: "1" },
         wallet,
         "business-1",
+        settlement,
+        chainConfig,
       ),
-    ).rejects.toMatchObject({
-      code: "ONCHAIN_SETTLEMENT_UNAVAILABLE",
-      statusCode: 501,
-    });
+    ).rejects.toThrow();
     await expect(
       service.removeLiquidity(
         { positionId: "position-1", percentage: 100 },
         wallet,
         "business-1",
+        settlement,
+        chainConfig,
       ),
-    ).rejects.toMatchObject({ statusCode: 501 });
+    ).rejects.toThrow();
     await expect(
-      service.requestFlashLiquidity("pool-1", "100", wallet),
-    ).rejects.toMatchObject({
-      code: "FLASH_LIQUIDITY_UNAVAILABLE",
-      statusCode: 501,
-    });
+      service.requestFlashLiquidity(
+        "pool-1",
+        wallet,
+        "business-1",
+        { txHash: settlement.txHash, flashLoanId: `0x${"d".repeat(64)}` },
+        chainConfig,
+      ),
+    ).rejects.toThrow();
+
+    // No position created, none updated: an unverified settlement leaves no
+    // trace in the ledger.
+    expect(prisma.lPPosition.create).not.toHaveBeenCalled();
+    expect(prisma.lPPosition.update).not.toHaveBeenCalled();
   });
 
   it("derives analytics only from persisted pool snapshots", async () => {

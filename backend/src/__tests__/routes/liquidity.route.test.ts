@@ -26,15 +26,28 @@ jest.mock("../../services/liquidity", () => {
     LiquidityError,
   };
 });
+// Liquidity settlement is attributed to a wallet, so the mock must supply a
+// signer as well as a tenant.
+const SIGNER_WALLET = "0x1111111111111111111111111111111111111111";
+
 jest.mock("../../middleware/auth", () => ({
   authenticateAPIKey: (
-    req: { businessId?: string },
+    req: { businessId?: string; signerId?: string },
     _res: unknown,
     next: () => void,
   ) => {
-    if (authenticated) req.businessId = "business-1";
+    if (authenticated) {
+      req.businessId = "business-1";
+      req.signerId = "0x1111111111111111111111111111111111111111";
+    }
     next();
   },
+}));
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 1,
+  }),
 }));
 jest.mock("../../middleware/rbac", () => ({
   extractRole: (_req: unknown, _res: unknown, next: () => void) => next(),
@@ -106,15 +119,24 @@ describe("liquidity routes", () => {
       .send({ amountA: "1e6", amountB: "2", extra: true });
     const valid = await request(app)
       .post("/v1/liquidity/pools/pool-1/add")
-      .send({ amountA: "1", amountB: "2" });
+      .send({
+        amountA: "1",
+        amountB: "2",
+        txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+        onChainPositionId: "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+      });
 
     expect(invalid.status).toBe(400);
     expect(valid.status).toBe(501);
     expect(valid.body.error).toBe("ONCHAIN_SETTLEMENT_UNAVAILABLE");
+    // The provider is now the wallet signer, not the business id: the on-chain
+    // event names an address, and the verifier compares like with like.
     expect(mockLiquidityService.addLiquidity).toHaveBeenCalledWith(
-      { poolId: "pool-1", amountA: "1", amountB: "2" },
+      expect.objectContaining({ poolId: "pool-1", amountA: "1", amountB: "2" }),
+      SIGNER_WALLET,
       "business-1",
-      "business-1",
+      { txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa", onChainPositionId: "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e" },
+      expect.anything(),
     );
   });
 
@@ -152,22 +174,31 @@ describe("liquidity routes", () => {
 
     const removal = await request(app)
       .post("/v1/liquidity/pools/pool-1/remove")
-      .send({ positionId: "position-1", percentage: 50 });
+      .send({
+        positionId: "position-1",
+        percentage: 50,
+        txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+        onChainPositionId: "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+      });
     const flash = await request(app)
       .post("/v1/liquidity/flash")
-      .send({ poolId: "pool-1", amount: "100" });
+      .send({ poolId: "pool-1", txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa", flashLoanId: "0xd0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e" });
 
     expect(removal.status).toBe(501);
     expect(flash.status).toBe(501);
     expect(mockLiquidityService.removeLiquidity).toHaveBeenCalledWith(
-      { positionId: "position-1", percentage: 50 },
+      expect.objectContaining({ positionId: "position-1", percentage: 50 }),
+      SIGNER_WALLET,
       "business-1",
-      "business-1",
+      { txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa", onChainPositionId: "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e" },
+      expect.anything(),
     );
     expect(mockLiquidityService.requestFlashLiquidity).toHaveBeenCalledWith(
       "pool-1",
-      "100",
+      SIGNER_WALLET,
       "business-1",
+      { txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa", flashLoanId: "0xd0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e" },
+      expect.anything(),
     );
   });
 
@@ -187,20 +218,30 @@ describe("liquidity routes", () => {
       "add",
       "post",
       "/v1/liquidity/pools/pool-1/add",
-      { amountA: "1", amountB: "2" },
+      {
+        amountA: "1",
+        amountB: "2",
+        txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+        onChainPositionId: "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+      },
     ],
     [
       "remove",
       "post",
       "/v1/liquidity/pools/pool-1/remove",
-      { positionId: "position-1", percentage: 50 },
+      {
+        positionId: "position-1",
+        percentage: 50,
+        txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+        onChainPositionId: "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+      },
     ],
     ["positions", "get", "/v1/liquidity/positions", undefined],
     [
       "flash",
       "post",
       "/v1/liquidity/flash",
-      { poolId: "pool-1", amount: "100" },
+      { poolId: "pool-1", txHash: "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa", flashLoanId: "0xd0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e" },
     ],
     ["analytics", "get", "/v1/liquidity/analytics", undefined],
   ])(

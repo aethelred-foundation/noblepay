@@ -61,11 +61,13 @@ function LiquidityContent() {
 
       <Panel
         title="Liquidity execution"
-        description="Contract writes are intentionally fail-closed in this environment."
+        description="Settlements are verified against the chain before they are recorded."
       >
         <div className="rounded-xl border border-amber-500/25 bg-amber-500/10 p-4 text-sm leading-6 text-amber-100/75">
-          {liquidity.mutationReason} Pool and position snapshots below remain
-          read-only until that verifier is enabled.
+          {liquidity.mutationReason} A settlement is accepted only if the
+          transaction is canonical on this network, targeted the pool, and
+          emitted the matching event for your address — and a flash loan only if
+          its repayment appears in the same transaction as the borrow.
         </div>
       </Panel>
 

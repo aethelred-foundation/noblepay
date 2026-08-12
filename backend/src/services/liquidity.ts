@@ -1,5 +1,10 @@
 import { Prisma, PrismaClient } from "@prisma/client";
 import { AuditService } from "./audit";
+import {
+  verifyFlashLoan,
+  verifyLiquiditySettlement,
+} from "./liquidity-execution";
+import type { NoblePayChainConfiguration } from "../lib/production-config";
 
 export type PoolStatus = "ACTIVE" | "PAUSED" | "DEPRECATED";
 export type LPTier = "RETAIL" | "INSTITUTIONAL" | "MARKET_MAKER";
@@ -212,32 +217,242 @@ export class LiquidityService {
     });
   }
 
+  /**
+   * Record an on-chain liquidity addition.
+   *
+   * The service submits nothing. A provider adds liquidity from their own
+   * wallet and reports the transaction; the position row is written only once
+   * the chain corroborates it, and the provider on the event must match the
+   * caller so one account cannot claim another's position.
+   */
   async addLiquidity(
-    _input: AddLiquidityInput,
-    _provider: string,
-    _businessId: string,
-  ): Promise<never> {
-    throw this.settlementUnavailable();
-  }
+    input: AddLiquidityInput,
+    provider: string,
+    businessId: string,
+    settlement: { txHash: string; onChainPositionId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<LPPositionRecord> {
+    const pool = await this.prisma.liquidityPool.findUnique({
+      where: { id: input.poolId },
+    });
+    if (!pool) {
+      throw new LiquidityError("POOL_NOT_FOUND", "Pool not found", 404);
+    }
 
-  async removeLiquidity(
-    _input: RemoveLiquidityInput,
-    _actor: string,
-    _businessId?: string,
-  ): Promise<never> {
-    throw this.settlementUnavailable();
-  }
+    const existing = await this.prisma.lPPosition.findFirst({
+      where: { settlementTxHash: settlement.txHash.toLowerCase() },
+    });
+    if (existing) {
+      // Idempotent: the same settlement reported twice yields the same row
+      // rather than a duplicate position.
+      return this.toPositionRecord(existing, pool, businessId);
+    }
 
-  async requestFlashLiquidity(
-    _poolId: string,
-    _amount: string,
-    _borrower: string,
-  ): Promise<never> {
-    throw new LiquidityError(
-      "FLASH_LIQUIDITY_UNAVAILABLE",
-      "Flash liquidity is disabled until an atomic contract receipt verifier is configured",
-      501,
+    const verified = await verifyLiquiditySettlement(
+      config,
+      {
+        txHash: settlement.txHash,
+        onChainPositionId: settlement.onChainPositionId,
+        kind: "ADD",
+        expectedProvider: provider,
+      },
+      process.env,
     );
+
+    const position = await this.prisma.lPPosition.create({
+      data: {
+        poolId: input.poolId,
+        provider,
+        // Amounts come from the event, not the request: the chain is the
+        // authority on how much actually moved.
+        liquidity: new Prisma.Decimal(verified.amountToken0).add(
+          new Prisma.Decimal(verified.amountToken1),
+        ),
+        lowerTick: input.rangeMin ?? 0,
+        upperTick: input.rangeMax ?? 0,
+        onChainPositionId: verified.onChainPositionId,
+        settlementTxHash: verified.txHash,
+      },
+    });
+
+    await this._auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: provider,
+      description: `Liquidity added on chain to pool ${input.poolId} via ${verified.txHash}`,
+      severity: "MEDIUM",
+      businessId,
+      metadata: {
+        poolId: input.poolId,
+        onChainPositionId: verified.onChainPositionId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        amountToken0: verified.amountToken0,
+        amountToken1: verified.amountToken1,
+      },
+    });
+
+    return this.toPositionRecord(position, pool, businessId);
+  }
+
+  /** Record an on-chain liquidity removal against an existing position. */
+  async removeLiquidity(
+    input: RemoveLiquidityInput,
+    actor: string,
+    businessId: string,
+    settlement: { txHash: string; onChainPositionId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<{ positionId: string; txHash: string; blockNumber: number }> {
+    const position = await this.prisma.lPPosition.findUnique({
+      where: { id: input.positionId },
+    });
+    if (!position) {
+      throw new LiquidityError("POSITION_NOT_FOUND", "Position not found", 404);
+    }
+    if (position.provider.toLowerCase() !== actor.toLowerCase()) {
+      throw new LiquidityError(
+        "NOT_POSITION_OWNER",
+        "Only the position's provider may remove its liquidity",
+        403,
+      );
+    }
+
+    const verified = await verifyLiquiditySettlement(
+      config,
+      {
+        txHash: settlement.txHash,
+        onChainPositionId: settlement.onChainPositionId,
+        kind: "REMOVE",
+        expectedProvider: actor,
+      },
+      process.env,
+    );
+
+    await this.prisma.lPPosition.update({
+      where: { id: position.id },
+      data: { settlementTxHash: verified.txHash },
+    });
+
+    await this._auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor,
+      description: `Liquidity removed on chain from position ${position.id} via ${verified.txHash}`,
+      severity: "MEDIUM",
+      businessId,
+      metadata: {
+        positionId: position.id,
+        onChainPositionId: verified.onChainPositionId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        percentage: input.percentage,
+      },
+    });
+
+    return {
+      positionId: position.id,
+      txHash: verified.txHash,
+      blockNumber: verified.blockNumber,
+    };
+  }
+
+  /**
+   * Record a completed flash loan.
+   *
+   * Verification requires the borrow AND its repayment in the same
+   * transaction. That is the property that makes a flash loan safe, and a
+   * receipt showing only the borrow describes value that left the pool
+   * unsecured — so it is refused rather than recorded.
+   */
+  async requestFlashLiquidity(
+    poolId: string,
+    borrower: string,
+    businessId: string,
+    settlement: { txHash: string; flashLoanId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<{
+    flashLoanId: string;
+    amount: string;
+    fee: string;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    const verified = await verifyFlashLoan(
+      config,
+      {
+        txHash: settlement.txHash,
+        flashLoanId: settlement.flashLoanId,
+        expectedBorrower: borrower,
+      },
+      process.env,
+    );
+
+    await this._auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: borrower,
+      description: `Flash loan borrowed and repaid atomically in ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        poolId,
+        flashLoanId: verified.flashLoanId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        amount: verified.amount,
+        fee: verified.fee,
+        atomicRepaymentVerified: true,
+      },
+    });
+
+    return {
+      flashLoanId: verified.flashLoanId,
+      amount: verified.amount,
+      fee: verified.fee,
+      txHash: verified.txHash,
+      blockNumber: verified.blockNumber,
+    };
+  }
+
+  /**
+   * Map a stored position to the record shape getPositions already returns, so
+   * a freshly settled position and a listed one are the same object to callers.
+   */
+  private toPositionRecord(
+    position: {
+      id: string;
+      poolId: string;
+      provider: string;
+      liquidity: Prisma.Decimal;
+      lowerTick: number;
+      upperTick: number;
+      feesEarned: Prisma.Decimal;
+      createdAt: Date;
+    },
+    pool: {
+      totalLiquidity: Prisma.Decimal;
+      reserveA: Prisma.Decimal;
+      reserveB: Prisma.Decimal;
+    },
+    businessId: string,
+  ): LPPositionRecord {
+    const total = pool.totalLiquidity.toNumber();
+    const liquidity = position.liquidity.toNumber();
+    const reserveA = pool.reserveA.toNumber();
+    const reserveB = pool.reserveB.toNumber();
+    return {
+      id: position.id,
+      businessId,
+      poolId: position.poolId,
+      provider: position.provider,
+      tier: null,
+      liquidityAmount: position.liquidity.toString(),
+      sharePercentage: total > 0 ? (liquidity / total) * 100 : 0,
+      rangeMin: position.lowerTick,
+      rangeMax: position.upperTick,
+      feesEarned: position.feesEarned.toString(),
+      impermanentLoss: null,
+      entryPrice: reserveA > 0 ? reserveB / reserveA : null,
+      createdAt: position.createdAt,
+      lastClaimedAt: null,
+    };
   }
 
   async getAnalytics(_businessId?: string): Promise<PoolAnalytics> {
@@ -281,13 +496,6 @@ export class LiquidityService {
     };
   }
 
-  private settlementUnavailable(): LiquidityError {
-    return new LiquidityError(
-      "ONCHAIN_SETTLEMENT_UNAVAILABLE",
-      "Liquidity changes are disabled until the pool contract transaction and receipt verifier are configured",
-      501,
-    );
-  }
 }
 
 export class LiquidityError extends Error {

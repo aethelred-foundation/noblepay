@@ -17,11 +17,25 @@ const secondAddress = "0x2222222222222222222222222222222222222222";
 
 describe("advanced route validation", () => {
   it("strictly validates liquidity ranges, decimals, and pagination", () => {
+    // Adding liquidity now reports an on-chain settlement, so every valid
+    // body carries one. Spread into each case so the assertions stay about
+    // ranges and decimals rather than about the settlement fields.
+    const settlement = {
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainPositionId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    };
     expect(
-      AddLiquiditySchema.safeParse({ amountA: "1.25", amountB: "2" }).success,
+      AddLiquiditySchema.safeParse({
+        ...settlement,
+        amountA: "1.25",
+        amountB: "2",
+      }).success,
     ).toBe(true);
     expect(
       AddLiquiditySchema.safeParse({
+        ...settlement,
         amountA: "1e9",
         amountB: "2",
         unexpected: true,
@@ -29,11 +43,17 @@ describe("advanced route validation", () => {
     ).toBe(false);
     expect(
       AddLiquiditySchema.safeParse({
+        ...settlement,
         amountA: "1",
         amountB: "2",
         rangeMin: 10,
         rangeMax: 10,
       }).success,
+    ).toBe(false);
+    // A settlement-free body is now rejected outright: liquidity cannot be
+    // recorded without naming the transaction that moved it.
+    expect(
+      AddLiquiditySchema.safeParse({ amountA: "1.25", amountB: "2" }).success,
     ).toBe(false);
     expect(LiquidityPoolsQuerySchema.safeParse({ limit: "101" }).success).toBe(
       false,

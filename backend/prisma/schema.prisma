@@ -488,10 +488,20 @@ model LPPosition {
   feesEarned Decimal  @default(0) @map("fees_earned") @db.Decimal(36, 18)
   createdAt  DateTime @default(now()) @map("created_at")
 
+  // Link to the LiquidityPool position this record mirrors, and the
+  // transaction that settled it. Position ids are hash-derived on chain and
+  // bear no relation to this row's uuid, so without these columns there was no
+  // way to say which on-chain position a record refers to — the same gap that
+  // kept treasury execution closed. Written only after the settlement
+  // transaction is verified canonical.
+  onChainPositionId String? @map("on_chain_position_id")
+  settlementTxHash  String? @map("settlement_tx_hash")
+
   pool LiquidityPool @relation(fields: [poolId], references: [id])
 
   @@index([poolId])
   @@index([provider])
+  @@index([settlementTxHash])
   @@map("lp_positions")
 }
 

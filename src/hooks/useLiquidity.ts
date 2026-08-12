@@ -152,9 +152,15 @@ export function useLiquidity() {
     error:
       poolsQuery.error || positionsQuery.error || analyticsQuery.error || null,
     refetch,
+    // The backend receipt verifier now exists, so the API accepts settlements.
+    // This client still exposes no mutation helpers: liquidity is moved from
+    // the provider's own wallet and then reported, so the write path belongs
+    // to whichever surface holds the signer, not to this read hook.
     mutationsEnabled: false,
     mutationReason:
-      "On-chain pool changes remain disabled until transaction receipts can be verified.",
+      "Liquidity is moved from your own wallet and then reported to the API, " +
+      "which verifies the transaction receipt before recording it. This view " +
+      "is read-only.",
     addLiquidity: unavailable,
     removeLiquidity: unavailable,
     claimFees: unavailable,

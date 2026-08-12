@@ -403,8 +403,32 @@ export const LiquidityPoolsQuerySchema = z
 export const LiquidityPositionQuerySchema = z
   .object({ provider: ethereumAddress.optional(), page, limit })
   .strict();
+/**
+ * Liquidity settlements are reported, not requested: the provider moves
+ * liquidity from their own wallet and names the transaction. Both fields are
+ * verified against the chain before anything is written.
+ */
+export const LiquiditySettlementSchema = z
+  .object({
+    txHash: bytes32Hash,
+    onChainPositionId: bytes32Hash,
+  })
+  .strict();
+
+export const FlashLoanSettlementSchema = z
+  .object({
+    txHash: bytes32Hash,
+    flashLoanId: bytes32Hash,
+  })
+  .strict();
+
+export type LiquiditySettlement = z.infer<typeof LiquiditySettlementSchema>;
+export type FlashLoanSettlement = z.infer<typeof FlashLoanSettlementSchema>;
+
 export const AddLiquiditySchema = z
   .object({
+    txHash: bytes32Hash,
+    onChainPositionId: bytes32Hash,
     amountA: advancedPositiveDecimal,
     amountB: advancedPositiveDecimal,
     rangeMin: z.number().int().min(-887_272).max(887_272).optional(),
@@ -427,12 +451,24 @@ export const AddLiquiditySchema = z
   });
 export const RemoveLiquiditySchema = z
   .object({
+    txHash: bytes32Hash,
+    onChainPositionId: bytes32Hash,
     positionId: opaqueResourceId,
     percentage: z.number().finite().gt(0).max(100),
   })
   .strict();
+/**
+ * A completed flash loan is reported, not requested. `amount` is deliberately
+ * absent: the verifier reads it from the FlashLoanInitiated event, and
+ * accepting a caller-supplied figure the service then ignores would imply it
+ * carried weight.
+ */
 export const FlashLiquiditySchema = z
-  .object({ poolId: opaqueResourceId, amount: advancedPositiveDecimal })
+  .object({
+    poolId: opaqueResourceId,
+    txHash: bytes32Hash,
+    flashLoanId: bytes32Hash,
+  })
   .strict();
 
 export const CreateStreamSchema = z
