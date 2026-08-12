@@ -1,5 +1,7 @@
 import { FormEvent, useState } from "react";
+import { formatBaseUnits, groupDigits } from "@/lib/fixed-point";
 import { useTreasury } from "@/hooks/useTreasury";
+import { useTreasuryChain } from "@/hooks/useTreasuryChain";
 import {
   EmptyState,
   ErrorState,
@@ -16,6 +18,200 @@ const money = (value: number, currency = "USD") =>
     currency,
     maximumFractionDigits: 2,
   }).format(value);
+
+const NATIVE_DECIMALS = 18;
+
+const shortHex = (value: string) =>
+  value.length > 14 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+
+const secondsToHours = (seconds: number) => `${Math.round(seconds / 3600)}h`;
+
+/**
+ * On-chain treasury state.
+ *
+ * Deliberately a separate panel from the records above rather than a
+ * replacement for them. The database holds the approval workflow; the contract
+ * holds the funds. They answer different questions and can disagree, so the
+ * page shows both and says which is which — the page's own banner already
+ * warns that a recorded proposal does not move money, and this is what it
+ * looks like when you check.
+ */
+function OnChainTreasuryPanel() {
+  const chain = useTreasuryChain();
+
+  if (chain.configured === null) {
+    return (
+      <Panel title="On-chain treasury">
+        <LoadingState label="Reading the treasury contract" />
+      </Panel>
+    );
+  }
+
+  if (chain.configured === false) {
+    return (
+      <Panel
+        title="On-chain treasury"
+        description="Contract state, read directly from MultiSigTreasury."
+      >
+        <EmptyState
+          title="No treasury contract configured"
+          body="This environment has no MULTISIG_TREASURY_ADDRESS. The records above are the durable workflow only; nothing is settled on chain."
+        />
+      </Panel>
+    );
+  }
+
+  const overview = chain.overview;
+  if (!overview) return null;
+
+  return (
+    <Panel
+      title="On-chain treasury"
+      description={`Read from ${shortHex(overview.address)} at block ${overview.readAtBlock}. This is contract state, not the recorded ledger above.`}
+    >
+      {chain.error && (
+        <div className="mb-4">
+          <ErrorState
+            error={chain.error}
+            retry={() => void chain.refetch()}
+          />
+        </div>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <MetricCard
+          label="Contract balance"
+          value={`${formatBaseUnits(overview.nativeBalance, NATIVE_DECIMALS)} AETHEL`}
+        />
+        <MetricCard
+          label="Signers on contract"
+          value={overview.signerCount}
+        />
+        <MetricCard
+          label="Awaiting approval"
+          value={overview.proposalCounts.PENDING}
+          tone="warning"
+        />
+        <MetricCard
+          label="Approved, not executed"
+          value={overview.proposalCounts.APPROVED}
+          tone="success"
+        />
+      </div>
+
+      <h3 className="mt-6 text-sm font-semibold text-white">Approval matrix</h3>
+      <p className="mt-1 text-xs text-amber-200/90">
+        The contract compares a proposal&apos;s raw amount against these bounds,
+        so they only read as US dollars for a six-decimal, dollar-pegged token
+        such as USDC. For any other asset, native AETHEL included, the tier is
+        derived from that token&apos;s own base units and does not track the
+        value being moved. Bounds are shown in raw units for that reason.
+      </p>
+      <div className="mt-3 overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-slate-800 text-xs text-slate-400">
+              <th className="pb-2 text-left">Tier</th>
+              <th className="pb-2 text-left">Amount bound (raw units)</th>
+              <th className="pb-2 text-right">Signatures</th>
+              <th className="pb-2 text-right">Timelock</th>
+            </tr>
+          </thead>
+          <tbody>
+            {overview.tiers.map((tier) => (
+              <tr key={tier.tier} className="border-b border-slate-800/60">
+                <td className="py-2 text-white">{tier.tier}</td>
+                <td className="py-2 text-xs text-slate-300">
+                  {tier.tier === "EMERGENCY"
+                    ? "any (flagged)"
+                    : `${groupDigits(tier.minAmount)} – ${
+                        tier.maxAmount === null
+                          ? "unbounded"
+                          : groupDigits(tier.maxAmount)
+                      }`}
+                </td>
+                <td className="py-2 text-right text-white">
+                  {tier.requiredSignatures}
+                </td>
+                <td className="py-2 text-right text-slate-300">
+                  {secondsToHours(tier.timelockSeconds)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <h3 className="mt-6 text-sm font-semibold text-white">
+        Proposals on the contract
+      </h3>
+      {chain.proposals.length === 0 ? (
+        <div className="mt-3">
+          <EmptyState
+            title="No proposals on chain"
+            body="The contract holds no proposals. Records above are workflow only until a signer creates one on chain."
+          />
+        </div>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {chain.proposals.map((proposal) => (
+            <article
+              key={proposal.proposalId}
+              className="rounded-xl border border-slate-800 p-4"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h4 className="font-medium text-white">
+                  {proposal.description || "(no description)"}
+                </h4>
+                <span className="text-xs text-slate-400">
+                  {proposal.status} · {proposal.tier} tier
+                </span>
+              </div>
+              <p className="mt-2 text-sm text-slate-400">
+                {groupDigits(proposal.amount)} raw units to{" "}
+                {shortHex(proposal.recipient)}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {proposal.approvalCount} of {proposal.requiredApprovals}{" "}
+                approvals
+                {proposal.rejectionCount > 0 &&
+                  ` · ${proposal.rejectionCount} rejection(s)`}
+                {proposal.isEmergency && " · emergency"}
+              </p>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {chain.budgets.length > 0 && (
+        <>
+          <h3 className="mt-6 text-sm font-semibold text-white">
+            Budgets on the contract
+          </h3>
+          <div className="mt-3 space-y-3">
+            {chain.budgets.map((budget) => (
+              <article
+                key={budget.budgetId}
+                className="rounded-xl border border-slate-800 p-4"
+              >
+                <div className="flex items-center justify-between gap-4">
+                  <h4 className="font-medium text-white">{budget.name}</h4>
+                  <span className="text-xs text-slate-400">
+                    {budget.category}
+                  </span>
+                </div>
+                <p className="mt-2 text-sm text-slate-400">
+                  {groupDigits(budget.spent)} of{" "}
+                  {groupDigits(budget.totalAllocation)} spent
+                </p>
+              </article>
+            ))}
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
 
 function TreasuryContent() {
   const treasury = useTreasury();
@@ -88,8 +284,12 @@ function TreasuryContent() {
 
       <p className="text-xs text-slate-500">
         Allocation amounts are shown in their recorded token units; no fiat AUM
-        valuation is inferred without a verified price source.
+        valuation is inferred without a verified price source. The metrics above
+        are the recorded ledger — see the on-chain panel for what the contract
+        actually holds.
       </p>
+
+      <OnChainTreasuryPanel />
 
       <Panel
         title="Create treasury proposal"
