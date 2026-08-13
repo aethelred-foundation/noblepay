@@ -90,6 +90,11 @@ describe("advanced route validation", () => {
       currency: "USDC",
       expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
       marginDeposit: "100",
+      // A hedge record without a receipt is an unverifiable claim that a
+      // position exists, so these are required.
+      txHash: `0x${"c".repeat(64)}`,
+      onChainPositionId: `0x${"d".repeat(64)}`,
+      onChainHedgeType: "FORWARD",
     };
     expect(CreateFXHedgeSchema.safeParse(valid).success).toBe(true);
     expect(
@@ -98,6 +103,41 @@ describe("advanced route validation", () => {
     expect(
       CreateFXHedgeSchema.safeParse({ ...valid, fakeRate: 3.67 }).success,
     ).toBe(false);
+
+    // No receipt, no record.
+    const { txHash: _t, ...noReceipt } = valid;
+    expect(CreateFXHedgeSchema.safeParse(noReceipt).success).toBe(false);
+
+    // FXHedgingVault cannot create a SWAP, so one can never be verified.
+    expect(
+      CreateFXHedgeSchema.safeParse({ ...valid, type: "SWAP" }).success,
+    ).toBe(false);
+
+    // A forward is not an option, in either direction.
+    expect(
+      CreateFXHedgeSchema.safeParse({
+        ...valid,
+        onChainHedgeType: "OPTION_CALL",
+      }).success,
+    ).toBe(false);
+    expect(
+      CreateFXHedgeSchema.safeParse({
+        ...valid,
+        type: "OPTION",
+        onChainHedgeType: "FORWARD",
+      }).success,
+    ).toBe(false);
+
+    // An option may be either direction.
+    for (const onChainHedgeType of ["OPTION_CALL", "OPTION_PUT"]) {
+      expect(
+        CreateFXHedgeSchema.safeParse({
+          ...valid,
+          type: "OPTION",
+          onChainHedgeType,
+        }).success,
+      ).toBe(true);
+    }
   });
 
   it("strictly validates cross-chain routes and transfer addresses", () => {

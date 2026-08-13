@@ -7,6 +7,13 @@ const mockFXService = {
   getAnalytics: jest.fn(),
 };
 let authenticated = true;
+const SIGNER = "0x2E8625F06A696b556B7B5e0C1b34B1cb55203af1";
+const RECEIPT = {
+  txHash: `0x${"c".repeat(64)}`,
+  onChainPositionId: `0x${"d".repeat(64)}`,
+  onChainHedgeType: "FORWARD" as const,
+};
+const CLOSE_RECEIPT = { txHash: `0x${"f".repeat(64)}` };
 
 jest.mock("../../lib/db", () => ({ prisma: {} }));
 jest.mock("../../services/audit", () => ({ AuditService: jest.fn() }));
@@ -24,14 +31,38 @@ jest.mock("../../services/fx", () => {
 });
 jest.mock("../../middleware/auth", () => ({
   authenticateAPIKey: (
-    req: { businessId?: string },
+    req: { businessId?: string; signerId?: string; apiKeyId?: string },
     _res: unknown,
     next: () => void,
   ) => {
-    if (authenticated) req.businessId = "business-1";
+    if (authenticated) {
+      req.businessId = "business-1";
+      // FX mutations bind a chain receipt to the signer's address, so they
+      // require a wallet-authenticated session.
+      req.signerId = SIGNER;
+    }
     next();
   },
 }));
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 3,
+  }),
+}));
+jest.mock("../../services/fx-execution", () => {
+  class FXExecutionError extends Error {
+    constructor(
+      public reason: string,
+      message: string,
+      public statusCode = 422,
+    ) {
+      super(message);
+      this.name = "FXExecutionError";
+    }
+  }
+  return { FXExecutionError };
+});
 jest.mock("../../middleware/rbac", () => ({
   extractRole: (_req: unknown, _res: unknown, next: () => void) => next(),
   requireRole: () => (_req: unknown, _res: unknown, next: () => void) => next(),
@@ -104,11 +135,12 @@ describe("FX routes", () => {
     expect(mockFXService.createHedge).not.toHaveBeenCalled();
   });
 
-  it("returns the explicit fail-closed execution status for a valid hedge", async () => {
-    mockFXService.createHedge.mockRejectedValue(
-      new FXError("FX_EXECUTION_UNAVAILABLE", "No receipt verifier", 501),
-    );
-    const body = {
+  it("splits the receipt out and passes the WALLET signer as trader", async () => {
+    // The trader argument used to be businessId, which the 501 concealed. A
+    // chain receipt binds to an address, so that would have failed every
+    // hedger check the moment the gate opened.
+    mockFXService.createHedge.mockResolvedValue({ id: "hedge-1" });
+    const input = {
       pair: "USDC/AED",
       type: "FORWARD",
       notionalAmount: "1000",
@@ -117,41 +149,109 @@ describe("FX routes", () => {
       marginDeposit: "100",
     };
 
-    const response = await request(app).post("/v1/fx/hedges").send(body);
+    const response = await request(app)
+      .post("/v1/fx/hedges")
+      .send({ ...input, ...RECEIPT });
 
-    expect(response.status).toBe(501);
-    expect(response.body.error).toBe("FX_EXECUTION_UNAVAILABLE");
+    expect(response.status).toBe(201);
     expect(mockFXService.createHedge).toHaveBeenCalledWith(
-      body,
+      input,
+      SIGNER,
       "business-1",
-      "business-1",
+      RECEIPT,
+      expect.anything(),
     );
   });
 
-  it("rejects payload fields on the close endpoint", async () => {
+  it("refuses a SWAP at the schema — the vault cannot create one", async () => {
+    const response = await request(app)
+      .post("/v1/fx/hedges")
+      .send({
+        pair: "USDC/AED",
+        type: "SWAP",
+        notionalAmount: "1000",
+        currency: "USDC",
+        expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
+        marginDeposit: "100",
+        ...RECEIPT,
+      });
+
+    expect(response.status).toBe(400);
+    expect(mockFXService.createHedge).not.toHaveBeenCalled();
+  });
+
+  it("refuses a FORWARD declared as an on-chain option", async () => {
+    const response = await request(app)
+      .post("/v1/fx/hedges")
+      .send({
+        pair: "USDC/AED",
+        type: "FORWARD",
+        notionalAmount: "1000",
+        currency: "USDC",
+        expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
+        marginDeposit: "100",
+        ...RECEIPT,
+        onChainHedgeType: "OPTION_CALL",
+      });
+
+    expect(response.status).toBe(400);
+    expect(mockFXService.createHedge).not.toHaveBeenCalled();
+  });
+
+  it("refuses a hedge with no receipt", async () => {
+    const response = await request(app).post("/v1/fx/hedges").send({
+      pair: "USDC/AED",
+      type: "FORWARD",
+      notionalAmount: "1000",
+      currency: "USDC",
+      expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
+      marginDeposit: "100",
+    });
+
+    expect(response.status).toBe(400);
+    expect(mockFXService.createHedge).not.toHaveBeenCalled();
+  });
+
+  it("rejects unknown payload fields on the close endpoint", async () => {
     const response = await request(app)
       .post("/v1/fx/hedges/hedge-1/close")
-      .send({ settlementRate: 3.7 });
+      .send({ ...CLOSE_RECEIPT, settlementRate: 3.7 });
 
     expect(response.status).toBe(400);
     expect(mockFXService.closePosition).not.toHaveBeenCalled();
   });
 
-  it("passes a valid close request through to the fail-closed execution guard", async () => {
-    mockFXService.closePosition.mockRejectedValue(
-      new FXError("FX_EXECUTION_UNAVAILABLE", "No receipt verifier", 501),
-    );
-
+  it("rejects a close with no receipt", async () => {
     const response = await request(app)
       .post("/v1/fx/hedges/hedge-1/close")
       .send({});
 
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(400);
+    expect(mockFXService.closePosition).not.toHaveBeenCalled();
+  });
+
+  it("passes the close receipt and the WALLET signer to the service", async () => {
+    mockFXService.closePosition.mockResolvedValue({
+      id: "hedge-1",
+      status: "CLOSED",
+      onChainStatus: "LIQUIDATED",
+    });
+
+    const response = await request(app)
+      .post("/v1/fx/hedges/hedge-1/close")
+      .send(CLOSE_RECEIPT);
+
+    expect(response.status).toBe(200);
     expect(mockFXService.closePosition).toHaveBeenCalledWith(
       "hedge-1",
+      SIGNER,
       "business-1",
-      "business-1",
+      CLOSE_RECEIPT,
+      expect.anything(),
     );
+    // The response must carry the true chain status even though the database
+    // enum flattened it to CLOSED.
+    expect(response.body.data.onChainStatus).toBe("LIQUIDATED");
   });
 
   it.each([
@@ -178,10 +278,11 @@ describe("FX routes", () => {
         currency: "USDC",
         expiryDate: "2027-08-01T00:00:00.000Z",
         marginDeposit: "100",
+        ...RECEIPT,
       },
     ],
     ["history", "get", "/v1/fx/hedges", undefined],
-    ["close", "post", "/v1/fx/hedges/hedge-1/close", {}],
+    ["close", "post", "/v1/fx/hedges/hedge-1/close", CLOSE_RECEIPT],
     ["exposure", "get", "/v1/fx/exposure", undefined],
     ["analytics", "get", "/v1/fx/analytics", undefined],
   ])(

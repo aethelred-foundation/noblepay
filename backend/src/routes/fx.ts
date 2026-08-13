@@ -1,4 +1,5 @@
 import { Router, Response } from "express";
+import { getAddress } from "ethers";
 import { prisma } from "../lib/db";
 import { AuthenticatedRequest, authenticateAPIKey } from "../middleware/auth";
 import { FXService, FXError } from "../services/fx";
@@ -13,15 +14,19 @@ import {
 import { logger } from "../lib/logger";
 import {
   AdvancedResourceParamsSchema,
+  CloseFXHedgeSchema,
   CreateFXHedgeSchema,
   EmptyBodySchema,
   FXHedgeListQuerySchema,
   FXRatesQuerySchema,
   validate,
+  type CloseFXHedge,
+  type CreateFXHedge,
   type FXHedgeListQuery,
   type FXRatesQuery,
 } from "../middleware/validation";
 import type { CreateHedgeInput } from "../services/fx";
+import { FXExecutionError } from "../services/fx-execution";
 
 const auditService = new AuditService(prisma);
 const fxService = new FXService(prisma, auditService);
@@ -52,14 +57,20 @@ router.post(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
+      const walletSigner = walletSignerOrReject(req, res);
+      if (!walletSigner) return;
+      const { txHash, onChainPositionId, onChainHedgeType, ...input } =
+        req.body as unknown as CreateFXHedge;
       const position = await fxService.createHedge(
-        req.body as CreateHedgeInput,
+        input as CreateHedgeInput,
+        walletSigner,
         req.businessId,
-        req.businessId,
+        { txHash, onChainPositionId, onChainHedgeType },
+        loadNoblePayChainConfiguration(),
       );
       res.status(201).json({ success: true, data: position });
     } catch (error) {
-      handleError(error, res);
+      handleExecutionError(error, res);
     }
   },
 );
@@ -88,18 +99,23 @@ router.post(
   extractRole,
   requirePermission("fx:trade"),
   validate(AdvancedResourceParamsSchema, "params"),
-  validate(EmptyBodySchema),
+  validate(CloseFXHedgeSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
+      const walletSigner = walletSignerOrReject(req, res);
+      if (!walletSigner) return;
+      const { txHash } = req.body as unknown as CloseFXHedge;
       const result = await fxService.closePosition(
         req.params.id,
+        walletSigner,
         req.businessId,
-        req.businessId,
+        { txHash },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: result });
     } catch (error) {
-      handleError(error, res);
+      handleExecutionError(error, res);
     }
   },
 );
@@ -213,6 +229,52 @@ function unauthorized(res: Response): void {
     error: "UNAUTHORIZED",
     message: "Authenticated business identity is required",
   });
+}
+
+/**
+ * FX mutations bind a chain receipt to the signer's address, so they need a
+ * wallet-authenticated session. Both routes previously passed req.businessId
+ * into the trader/actor slot — a business id is not an address, and once the
+ * 501 gate opened it would have failed every hedger check.
+ */
+function walletSignerOrReject(
+  req: AuthenticatedRequest,
+  res: Response,
+): string | null {
+  if (!req.signerId) {
+    res.status(401).json({
+      error: "UNAUTHORIZED",
+      message: "Signer identity required for FX trading",
+    });
+    return null;
+  }
+  if (req.apiKeyId || req.signerId.startsWith("apikey:")) {
+    return walletSessionRequired(res);
+  }
+  try {
+    return getAddress(req.signerId);
+  } catch {
+    return walletSessionRequired(res);
+  }
+}
+
+function walletSessionRequired(res: Response): null {
+  res.status(403).json({
+    error: "WALLET_SESSION_REQUIRED",
+    message:
+      "A wallet-authenticated session bound to the registered business wallet is required for FX mutations",
+  });
+  return null;
+}
+
+function handleExecutionError(error: unknown, res: Response): void {
+  if (error instanceof FXExecutionError) {
+    res
+      .status(error.statusCode)
+      .json({ error: error.reason, message: error.message });
+    return;
+  }
+  handleError(error, res);
 }
 
 function handleError(error: unknown, res: Response): void {

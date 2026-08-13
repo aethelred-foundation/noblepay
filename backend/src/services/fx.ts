@@ -1,6 +1,9 @@
 import { Prisma, PrismaClient, type FXHedge } from "@prisma/client";
 import { AuditService } from "./audit";
 import { readBoundedJsonResponse } from "../lib/bounded-response";
+import { verifyHedgeClose, verifyHedgeOpen } from "./fx-execution";
+import type { ChainHedgeType, ChainPositionStatus } from "./fx-chain";
+import type { NoblePayChainConfiguration } from "../lib/production-config";
 
 export type HedgeType = "FORWARD" | "OPTION" | "SWAP";
 export type HedgeStatus = "OPEN" | "CLOSED" | "EXPIRED" | "EXERCISED";
@@ -50,6 +53,19 @@ export interface FXPosition {
   closedAt: Date | null;
   metadata: Record<string, never>;
   dataSource: "DATABASE_SNAPSHOT";
+  /**
+   * The contract's own type and status, null for rows that predate on-chain
+   * linkage. Surfaced separately from `type` and `status` because those use the
+   * database enums, which cannot express OPTION_CALL vs OPTION_PUT, LIQUIDATED,
+   * or EMERGENCY_UNWOUND — see docs/audit/NP-FX-01. A caller that needs to know
+   * whether a position was liquidated must read onChainStatus; `status` will
+   * say CLOSED.
+   */
+  onChainPositionId: string | null;
+  onChainHedgeType: ChainHedgeType | null;
+  onChainStatus: ChainPositionStatus | null;
+  openTxHash: string | null;
+  closeTxHash: string | null;
 }
 
 export interface ExposureReport {
@@ -115,14 +131,35 @@ function positionRecord(hedge: FXHedge): FXPosition {
     closedAt: hedge.closedAt,
     metadata: {},
     dataSource: "DATABASE_SNAPSHOT",
+    onChainPositionId: hedge.onChainPositionId,
+    onChainHedgeType: (hedge.onChainHedgeType as ChainHedgeType) ?? null,
+    onChainStatus: (hedge.onChainStatus as ChainPositionStatus) ?? null,
+    openTxHash: hedge.openTxHash,
+    closeTxHash: hedge.closeTxHash,
   };
 }
+
+/**
+ * How a terminal chain status lands in the narrower database enum.
+ *
+ * Two of these are lossy and deliberately so: LIQUIDATED and EMERGENCY_UNWOUND
+ * both become CLOSED because HedgeStatus has nothing better. The real value is
+ * kept in onChainStatus rather than discarded, which is the only reason this
+ * mapping is acceptable at all. See docs/audit/NP-FX-01.
+ */
+const CHAIN_STATUS_TO_DB: Record<string, HedgeStatus> = {
+  SETTLED: "CLOSED",
+  EXERCISED: "EXERCISED",
+  EXPIRED: "EXPIRED",
+  LIQUIDATED: "CLOSED",
+  EMERGENCY_UNWOUND: "CLOSED",
+};
 
 /** Durable hedge ledger plus a strictly configured, freshness-checked oracle. */
 export class FXService {
   constructor(
     private readonly prisma: PrismaClient,
-    private readonly _auditService: AuditService,
+    private readonly auditService: AuditService,
     private readonly oracleFetch: typeof fetch = fetch,
   ) {}
 
@@ -203,20 +240,197 @@ export class FXService {
     }
   }
 
+  /**
+   * Record a hedge position that has already been opened on chain.
+   *
+   * The API holds no key and places no trade. The hedger opens the position in
+   * FXHedgingVault from their own wallet, reports the transaction, and the
+   * record is written only if the chain corroborates it.
+   *
+   * `onChainHedgeType` is required and separate from `input.type` because the
+   * database enum cannot carry the distinction: OPTION says nothing about call
+   * versus put, which are opposite positions.
+   */
   async createHedge(
-    _input: CreateHedgeInput,
-    _trader: string,
-    _businessId: string,
-  ): Promise<never> {
-    throw this.executionUnavailable();
+    input: CreateHedgeInput,
+    trader: string,
+    businessId: string,
+    opening: {
+      txHash: string;
+      onChainPositionId: string;
+      onChainHedgeType: ChainHedgeType;
+    },
+    config: NoblePayChainConfiguration,
+  ): Promise<FXPosition> {
+    // The vault creates forwards and options. There is no swap, so a SWAP hedge
+    // can never have a receipt and is refused here rather than being mapped
+    // onto something the vault might plausibly have emitted.
+    if (input.type === "SWAP") {
+      throw new FXError(
+        "FX_UNSUPPORTED_HEDGE_TYPE",
+        "FXHedgingVault cannot create a SWAP position, so one cannot be verified",
+        422,
+      );
+    }
+    const typesAgree =
+      input.type === "FORWARD"
+        ? opening.onChainHedgeType === "FORWARD"
+        : opening.onChainHedgeType === "OPTION_CALL" ||
+          opening.onChainHedgeType === "OPTION_PUT";
+    if (!typesAgree) {
+      throw new FXError(
+        "FX_TYPE_MISMATCH",
+        `A ${input.type} hedge cannot be opened as ${opening.onChainHedgeType}`,
+        422,
+      );
+    }
+
+    const existing = await this.prisma.fXHedge.findFirst({
+      where: { onChainPositionId: opening.onChainPositionId.toLowerCase() },
+    });
+    if (existing) {
+      if (existing.openTxHash === opening.txHash.toLowerCase()) {
+        return positionRecord(existing);
+      }
+      throw new FXError(
+        "POSITION_ALREADY_RECORDED",
+        `This on-chain position is already recorded under ${existing.openTxHash ?? "an unrecorded transaction"}`,
+        409,
+      );
+    }
+
+    // Throws FXExecutionError with a specific reason if any check fails.
+    const verified = await verifyHedgeOpen(config, {
+      txHash: opening.txHash,
+      onChainPositionId: opening.onChainPositionId,
+      expectedHedger: trader,
+      expectedHedgeType: opening.onChainHedgeType,
+    });
+
+    const [base, quote] = input.pair.split("/");
+    const created = await this.prisma.fXHedge.create({
+      data: {
+        businessId,
+        type: input.type,
+        baseCurrency: base ?? input.currency,
+        quoteCurrency: quote ?? input.currency,
+        // The caller's decimal figures, in the units these columns have always
+        // held. The chain's raw values are not written here: converting needs
+        // the vault's RATE_PRECISION and the token's decimals, and guessing
+        // either is how NP-TREASURY-01 happened.
+        notional: new Prisma.Decimal(input.notionalAmount),
+        strikeRate: new Prisma.Decimal(input.strikeRate ?? 0),
+        spotRate: new Prisma.Decimal(input.strikeRate ?? 0),
+        premium: input.premium ? new Prisma.Decimal(input.premium) : null,
+        maturityDate: verified.maturityDate ?? new Date(input.expiryDate),
+        status: "OPEN",
+        onChainPositionId: verified.onChainPositionId,
+        openTxHash: verified.txHash,
+        onChainHedgeType: verified.hedgeType,
+        onChainStatus: verified.chainStatus,
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: trader,
+      description: `FX hedge opened on chain: ${verified.hedgeType} ${input.pair} via ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        hedgeId: created.id,
+        onChainPositionId: verified.onChainPositionId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        hedgeType: verified.hedgeType,
+        notionalAmount: verified.notionalAmount,
+        amountBasis: "RAW_CONTRACT_UNITS",
+      },
+    });
+
+    return positionRecord(created);
   }
 
+  /**
+   * Record a position leaving ACTIVE.
+   *
+   * The caller does not say how it closed — the chain does. A position can be
+   * settled, exercised, expired, liquidated or emergency-unwound, and those are
+   * not interchangeable: a liquidation is a margin failure with collateral
+   * seized. The close kind is read from the receipt and preserved in
+   * onChainStatus, because the database's own status enum flattens the last two
+   * onto CLOSED.
+   */
   async closePosition(
-    _positionId: string,
-    _actor: string,
-    _businessId?: string,
-  ): Promise<never> {
-    throw this.executionUnavailable();
+    positionId: string,
+    actor: string,
+    businessId: string,
+    closing: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<FXPosition> {
+    const position = await this.prisma.fXHedge.findFirst({
+      where: { id: positionId, businessId },
+    });
+    if (!position) {
+      throw new FXError("POSITION_NOT_FOUND", "Position not found", 404);
+    }
+    if (position.status !== "OPEN") {
+      // Already closed; replaying is not an error, but it must not overwrite
+      // the close kind already recorded.
+      return positionRecord(position);
+    }
+    if (!position.onChainPositionId) {
+      throw new FXError(
+        "POSITION_NOT_ON_CHAIN",
+        "This position has no on-chain id, so a close receipt cannot be matched to it",
+        409,
+      );
+    }
+
+    const verified = await verifyHedgeClose(config, {
+      txHash: closing.txHash,
+      onChainPositionId: position.onChainPositionId,
+      expectedHedger: actor,
+    });
+
+    const updated = await this.prisma.fXHedge.update({
+      where: { id: position.id },
+      data: {
+        status: CHAIN_STATUS_TO_DB[verified.chainStatus] ?? "CLOSED",
+        onChainStatus: verified.chainStatus,
+        closeTxHash: verified.txHash,
+        closedAt: verified.closedAt,
+        // Signed: a loss is negative on chain and must stay negative here.
+        pnl: verified.pnl === null ? null : new Prisma.Decimal(verified.pnl),
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor,
+      // The close kind is in the description on purpose: a liquidation should
+      // be legible in the audit trail without decoding metadata.
+      description: `FX position closed on chain as ${verified.closeKind}: ${position.id} via ${verified.txHash}`,
+      severity:
+        verified.closeKind === "LIQUIDATED" ||
+        verified.closeKind === "EMERGENCY_UNWOUND"
+          ? "CRITICAL"
+          : "HIGH",
+      businessId,
+      metadata: {
+        hedgeId: position.id,
+        onChainPositionId: verified.onChainPositionId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        closeKind: verified.closeKind,
+        chainStatus: verified.chainStatus,
+        pnl: verified.pnl,
+        settlementAmount: verified.settlementAmount,
+        amountBasis: "RAW_CONTRACT_UNITS",
+      },
+    });
+
+    return positionRecord(updated);
   }
 
   async getPosition(
@@ -392,13 +606,6 @@ export class FXService {
     };
   }
 
-  private executionUnavailable(): FXError {
-    return new FXError(
-      "FX_EXECUTION_UNAVAILABLE",
-      "FX trading is disabled until a broker or contract receipt verifier is configured",
-      501,
-    );
-  }
 }
 
 export class FXError extends Error {

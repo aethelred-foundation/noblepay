@@ -567,8 +567,25 @@ model FXHedge {
   createdAt     DateTime    @default(now()) @map("created_at")
   closedAt      DateTime?   @map("closed_at")
 
+  // On-chain linkage, plus the two values the legacy enums above cannot hold.
+  //
+  // `type` cannot say whether an OPTION is a call or a put, and `status` has no
+  // LIQUIDATED or EMERGENCY_UNWOUND — so a forced liquidation would otherwise
+  // be recorded as an ordinary CLOSED. These columns keep the contract's own
+  // values verbatim. See docs/audit/NP-FX-01.
+  //
+  // Real columns rather than a JSON blob because they are queryable facts:
+  // "which positions were liquidated" has to be answerable.
+  onChainPositionId String? @map("on_chain_position_id")
+  openTxHash        String? @map("open_tx_hash")
+  closeTxHash       String? @map("close_tx_hash")
+  onChainHedgeType  String? @map("on_chain_hedge_type")
+  onChainStatus     String? @map("on_chain_status")
+
   @@index([businessId])
   @@index([status])
+  @@index([onChainPositionId])
+  @@index([onChainStatus])
   @@map("fx_hedges")
 }
 

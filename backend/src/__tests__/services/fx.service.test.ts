@@ -1,3 +1,11 @@
+const mockVerifyOpen = jest.fn();
+const mockVerifyClose = jest.fn();
+
+jest.mock("../../services/fx-execution", () => ({
+  verifyHedgeOpen: (...a: unknown[]) => mockVerifyOpen(...a),
+  verifyHedgeClose: (...a: unknown[]) => mockVerifyClose(...a),
+}));
+
 import { Prisma } from "@prisma/client";
 import { FXService } from "../../services/fx";
 import type { AuditService } from "../../services/audit";
@@ -26,14 +34,20 @@ function hedge(overrides: Record<string, unknown> = {}) {
 
 function setup(oracleFetch: jest.Mock = jest.fn()) {
   const prisma = {
-    fXHedge: { findMany: jest.fn(), findFirst: jest.fn() },
+    fXHedge: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
   };
+  const auditService = { createAuditEntry: jest.fn() };
   const service = new FXService(
     prisma as never,
-    {} as AuditService,
+    auditService as unknown as AuditService,
     oracleFetch as typeof fetch,
   );
-  return { prisma, service, oracleFetch };
+  return { prisma, service, oracleFetch, auditService };
 }
 
 function quote(overrides: Record<string, unknown> = {}) {
@@ -317,28 +331,244 @@ describe("FXService production behavior", () => {
     );
   });
 
-  it("fails unverified hedge execution closed", async () => {
-    const { service } = setup();
-    await expect(
-      service.createHedge(
-        {
-          pair: "USDC/AED",
-          type: "FORWARD",
-          notionalAmount: "1000",
-          currency: "USDC",
-          expiryDate: "2026-08-01T00:00:00.000Z",
-          marginDeposit: "100",
-        },
-        "signer-1",
-        "business-1",
-      ),
-    ).rejects.toMatchObject({
-      code: "FX_EXECUTION_UNAVAILABLE",
-      statusCode: 501,
+  describe("hedge execution", () => {
+    const chainCfg = { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 };
+    const WALLET = "0x2E8625F06A696b556B7B5e0C1b34B1cb55203af1";
+    const receipt = {
+      txHash: `0x${"c".repeat(64)}`,
+      onChainPositionId: `0x${"d".repeat(64)}`,
+      onChainHedgeType: "FORWARD" as const,
+    };
+    const input = {
+      pair: "USDC/AED",
+      type: "FORWARD" as const,
+      notionalAmount: "1000",
+      currency: "USDC",
+      expiryDate: "2027-08-01T00:00:00.000Z",
+      marginDeposit: "100",
+    };
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+      mockVerifyOpen.mockResolvedValue({
+        onChainPositionId: receipt.onChainPositionId,
+        hedger: WALLET,
+        pairId: `0x${"ab".repeat(32)}`,
+        hedgeType: "FORWARD",
+        notionalAmount: "1000000",
+        rate: "367300000",
+        premium: "0",
+        maturityDate: new Date("2027-08-01T00:00:00.000Z"),
+        txHash: receipt.txHash,
+        blockNumber: 5150,
+        openedAt: new Date("2026-08-01T00:00:00.000Z"),
+        chainStatus: "ACTIVE",
+      });
     });
-    await expect(
-      service.closePosition("hedge-1", "signer-1", "business-1"),
-    ).rejects.toMatchObject({ statusCode: 501 });
+
+    it("refuses a SWAP before doing any chain work", async () => {
+      // FXHedgingVault has no swap, so a SWAP hedge can never have a receipt.
+      const { service } = setup();
+      await expect(
+        service.createHedge(
+          { ...input, type: "SWAP" as never },
+          WALLET,
+          "business-1",
+          receipt,
+          chainCfg as never,
+        ),
+      ).rejects.toMatchObject({
+        code: "FX_UNSUPPORTED_HEDGE_TYPE",
+        statusCode: 422,
+      });
+      expect(mockVerifyOpen).not.toHaveBeenCalled();
+    });
+
+    it("refuses a FORWARD claimed as an on-chain option", async () => {
+      const { service } = setup();
+      await expect(
+        service.createHedge(
+          input,
+          WALLET,
+          "business-1",
+          { ...receipt, onChainHedgeType: "OPTION_PUT" },
+          chainCfg as never,
+        ),
+      ).rejects.toMatchObject({ code: "FX_TYPE_MISMATCH" });
+      expect(mockVerifyOpen).not.toHaveBeenCalled();
+    });
+
+    it("records the contract's own type and status alongside the DB enums", async () => {
+      const { prisma, service } = setup();
+      prisma.fXHedge.findFirst.mockResolvedValue(null);
+      prisma.fXHedge.create.mockResolvedValue(hedge());
+
+      await service.createHedge(
+        input,
+        WALLET,
+        "business-1",
+        receipt,
+        chainCfg as never,
+      );
+
+      const written = prisma.fXHedge.create.mock.calls[0][0].data;
+      expect(written.status).toBe("OPEN");
+      expect(written.onChainHedgeType).toBe("FORWARD");
+      expect(written.onChainStatus).toBe("ACTIVE");
+      expect(written.onChainPositionId).toBe(receipt.onChainPositionId);
+      expect(written.openTxHash).toBe(receipt.txHash);
+    });
+
+    it("returns the existing record when the same receipt is replayed", async () => {
+      const { prisma, service } = setup();
+      prisma.fXHedge.findFirst.mockResolvedValue(
+        hedge({
+          onChainPositionId: receipt.onChainPositionId.toLowerCase(),
+          openTxHash: receipt.txHash.toLowerCase(),
+        }),
+      );
+
+      await service.createHedge(
+        input,
+        WALLET,
+        "business-1",
+        receipt,
+        chainCfg as never,
+      );
+
+      expect(prisma.fXHedge.create).not.toHaveBeenCalled();
+      expect(mockVerifyOpen).not.toHaveBeenCalled();
+    });
+
+    it("refuses a second, different receipt for the same position", async () => {
+      const { prisma, service } = setup();
+      prisma.fXHedge.findFirst.mockResolvedValue(
+        hedge({
+          onChainPositionId: receipt.onChainPositionId.toLowerCase(),
+          openTxHash: `0x${"9".repeat(64)}`,
+        }),
+      );
+
+      await expect(
+        service.createHedge(
+          input,
+          WALLET,
+          "business-1",
+          receipt,
+          chainCfg as never,
+        ),
+      ).rejects.toMatchObject({
+        code: "POSITION_ALREADY_RECORDED",
+        statusCode: 409,
+      });
+    });
+
+    it("preserves LIQUIDATED even though the DB enum flattens it to CLOSED", async () => {
+      // The whole point of NP-FX-01. `status` loses the distinction; the record
+      // must not.
+      const { prisma, service, auditService } = setup();
+      prisma.fXHedge.findFirst.mockResolvedValue(
+        hedge({ status: "OPEN", onChainPositionId: receipt.onChainPositionId }),
+      );
+      prisma.fXHedge.update.mockResolvedValue(hedge({ status: "CLOSED" }));
+      mockVerifyClose.mockResolvedValue({
+        onChainPositionId: receipt.onChainPositionId,
+        hedger: WALLET,
+        closeKind: "LIQUIDATED",
+        pnl: null,
+        settlementAmount: null,
+        txHash: `0x${"f".repeat(64)}`,
+        blockNumber: 5200,
+        closedAt: new Date("2026-08-02T00:00:00.000Z"),
+        chainStatus: "LIQUIDATED",
+      });
+
+      await service.closePosition(
+        "hedge-1",
+        WALLET,
+        "business-1",
+        { txHash: `0x${"f".repeat(64)}` },
+        chainCfg as never,
+      );
+
+      const written = prisma.fXHedge.update.mock.calls[0][0].data;
+      expect(written.status).toBe("CLOSED");
+      expect(written.onChainStatus).toBe("LIQUIDATED");
+      // And it must be legible in the audit trail without decoding metadata.
+      const entry = auditService.createAuditEntry.mock.calls[0][0];
+      expect(entry.description).toContain("LIQUIDATED");
+      expect(entry.severity).toBe("CRITICAL");
+    });
+
+    it("keeps a negative P&L negative", async () => {
+      const { prisma, service } = setup();
+      prisma.fXHedge.findFirst.mockResolvedValue(
+        hedge({ status: "OPEN", onChainPositionId: receipt.onChainPositionId }),
+      );
+      prisma.fXHedge.update.mockResolvedValue(hedge({ status: "CLOSED" }));
+      mockVerifyClose.mockResolvedValue({
+        onChainPositionId: receipt.onChainPositionId,
+        hedger: WALLET,
+        closeKind: "SETTLED",
+        pnl: "-45000",
+        settlementAmount: "900000",
+        txHash: `0x${"f".repeat(64)}`,
+        blockNumber: 5200,
+        closedAt: new Date("2026-08-02T00:00:00.000Z"),
+        chainStatus: "SETTLED",
+      });
+
+      await service.closePosition(
+        "hedge-1",
+        WALLET,
+        "business-1",
+        { txHash: `0x${"f".repeat(64)}` },
+        chainCfg as never,
+      );
+
+      const written = prisma.fXHedge.update.mock.calls[0][0].data;
+      expect(written.pnl.toString()).toBe("-45000");
+    });
+
+    it("refuses to match a close receipt to a row with no on-chain id", async () => {
+      const { prisma, service } = setup();
+      prisma.fXHedge.findFirst.mockResolvedValue(
+        hedge({ status: "OPEN", onChainPositionId: null }),
+      );
+
+      await expect(
+        service.closePosition(
+          "hedge-1",
+          WALLET,
+          "business-1",
+          { txHash: `0x${"f".repeat(64)}` },
+          chainCfg as never,
+        ),
+      ).rejects.toMatchObject({
+        code: "POSITION_NOT_ON_CHAIN",
+        statusCode: 409,
+      });
+      expect(mockVerifyClose).not.toHaveBeenCalled();
+    });
+
+    it("does not overwrite a close that was already recorded", async () => {
+      const { prisma, service } = setup();
+      prisma.fXHedge.findFirst.mockResolvedValue(
+        hedge({ status: "EXERCISED", onChainStatus: "EXERCISED" }),
+      );
+
+      const result = await service.closePosition(
+        "hedge-1",
+        WALLET,
+        "business-1",
+        { txHash: `0x${"f".repeat(64)}` },
+        chainCfg as never,
+      );
+
+      expect(result.status).toBe("EXERCISED");
+      expect(prisma.fXHedge.update).not.toHaveBeenCalled();
+      expect(mockVerifyClose).not.toHaveBeenCalled();
+    });
   });
 
   it("reports only durable hedge notional and marks unknown risk fields null", async () => {

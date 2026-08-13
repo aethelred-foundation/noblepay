@@ -20,6 +20,10 @@ import {
   FX_INTERFACE,
   decodeCurrency,
 } from "../../services/fx-chain";
+import {
+  CLOSE_KINDS,
+  FX_EVENT_INTERFACE,
+} from "../../services/fx-execution";
 
 const ARTIFACT = join(
   process.cwd(),
@@ -76,6 +80,70 @@ describe("FX_INTERFACE", () => {
     ]) {
       expect(() => FX_INTERFACE.getFunction(name)).not.toThrow();
     }
+  });
+});
+
+describe("FX_EVENT_INTERFACE", () => {
+  const artifact = JSON.parse(readFileSync(ARTIFACT, "utf8")) as {
+    abi: unknown[];
+  };
+  const compiled = new Interface(artifact.abi as never);
+
+  const declared = FX_EVENT_INTERFACE.fragments.filter(
+    (f): f is Fragment => f.type === "event",
+  );
+
+  // Same hazard as the view fragments, one step worse: a drifted event fragment
+  // still decodes, so a mis-declared PositionSettled would silently read the
+  // wrong slot as the P&L.
+  it.each(declared.map((f) => [f.format("sighash"), f] as const))(
+    "%s matches the compiled contract",
+    (_sig, fragment) => {
+      const match = compiled.fragments.find(
+        (c) =>
+          c.type === "event" &&
+          c.format("sighash") === fragment.format("sighash"),
+      );
+      expect(match).toBeDefined();
+      expect(match?.format("full")).toBe(fragment.format("full"));
+    },
+  );
+
+  it("declares an event for every way a position can close", () => {
+    // If the contract grows a sixth exit and this list is not updated, that
+    // close would be unverifiable rather than merely unrecognised.
+    for (const name of [
+      "PositionSettled",
+      "OptionExercised",
+      "OptionExpired",
+      "PositionLiquidated",
+      "EmergencyUnwind",
+    ]) {
+      expect(() => FX_EVENT_INTERFACE.getEvent(name)).not.toThrow();
+    }
+    expect(CLOSE_KINDS).toHaveLength(5);
+  });
+
+  it("keeps pnl signed", () => {
+    // int256, not uint256. A loss is negative, and an unsigned declaration
+    // would decode it as an enormous gain.
+    const settled = FX_EVENT_INTERFACE.getEvent("PositionSettled");
+    const pnl = settled?.inputs.find((i) => i.name === "pnl");
+    expect(pnl?.type).toBe("int256");
+  });
+
+  it("does not name the hedger in the three events that lack one", () => {
+    // The verifier routes ownership through getPosition for these; if the
+    // contract ever adds a hedger field, that routing should be revisited
+    // rather than left in place by default.
+    for (const name of ["OptionExpired", "EmergencyUnwind"]) {
+      const event = FX_EVENT_INTERFACE.getEvent(name);
+      expect(event?.inputs.some((i) => i.name === "hedger")).toBe(false);
+    }
+    // PositionLiquidated names a liquidator, who is NOT the hedger.
+    const liq = FX_EVENT_INTERFACE.getEvent("PositionLiquidated");
+    expect(liq?.inputs.some((i) => i.name === "hedger")).toBe(false);
+    expect(liq?.inputs.some((i) => i.name === "liquidator")).toBe(true);
   });
 });
 

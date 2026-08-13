@@ -545,9 +545,35 @@ export const CreateFXHedgeSchema = z
     premium: advancedPositiveDecimal.optional(),
     marginDeposit: advancedPositiveDecimal,
     metadata: boundedMetadata,
+    // The receipt for the position that already exists on chain.
+    txHash: bytes32Hash,
+    onChainPositionId: bytes32Hash,
+    // The CONTRACT's hedge type, which `type` above cannot express: OPTION
+    // says nothing about call versus put, and those are opposite positions.
+    // See docs/audit/NP-FX-01.
+    onChainHedgeType: z.enum(["FORWARD", "OPTION_CALL", "OPTION_PUT"]),
   })
   .strict()
   .superRefine((value, context) => {
+    if (value.type === "SWAP") {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["type"],
+        message:
+          "FXHedgingVault cannot create a SWAP position, so one cannot be verified",
+      });
+    }
+    const typesAgree =
+      value.type === "FORWARD"
+        ? value.onChainHedgeType === "FORWARD"
+        : value.onChainHedgeType !== "FORWARD";
+    if (value.type !== "SWAP" && !typesAgree) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["onChainHedgeType"],
+        message: `A ${value.type} hedge cannot be opened as ${value.onChainHedgeType}`,
+      });
+    }
     if (!value.pair.startsWith(`${value.currency}/`)) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
@@ -759,7 +785,11 @@ export type LiquidityPositionQuery = z.infer<
   typeof LiquidityPositionQuerySchema
 >;
 export type StreamListQuery = z.infer<typeof StreamListQuerySchema>;
+export const CloseFXHedgeSchema = z.object({ txHash: bytes32Hash }).strict();
+
 export type FXRatesQuery = z.infer<typeof FXRatesQuerySchema>;
+export type CreateFXHedge = z.infer<typeof CreateFXHedgeSchema>;
+export type CloseFXHedge = z.infer<typeof CloseFXHedgeSchema>;
 export type FXHedgeListQuery = z.infer<typeof FXHedgeListQuerySchema>;
 export type CrossChainRouteQuery = z.infer<typeof CrossChainRouteQuerySchema>;
 export type CreateCrossChainTransfer = z.infer<
