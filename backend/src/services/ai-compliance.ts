@@ -6,6 +6,16 @@ import {
   PrismaClient,
 } from "@prisma/client";
 import { AuditService } from "./audit";
+import {
+  CHAIN_APPEAL_STATUS_TO_DB,
+  CHAIN_OUTCOME_TO_DB,
+  DECISION_PROVENANCE,
+  verifyAppealFiling,
+  verifyAppealResolution,
+  verifyAppealReview,
+  verifyDecisionOverride,
+} from "./ai-compliance-execution";
+import type { NoblePayChainConfiguration } from "../lib/production-config";
 
 export type ModelStatus = "ACTIVE" | "STAGING" | "DEPRECATED" | "UNDER_REVIEW";
 export type DecisionOutcome = "APPROVE" | "FLAG" | "BLOCK" | "ESCALATE";
@@ -72,6 +82,16 @@ export interface AIAppeal {
   finalOutcome: DecisionOutcome | null;
   submittedAt: Date;
   resolvedAt: Date | null;
+  onChainAppealId: string | null;
+  reviewStartedAt: Date | null;
+  /**
+   * What the chain evidence covers. The appeal lifecycle is verified; the
+   * decision it contests is an AI_OPERATOR_ROLE assertion, because
+   * recordDecision checks no attestation and never reads the evidenceHash it
+   * stores. Carried on the record so the distinction cannot be lost between
+   * here and a compliance report. See docs/audit/NP-AI-01.
+   */
+  decisionProvenance: typeof DECISION_PROVENANCE | null;
 }
 
 export interface BiasMetric {
@@ -163,7 +183,7 @@ function parseFactors(value: Prisma.JsonValue): DecisionFactor[] {
 export class AIComplianceService {
   constructor(
     private readonly prisma: PrismaClient,
-    private readonly _auditService: AuditService,
+    private readonly auditService: AuditService,
     private readonly _unsupportedEngine: null = null,
     private readonly now: () => Date = () => new Date(),
   ) {}
@@ -202,61 +222,304 @@ export class AIComplianceService {
     );
   }
 
+  /**
+   * Record a human override that has already been made on chain.
+   *
+   * The new outcome comes from the receipt, not from the caller. The contract
+   * refuses an override that does not change the outcome, so a caller-supplied
+   * outcome could only ever agree with the chain or be wrong.
+   */
   async overrideDecision(
     decisionId: string,
-    newOutcome: DecisionOutcome,
     overrideBy: string,
     reason: string,
     businessId: string,
-  ): Promise<never> {
-    void decisionId;
-    void newOutcome;
-    void overrideBy;
-    void reason;
-    void businessId;
-    throw new AIComplianceError(
-      "AI_DECISION_MUTATIONS_UNAVAILABLE",
-      "AI decision overrides are disabled until decisions have cryptographically verified provenance",
-      501,
-    );
+    override: { txHash: string; onChainOverrideId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<AIDecision> {
+    const decision = await this.prisma.aIDecision.findFirst({
+      where: { id: decisionId, businessId },
+    });
+    if (!decision) {
+      throw new AIComplianceError("DECISION_NOT_FOUND", "Decision not found", 404);
+    }
+    if (!decision.onChainDecisionId) {
+      throw new AIComplianceError(
+        "DECISION_NOT_ON_CHAIN",
+        "This decision has no on-chain id, so an override receipt cannot be matched to it",
+        409,
+      );
+    }
+    if (decision.overriddenAt) {
+      return this.toDecision(decision);
+    }
+
+    const verified = await verifyDecisionOverride(config, {
+      txHash: override.txHash,
+      onChainOverrideId: override.onChainOverrideId,
+      onChainDecisionId: decision.onChainDecisionId,
+      expectedOfficer: overrideBy,
+    });
+
+    const updated = await this.prisma.aIDecision.update({
+      where: { id: decision.id },
+      data: {
+        originalDecision: CHAIN_OUTCOME_TO_DB[verified.originalOutcome],
+        decision: CHAIN_OUTCOME_TO_DB[verified.newOutcome],
+        overriddenBy: verified.officer,
+        overrideReason: reason,
+        overriddenAt: verified.at,
+        onChainOverrideId: verified.onChainOverrideId,
+        overrideTxHash: verified.txHash,
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: overrideBy,
+      description: `AI decision overridden on chain: ${decision.id} ${verified.originalOutcome} to ${verified.newOutcome} via ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        decisionId: decision.id,
+        onChainOverrideId: verified.onChainOverrideId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        decisionProvenance: verified.decisionProvenance,
+      },
+    });
+
+    return this.toDecision(updated);
   }
 
+  /**
+   * Record an appeal that has already been filed on chain.
+   *
+   * The appellant is bound to the caller by the receipt, so an appeal cannot be
+   * filed on someone else's behalf and recorded as theirs.
+   */
   async submitAppeal(
     decisionId: string,
     submittedBy: string,
     reason: string,
     businessId: string,
-  ): Promise<never> {
-    void decisionId;
-    void submittedBy;
-    void reason;
-    void businessId;
-    throw new AIComplianceError(
-      "AI_APPEAL_VERIFICATION_UNAVAILABLE",
-      "AI appeals are disabled until the underlying decision has cryptographically verified provenance",
-      501,
-    );
+    filing: { txHash: string; onChainAppealId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<AIAppeal> {
+    const decision = await this.prisma.aIDecision.findFirst({
+      where: { id: decisionId, businessId },
+    });
+    if (!decision) {
+      throw new AIComplianceError("DECISION_NOT_FOUND", "Decision not found", 404);
+    }
+    if (!decision.onChainDecisionId) {
+      throw new AIComplianceError(
+        "DECISION_NOT_ON_CHAIN",
+        "This decision has no on-chain id, so an appeal receipt cannot be matched to it",
+        409,
+      );
+    }
+
+    const existing = await this.prisma.aIAppeal.findFirst({
+      where: { onChainAppealId: filing.onChainAppealId.toLowerCase() },
+    });
+    if (existing) {
+      if (existing.filedTxHash === filing.txHash.toLowerCase()) {
+        return this.toAppeal(existing);
+      }
+      throw new AIComplianceError(
+        "APPEAL_ALREADY_RECORDED",
+        `This on-chain appeal is already recorded under ${existing.filedTxHash ?? "an unrecorded transaction"}`,
+        409,
+      );
+    }
+
+    const verified = await verifyAppealFiling(config, {
+      txHash: filing.txHash,
+      onChainAppealId: filing.onChainAppealId,
+      onChainDecisionId: decision.onChainDecisionId,
+      expectedAppellant: submittedBy,
+    });
+
+    const created = await this.prisma.aIAppeal.create({
+      data: {
+        decisionId: decision.id,
+        businessId,
+        paymentId: decision.paymentId,
+        submittedBy: verified.appellant,
+        reason,
+        status: CHAIN_APPEAL_STATUS_TO_DB[verified.chainStatus] as AppealStatus,
+        externalReference: verified.onChainAppealId,
+        originalOutcome: decision.decision,
+        submittedAt: verified.at,
+        onChainAppealId: verified.onChainAppealId,
+        filedTxHash: verified.txHash,
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: submittedBy,
+      description: `AI decision appealed on chain: ${decision.id} via ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        appealId: created.id,
+        onChainAppealId: verified.onChainAppealId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        decisionProvenance: verified.decisionProvenance,
+      },
+    });
+
+    return this.toAppeal(created);
   }
 
+  /**
+   * Record a compliance officer taking up an appeal review.
+   *
+   * This step had no API counterpart even though the contract requires it: an
+   * appeal cannot be resolved until it reaches UNDER_REVIEW, and only a
+   * COMPLIANCE_OFFICER_ROLE holder can put it there. Without this method an
+   * appeal record would jump straight from SUBMITTED to a final outcome, losing
+   * the one step that shows the appeal received human consideration.
+   */
+  async startAppealReview(
+    appealId: string,
+    reviewer: string,
+    businessId: string,
+    review: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<AIAppeal> {
+    const appeal = await this.prisma.aIAppeal.findFirst({
+      where: { id: appealId, businessId },
+    });
+    if (!appeal) {
+      throw new AIComplianceError("APPEAL_NOT_FOUND", "Appeal not found", 404);
+    }
+    if (!appeal.onChainAppealId) {
+      throw new AIComplianceError(
+        "APPEAL_NOT_ON_CHAIN",
+        "This appeal has no on-chain id, so a review receipt cannot be matched to it",
+        409,
+      );
+    }
+    if (appeal.status !== "SUBMITTED") {
+      return this.toAppeal(appeal);
+    }
+
+    const verified = await verifyAppealReview(config, {
+      txHash: review.txHash,
+      onChainAppealId: appeal.onChainAppealId,
+      expectedReviewer: reviewer,
+    });
+
+    const updated = await this.prisma.aIAppeal.update({
+      where: { id: appeal.id },
+      data: {
+        status: "UNDER_REVIEW",
+        reviewer: verified.reviewer,
+        reviewStartedAt: verified.at,
+        reviewTxHash: verified.txHash,
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: reviewer,
+      description: `AI appeal review started on chain: ${appeal.id} via ${verified.txHash}`,
+      severity: "MEDIUM",
+      businessId,
+      metadata: {
+        appealId: appeal.id,
+        onChainAppealId: verified.onChainAppealId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+      },
+    });
+
+    return this.toAppeal(updated);
+  }
+
+  /**
+   * Record an appeal resolution that has already happened on chain.
+   *
+   * The outcome is taken from the receipt rather than the caller. An appeals
+   * process exists to be contestable; letting the caller declare DISMISSED
+   * while the chain says OVERTURNED would invert its result.
+   */
   async resolveAppeal(
     appealId: string,
     reviewer: string,
-    outcome: "UPHELD" | "OVERTURNED" | "DISMISSED",
     reviewNotes: string,
     businessId: string,
-    finalOutcome?: DecisionOutcome,
-  ): Promise<never> {
-    void appealId;
-    void reviewer;
-    void outcome;
-    void reviewNotes;
-    void businessId;
-    void finalOutcome;
-    throw new AIComplianceError(
-      "AI_APPEAL_VERIFICATION_UNAVAILABLE",
-      "AI appeal resolution is disabled until the underlying decision has cryptographically verified provenance",
-      501,
-    );
+    resolution: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<AIAppeal> {
+    const appeal = await this.prisma.aIAppeal.findFirst({
+      where: { id: appealId, businessId },
+    });
+    if (!appeal) {
+      throw new AIComplianceError("APPEAL_NOT_FOUND", "Appeal not found", 404);
+    }
+    if (!appeal.onChainAppealId) {
+      throw new AIComplianceError(
+        "APPEAL_NOT_ON_CHAIN",
+        "This appeal has no on-chain id, so a resolution receipt cannot be matched to it",
+        409,
+      );
+    }
+    if (appeal.resolvedAt) {
+      return this.toAppeal(appeal);
+    }
+    if (appeal.status !== "UNDER_REVIEW") {
+      // The contract will not resolve an appeal that never entered review, so a
+      // record in any other state means the review step was missed here.
+      throw new AIComplianceError(
+        "APPEAL_NOT_UNDER_REVIEW",
+        `Appeal is ${appeal.status}; it must pass through review before it can be resolved`,
+        409,
+      );
+    }
+
+    const verified = await verifyAppealResolution(config, {
+      txHash: resolution.txHash,
+      onChainAppealId: appeal.onChainAppealId,
+      expectedReviewer: reviewer,
+    });
+
+    const updated = await this.prisma.aIAppeal.update({
+      where: { id: appeal.id },
+      data: {
+        status: CHAIN_APPEAL_STATUS_TO_DB[verified.chainStatus] as AppealStatus,
+        reviewer: verified.reviewer,
+        reviewNotes,
+        finalOutcome: CHAIN_OUTCOME_TO_DB[verified.revisedOutcome],
+        resolvedAt: verified.at,
+        resolvedTxHash: verified.txHash,
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: reviewer,
+      description: `AI appeal resolved on chain as ${verified.chainStatus}: ${appeal.id} via ${verified.txHash}`,
+      // An overturned appeal means the automated decision was wrong, which is
+      // the outcome a regulator will look for first.
+      severity: verified.chainStatus === "OVERTURNED" ? "CRITICAL" : "HIGH",
+      businessId,
+      metadata: {
+        appealId: appeal.id,
+        onChainAppealId: verified.onChainAppealId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        chainStatus: verified.chainStatus,
+        revisedOutcome: verified.revisedOutcome,
+        decisionProvenance: verified.decisionProvenance,
+      },
+    });
+
+    return this.toAppeal(updated);
   }
 
   async listDecisions(filters: {
@@ -523,6 +786,9 @@ export class AIComplianceService {
       finalOutcome: appeal.finalOutcome as DecisionOutcome | null,
       submittedAt: appeal.submittedAt,
       resolvedAt: appeal.resolvedAt,
+      onChainAppealId: appeal.onChainAppealId,
+      reviewStartedAt: appeal.reviewStartedAt,
+      decisionProvenance: appeal.onChainAppealId ? DECISION_PROVENANCE : null,
     };
   }
 }

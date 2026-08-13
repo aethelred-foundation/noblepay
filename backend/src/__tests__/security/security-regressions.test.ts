@@ -588,42 +588,111 @@ describe("mutation adapters remain fail-closed", () => {
     expect(prisma.invoiceFinancingRequest.create).not.toHaveBeenCalled();
   });
 
-  it.each([
-    [
-      "decision",
-      (service: AIComplianceService) =>
-        service.runDecision("model-1", "payment-1", BUSINESS_A, "key-1"),
-      "AI_DECISION_VERIFICATION_UNAVAILABLE",
-    ],
-    [
-      "override",
-      (service: AIComplianceService) =>
-        service.overrideDecision(
-          "decision-1",
-          "APPROVE",
-          WALLET_A,
-          "reason",
-          BUSINESS_A,
-        ),
-      "AI_DECISION_MUTATIONS_UNAVAILABLE",
-    ],
-    [
-      "appeal",
-      (service: AIComplianceService) =>
-        service.submitAppeal("decision-1", WALLET_A, "reason", BUSINESS_A),
-      "AI_APPEAL_VERIFICATION_UNAVAILABLE",
-    ],
-  ])("blocks unverified AI %s mutation", async (_name, operation, code) => {
+  it("still blocks AI decision execution — no verifier can supply a model", async () => {
+    // Unlike the appeal and override paths, this one is not waiting on a
+    // receipt. recordDecision verifies no attestation, so opening this would
+    // mean the backend inventing an outcome. See docs/audit/NP-AI-01.
     const prisma: any = {
       aIDecision: { create: jest.fn(), update: jest.fn() },
       aIAppeal: { create: jest.fn() },
       $transaction: jest.fn(),
     };
     const service = new AIComplianceService(prisma, {} as any, null);
-    await expect(operation(service)).rejects.toMatchObject({
-      code,
+    await expect(
+      service.runDecision("model-1", "payment-1", BUSINESS_A, "key-1"),
+    ).rejects.toMatchObject({
+      code: "AI_DECISION_VERIFICATION_UNAVAILABLE",
       statusCode: 501,
     });
-    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.aIDecision.create).not.toHaveBeenCalled();
+  });
+
+  // The appeal and override paths are open now, backed by receipt
+  // verification, so the property under test moves with them: no longer "this
+  // always refuses" but "nothing is written unless the chain agrees", and
+  // "one tenant cannot touch another's records".
+  it.each([
+    [
+      "override",
+      (service: AIComplianceService) =>
+        service.overrideDecision(
+          "decision-1",
+          WALLET_A,
+          "reason enough to override",
+          BUSINESS_A,
+          { txHash: `0x${"c".repeat(64)}`, onChainOverrideId: `0x${"d".repeat(64)}` },
+          { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 } as any,
+        ),
+      "DECISION_NOT_FOUND",
+    ],
+    [
+      "appeal",
+      (service: AIComplianceService) =>
+        service.submitAppeal(
+          "decision-1",
+          WALLET_A,
+          "reason",
+          BUSINESS_A,
+          { txHash: `0x${"c".repeat(64)}`, onChainAppealId: `0x${"d".repeat(64)}` },
+          { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 } as any,
+        ),
+      "DECISION_NOT_FOUND",
+    ],
+  ])(
+    "will not record an AI %s against another tenant's decision",
+    async (_name, operation, code) => {
+      // The lookup is scoped to the authenticated business, so a decision
+      // belonging elsewhere is simply not found — and no receipt is fetched,
+      // let alone written.
+      const prisma: any = {
+        aIDecision: {
+          findFirst: jest.fn().mockResolvedValue(null),
+          create: jest.fn(),
+          update: jest.fn(),
+        },
+        aIAppeal: { findFirst: jest.fn(), create: jest.fn(), update: jest.fn() },
+        $transaction: jest.fn(),
+      };
+      const service = new AIComplianceService(prisma, {} as any, null);
+      await expect(operation(service)).rejects.toMatchObject({
+        code,
+        statusCode: 404,
+      });
+      expect(prisma.aIDecision.update).not.toHaveBeenCalled();
+      expect(prisma.aIAppeal.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it("will not resolve an appeal that never entered review", async () => {
+    // The contract reverts with AppealNotUnderReview. The API must not be able
+    // to record a resolution the chain would have refused — that is the step
+    // showing the appeal received human consideration.
+    const prisma: any = {
+      aIAppeal: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: "appeal-1",
+          status: "SUBMITTED",
+          onChainAppealId: `0x${"d".repeat(64)}`,
+          resolvedAt: null,
+        }),
+        update: jest.fn(),
+      },
+      $transaction: jest.fn(),
+    };
+    const service = new AIComplianceService(prisma, {} as any, null);
+    await expect(
+      service.resolveAppeal(
+        "appeal-1",
+        WALLET_A,
+        "notes",
+        BUSINESS_A,
+        { txHash: `0x${"c".repeat(64)}` },
+        { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 } as any,
+      ),
+    ).rejects.toMatchObject({
+      code: "APPEAL_NOT_UNDER_REVIEW",
+      statusCode: 409,
+    });
+    expect(prisma.aIAppeal.update).not.toHaveBeenCalled();
   });
 });

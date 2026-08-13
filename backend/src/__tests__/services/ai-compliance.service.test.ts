@@ -1,3 +1,19 @@
+const mockVerifyFiling = jest.fn();
+const mockVerifyReview = jest.fn();
+const mockVerifyResolution = jest.fn();
+const mockVerifyOverride = jest.fn();
+
+jest.mock("../../services/ai-compliance-execution", () => {
+  const actual = jest.requireActual("../../services/ai-compliance-execution");
+  return {
+    ...actual,
+    verifyAppealFiling: (...a: unknown[]) => mockVerifyFiling(...a),
+    verifyAppealReview: (...a: unknown[]) => mockVerifyReview(...a),
+    verifyAppealResolution: (...a: unknown[]) => mockVerifyResolution(...a),
+    verifyDecisionOverride: (...a: unknown[]) => mockVerifyOverride(...a),
+  };
+});
+
 import { Prisma } from "@prisma/client";
 import {
   AIComplianceError,
@@ -106,6 +122,7 @@ function database() {
       findUnique: jest.fn(),
       findMany: jest.fn(),
       create: jest.fn(),
+      update: jest.fn(),
       updateMany: jest.fn(),
       count: jest.fn(),
     },
@@ -119,15 +136,15 @@ function database() {
 describe("AIComplianceService production-safe read model", () => {
   let db: ReturnType<typeof database>;
   let service: AIComplianceService;
+  let audit: { createAuditEntry: jest.Mock; createAuditEntryInTransaction: jest.Mock };
 
   beforeEach(() => {
     db = database();
-    service = new AIComplianceService(
-      db,
-      { createAuditEntryInTransaction: jest.fn() } as any,
-      null,
-      () => NOW,
-    );
+    audit = {
+      createAuditEntry: jest.fn(),
+      createAuditEntryInTransaction: jest.fn(),
+    };
+    service = new AIComplianceService(db, audit as any, null, () => NOW);
   });
 
   it("loads model records from durable storage without claiming TEE verification", async () => {
@@ -186,55 +203,210 @@ describe("AIComplianceService production-safe read model", () => {
     });
   });
 
-  it.each([
-    [
-      "decision execution",
-      () => service.runDecision("model-1", "pay-1", BUSINESS_ID, "key"),
-      "AI_DECISION_VERIFICATION_UNAVAILABLE",
-    ],
-    [
-      "human override",
-      () =>
-        service.overrideDecision(
+  it("still fails decision execution closed — no verifier can supply a model", async () => {
+    // runDecision is not blocked on a receipt. It is blocked on there being a
+    // model to run, and on recordDecision verifying an attestation it does not
+    // verify. Opening it would mean inventing an outcome. See NP-AI-01.
+    await expect(
+      service.runDecision("model-1", "pay-1", BUSINESS_ID, "key"),
+    ).rejects.toMatchObject({
+      code: "AI_DECISION_VERIFICATION_UNAVAILABLE",
+      statusCode: 501,
+    });
+    expect(db.aIDecision.create).not.toHaveBeenCalled();
+  });
+
+  describe("appeal and override receipts", () => {
+    const chainCfg = { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 };
+    const WALLET = "0x2E8625F06A696b556B7B5e0C1b34B1cb55203af1";
+    const TX = `0x${"c".repeat(64)}`;
+    const CHAIN_ID = `0x${"d".repeat(64)}`;
+
+    beforeEach(() => {
+      jest.clearAllMocks();
+    });
+
+    it("refuses to attach an appeal receipt to a decision with no chain id", async () => {
+      db.aIDecision.findFirst.mockResolvedValue(
+        decision({ onChainDecisionId: null }),
+      );
+      await expect(
+        service.submitAppeal(
           "dec-1",
-          "APPROVE",
-          "reviewer",
+          WALLET,
           "reason",
           BUSINESS_ID,
+          { txHash: TX, onChainAppealId: CHAIN_ID },
+          chainCfg as never,
         ),
-      "AI_DECISION_MUTATIONS_UNAVAILABLE",
-    ],
-    [
-      "appeal submission",
-      () => service.submitAppeal("dec-1", "user", "reason", BUSINESS_ID),
-      "AI_APPEAL_VERIFICATION_UNAVAILABLE",
-    ],
-    [
-      "appeal resolution",
-      () =>
+      ).rejects.toMatchObject({
+        code: "DECISION_NOT_ON_CHAIN",
+        statusCode: 409,
+      });
+      expect(mockVerifyFiling).not.toHaveBeenCalled();
+      expect(db.aIAppeal.create).not.toHaveBeenCalled();
+    });
+
+    it("records an appeal against the decision's OWN chain id", async () => {
+      // The decision id passed to the verifier must come from the record, not
+      // from the caller — otherwise an appeal against decision B could be
+      // filed away against decision A.
+      db.aIDecision.findFirst.mockResolvedValue(
+        decision({ onChainDecisionId: `0x${"e".repeat(64)}` }),
+      );
+      db.aIAppeal.findFirst.mockResolvedValue(null);
+      db.aIAppeal.create.mockResolvedValue(appeal());
+      mockVerifyFiling.mockResolvedValue({
+        onChainAppealId: CHAIN_ID,
+        onChainDecisionId: `0x${"e".repeat(64)}`,
+        appellant: WALLET,
+        groundsHash: `0x${"0".repeat(64)}`,
+        chainStatus: "PENDING",
+        txHash: TX,
+        blockNumber: 10,
+        at: new Date("2026-08-01T00:00:00.000Z"),
+        decisionProvenance: "OPERATOR_ASSERTED",
+      });
+
+      await service.submitAppeal(
+        "dec-1",
+        WALLET,
+        "reason",
+        BUSINESS_ID,
+        { txHash: TX, onChainAppealId: CHAIN_ID },
+        chainCfg as never,
+      );
+
+      expect(mockVerifyFiling).toHaveBeenCalledWith(
+        chainCfg,
+        expect.objectContaining({
+          onChainDecisionId: `0x${"e".repeat(64)}`,
+          expectedAppellant: WALLET,
+        }),
+      );
+      // PENDING on chain is SUBMITTED here.
+      expect(db.aIAppeal.create.mock.calls[0][0].data.status).toBe("SUBMITTED");
+    });
+
+    it("will not resolve an appeal that never entered review", async () => {
+      // The contract reverts with AppealNotUnderReview; the API must not be
+      // able to record a resolution the chain would have refused.
+      db.aIAppeal.findFirst.mockResolvedValue(
+        appeal({ status: "SUBMITTED", onChainAppealId: CHAIN_ID }),
+      );
+      await expect(
         service.resolveAppeal(
           "appeal-1",
-          "reviewer",
-          "UPHELD",
+          WALLET,
           "notes",
           BUSINESS_ID,
+          { txHash: TX },
+          chainCfg as never,
         ),
-      "AI_APPEAL_VERIFICATION_UNAVAILABLE",
-    ],
-  ])(
-    "fails %s closed until cryptographic provenance exists",
-    async (_name, operation, code) => {
-      await expect(operation()).rejects.toMatchObject({
-        code,
-        statusCode: 501,
+      ).rejects.toMatchObject({
+        code: "APPEAL_NOT_UNDER_REVIEW",
+        statusCode: 409,
       });
-      expect(db.$transaction).not.toHaveBeenCalled();
-      expect(db.aIDecision.create).not.toHaveBeenCalled();
-      expect(db.aIDecision.update).not.toHaveBeenCalled();
-      expect(db.aIAppeal.create).not.toHaveBeenCalled();
-      expect(db.aIAppeal.updateMany).not.toHaveBeenCalled();
-    },
-  );
+      expect(mockVerifyResolution).not.toHaveBeenCalled();
+    });
+
+    it("takes the resolution outcome from the chain, not the caller", async () => {
+      db.aIAppeal.findFirst.mockResolvedValue(
+        appeal({ status: "UNDER_REVIEW", onChainAppealId: CHAIN_ID }),
+      );
+      db.aIAppeal.update.mockResolvedValue(appeal({ status: "OVERTURNED" }));
+      mockVerifyResolution.mockResolvedValue({
+        onChainAppealId: CHAIN_ID,
+        onChainDecisionId: `0x${"e".repeat(64)}`,
+        chainStatus: "OVERTURNED",
+        revisedOutcome: "REJECTED",
+        reviewer: WALLET,
+        txHash: TX,
+        blockNumber: 12,
+        at: new Date("2026-08-02T00:00:00.000Z"),
+        decisionProvenance: "OPERATOR_ASSERTED",
+      });
+
+      await service.resolveAppeal(
+        "appeal-1",
+        WALLET,
+        "notes",
+        BUSINESS_ID,
+        { txHash: TX },
+        chainCfg as never,
+      );
+
+      const written = db.aIAppeal.update.mock.calls[0][0].data;
+      expect(written.status).toBe("OVERTURNED");
+      // REJECTED on chain is BLOCK in the API vocabulary — the one mapping
+      // that is a rename rather than a tense change.
+      expect(written.finalOutcome).toBe("BLOCK");
+    });
+
+    it("logs an overturned appeal as CRITICAL", async () => {
+      // An overturned appeal means the automated decision was wrong. That is
+      // the entry a regulator looks for first.
+      db.aIAppeal.findFirst.mockResolvedValue(
+        appeal({ status: "UNDER_REVIEW", onChainAppealId: CHAIN_ID }),
+      );
+      db.aIAppeal.update.mockResolvedValue(appeal({ status: "OVERTURNED" }));
+      mockVerifyResolution.mockResolvedValue({
+        onChainAppealId: CHAIN_ID,
+        onChainDecisionId: `0x${"e".repeat(64)}`,
+        chainStatus: "OVERTURNED",
+        revisedOutcome: "APPROVED",
+        reviewer: WALLET,
+        txHash: TX,
+        blockNumber: 12,
+        at: new Date("2026-08-02T00:00:00.000Z"),
+        decisionProvenance: "OPERATOR_ASSERTED",
+      });
+
+      await service.resolveAppeal(
+        "appeal-1",
+        WALLET,
+        "notes",
+        BUSINESS_ID,
+        { txHash: TX },
+        chainCfg as never,
+      );
+
+      expect(audit.createAuditEntry).toHaveBeenCalledWith(
+        expect.objectContaining({ severity: "CRITICAL" }),
+      );
+    });
+
+    it("takes both override outcomes from the chain", async () => {
+      db.aIDecision.findFirst.mockResolvedValue(
+        decision({ onChainDecisionId: `0x${"e".repeat(64)}` }),
+      );
+      db.aIDecision.update.mockResolvedValue(decision());
+      mockVerifyOverride.mockResolvedValue({
+        onChainOverrideId: CHAIN_ID,
+        onChainDecisionId: `0x${"e".repeat(64)}`,
+        officer: WALLET,
+        originalOutcome: "FLAGGED",
+        newOutcome: "APPROVED",
+        txHash: TX,
+        blockNumber: 14,
+        at: new Date("2026-08-03T00:00:00.000Z"),
+        decisionProvenance: "OPERATOR_ASSERTED",
+      });
+
+      await service.overrideDecision(
+        "dec-1",
+        WALLET,
+        "reason enough to override",
+        BUSINESS_ID,
+        { txHash: TX, onChainOverrideId: CHAIN_ID },
+        chainCfg as never,
+      );
+
+      const written = db.aIDecision.update.mock.calls[0][0].data;
+      expect(written.originalDecision).toBe("FLAG");
+      expect(written.decision).toBe("APPROVE");
+    });
+  });
 
   it("uses authenticated-tenant predicates for durable decision history", async () => {
     db.aIDecision.findMany.mockResolvedValue([decision()]);

@@ -1,4 +1,5 @@
 import { Router, Response } from "express";
+import { getAddress } from "ethers";
 import { z } from "zod";
 import { AuthenticatedRequest, authenticateAPIKey } from "../middleware/auth";
 import { extractRole, requirePermission } from "../middleware/rbac";
@@ -8,6 +9,8 @@ import {
   AIComplianceError,
   AIComplianceService,
 } from "../services/ai-compliance";
+import { AIExecutionError } from "../services/ai-compliance-execution";
+import { loadNoblePayChainConfiguration } from "../lib/production-config";
 import { logger } from "../lib/logger";
 import { prisma } from "../lib/db";
 
@@ -48,31 +51,33 @@ const runDecisionSchema = z
     paymentId: z.string().min(1).max(100),
   })
   .strict();
+const bytes32 = z.string().regex(/^0x[a-fA-F0-9]{64}$/);
+
+// `outcome` is deliberately absent from the two schemas below. The chain
+// decides what an override changed a decision to, and what an appeal was
+// resolved to; accepting either from the caller would let a request contradict
+// its own receipt.
 const overrideSchema = z
   .object({
-    outcome,
     reason: z.string().trim().min(10).max(2_000),
+    txHash: bytes32,
+    onChainOverrideId: bytes32,
   })
   .strict();
 const appealSchema = z
-  .object({ reason: z.string().trim().min(10).max(2_000) })
+  .object({
+    reason: z.string().trim().min(10).max(2_000),
+    txHash: bytes32,
+    onChainAppealId: bytes32,
+  })
   .strict();
+const startReviewSchema = z.object({ txHash: bytes32 }).strict();
 const resolveAppealSchema = z
   .object({
-    outcome: z.enum(["UPHELD", "OVERTURNED", "DISMISSED"]),
     reviewNotes: z.string().trim().min(10).max(2_000),
-    finalOutcome: outcome.optional(),
+    txHash: bytes32,
   })
-  .strict()
-  .superRefine((value, context) => {
-    if (value.outcome === "OVERTURNED" && !value.finalOutcome) {
-      context.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["finalOutcome"],
-        message: "finalOutcome is required when overturning an appeal",
-      });
-    }
-  });
+  .strict();
 
 function tenant(req: AuthenticatedRequest): string {
   if (!req.businessId)
@@ -84,8 +89,30 @@ function tenant(req: AuthenticatedRequest): string {
   return req.businessId;
 }
 
-function actor(req: AuthenticatedRequest): string {
-  return req.signerId || req.jwtPayload?.sub || "authenticated-user";
+/**
+ * Anything that records a chain receipt needs a wallet address, because the
+ * receipt binds to one. actor() falls back to the literal string
+ * "authenticated-user", which would have failed every appellant, reviewer and
+ * officer check the moment these gates opened.
+ */
+function walletActor(req: AuthenticatedRequest): string {
+  const candidate = req.signerId;
+  if (!candidate || req.apiKeyId || candidate.startsWith("apikey:")) {
+    throw new AIComplianceError(
+      "WALLET_SESSION_REQUIRED",
+      "A wallet-authenticated session is required to record AI appeal and override receipts",
+      403,
+    );
+  }
+  try {
+    return getAddress(candidate);
+  } catch {
+    throw new AIComplianceError(
+      "WALLET_SESSION_REQUIRED",
+      "A wallet-authenticated session is required to record AI appeal and override receipts",
+      403,
+    );
+  }
 }
 
 function idempotencyKey(req: AuthenticatedRequest): string {
@@ -195,6 +222,33 @@ router.get(
   },
 );
 
+// The step the API was missing. AIComplianceModule refuses to resolve an appeal
+// that has not reached UNDER_REVIEW, and only a COMPLIANCE_OFFICER_ROLE holder
+// can put it there — so without this endpoint an appeal record would jump from
+// SUBMITTED to a final outcome with no record of who took up the review.
+router.post(
+  "/appeals/:id/review",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("ai:override"),
+  validate(appealParams, "params"),
+  validate(startReviewSchema),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const appeal = await aiService.startAppealReview(
+        req.params.id,
+        walletActor(req),
+        tenant(req),
+        { txHash: req.body.txHash },
+        loadNoblePayChainConfiguration(),
+      );
+      res.json({ success: true, data: appeal });
+    } catch (error) {
+      handleError(error, res);
+    }
+  },
+);
+
 router.post(
   "/appeals/:id/resolve",
   authenticateAPIKey,
@@ -206,11 +260,11 @@ router.post(
     try {
       const appeal = await aiService.resolveAppeal(
         req.params.id,
-        actor(req),
-        req.body.outcome,
+        walletActor(req),
         req.body.reviewNotes,
         tenant(req),
-        req.body.finalOutcome,
+        { txHash: req.body.txHash },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: appeal });
     } catch (error) {
@@ -289,10 +343,14 @@ router.post(
     try {
       const decision = await aiService.overrideDecision(
         req.params.id,
-        req.body.outcome,
-        actor(req),
+        walletActor(req),
         req.body.reason,
         tenant(req),
+        {
+          txHash: req.body.txHash,
+          onChainOverrideId: req.body.onChainOverrideId,
+        },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: decision });
     } catch (error) {
@@ -312,9 +370,11 @@ router.post(
     try {
       const appeal = await aiService.submitAppeal(
         req.params.id,
-        actor(req),
+        walletActor(req),
         req.body.reason,
         tenant(req),
+        { txHash: req.body.txHash, onChainAppealId: req.body.onChainAppealId },
+        loadNoblePayChainConfiguration(),
       );
       res.status(201).json({ success: true, data: appeal });
     } catch (error) {
@@ -324,6 +384,12 @@ router.post(
 );
 
 function handleError(error: unknown, res: Response): void {
+  if (error instanceof AIExecutionError) {
+    res
+      .status(error.statusCode)
+      .json({ error: error.reason, message: error.message });
+    return;
+  }
   if (error instanceof AIComplianceError) {
     res
       .status(error.statusCode)

@@ -839,6 +839,14 @@ model AIDecision {
   overriddenAt     DateTime? @map("overridden_at")
   createdAt        DateTime  @default(now()) @map("created_at")
 
+  // On-chain linkage. `onChainDecisionId` records which AIComplianceModule
+  // decision this mirrors — an entry an AI_OPERATOR_ROLE holder asserted, NOT
+  // a proof the model ran. See docs/audit/NP-AI-01; do not present it as
+  // provenance.
+  onChainDecisionId String? @map("on_chain_decision_id")
+  onChainOverrideId String? @map("on_chain_override_id")
+  overrideTxHash    String? @map("override_tx_hash")
+
   business Business?  @relation(fields: [businessId], references: [id], onDelete: Restrict)
   appeals  AIAppeal[]
 
@@ -847,6 +855,7 @@ model AIDecision {
   @@index([modelId])
   @@index([paymentId])
   @@index([escalated])
+  @@index([onChainDecisionId])
   @@map("ai_decisions")
 }
 
@@ -899,11 +908,22 @@ model AIAppeal {
   submittedAt       DateTime       @default(now()) @map("submitted_at")
   resolvedAt        DateTime?      @map("resolved_at")
 
+  // On-chain linkage for each step of the appeal lifecycle. reviewTxHash is
+  // separate on purpose: the contract requires an appeal to pass through
+  // UNDER_REVIEW before it can be resolved, and a named officer taking up the
+  // review is the auditable moment in an appeals process.
+  onChainAppealId String?   @map("on_chain_appeal_id")
+  filedTxHash     String?   @map("filed_tx_hash")
+  reviewTxHash    String?   @map("review_tx_hash")
+  resolvedTxHash  String?   @map("resolved_tx_hash")
+  reviewStartedAt DateTime? @map("review_started_at")
+
   business Business   @relation(fields: [businessId], references: [id], onDelete: Restrict)
   decision AIDecision @relation(fields: [decisionId], references: [id], onDelete: Restrict)
 
   @@unique([businessId, decisionId])
   @@index([businessId, status, submittedAt])
+  @@index([onChainAppealId])
   @@map("ai_appeals")
 }
 

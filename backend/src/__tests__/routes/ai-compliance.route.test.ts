@@ -11,7 +11,14 @@ const mockAIService = {
   getDecision: jest.fn(),
   overrideDecision: jest.fn(),
   submitAppeal: jest.fn(),
+  startAppealReview: jest.fn(),
 };
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 3,
+  }),
+}));
 let authenticated = true;
 let signerId: string | undefined = "0x1111111111111111111111111111111111111111";
 
@@ -59,6 +66,8 @@ const BUSINESS_ID = "11111111-1111-4111-8111-111111111111";
 const SIGNER = "0x1111111111111111111111111111111111111111";
 const DECISION_ID = "dec-11111111-1111-4111-8111-111111111111";
 const APPEAL_ID = "11111111-1111-4111-8111-111111111111";
+const TX_HASH = `0x${"c".repeat(64)}`;
+const ON_CHAIN_ID = `0x${"d".repeat(64)}`;
 
 describe("AI compliance routes", () => {
   beforeEach(() => {
@@ -186,85 +195,128 @@ describe("AI compliance routes", () => {
     expect(mockAIService.getDecision).not.toHaveBeenCalled();
   });
 
-  it("passes a verified actor to an override and preserves its 501 error", async () => {
-    mockAIService.overrideDecision.mockRejectedValue(
-      new AIComplianceError(
-        "AI_DECISION_MUTATIONS_UNAVAILABLE",
-        "mutation unavailable",
-        501,
-      ),
+  it("passes the override receipt and wallet actor to the service", async () => {
+    mockAIService.overrideDecision.mockResolvedValue({ id: DECISION_ID });
+    const response = await request(app)
+      .post(`/v1/ai-compliance/decisions/${DECISION_ID}/override`)
+      .send({
+        reason: "Confirmed false positive evidence",
+        txHash: TX_HASH,
+        onChainOverrideId: ON_CHAIN_ID,
+      });
+    expect(response.status).toBe(200);
+    expect(mockAIService.overrideDecision).toHaveBeenCalledWith(
+      DECISION_ID,
+      SIGNER,
+      "Confirmed false positive evidence",
+      BUSINESS_ID,
+      { txHash: TX_HASH, onChainOverrideId: ON_CHAIN_ID },
+      expect.anything(),
     );
+  });
+
+  it("refuses a caller-supplied override outcome", async () => {
+    // The chain decides what the decision was changed to. Accepting an outcome
+    // here would let the request contradict its own receipt.
     const response = await request(app)
       .post(`/v1/ai-compliance/decisions/${DECISION_ID}/override`)
       .send({
         outcome: "APPROVE",
         reason: "Confirmed false positive evidence",
+        txHash: TX_HASH,
+        onChainOverrideId: ON_CHAIN_ID,
       });
-    expect(response.status).toBe(501);
-    expect(mockAIService.overrideDecision).toHaveBeenCalledWith(
-      DECISION_ID,
-      "APPROVE",
-      SIGNER,
-      "Confirmed false positive evidence",
-      BUSINESS_ID,
-    );
+    expect(response.status).toBe(400);
+    expect(mockAIService.overrideDecision).not.toHaveBeenCalled();
   });
 
-  it("falls back to the signed JWT subject when signerId is unavailable", async () => {
+  it("refuses a JWT subject where a wallet address is required", async () => {
+    // Deliberate behaviour change. The old route fell back to the JWT subject
+    // (and ultimately the literal string "authenticated-user"), which cannot be
+    // compared to an on-chain appellant. A receipt binds to an address, so
+    // anything else has to be refused rather than silently mismatched.
     signerId = undefined;
-    mockAIService.submitAppeal.mockRejectedValue(
-      new AIComplianceError(
-        "AI_APPEAL_VERIFICATION_UNAVAILABLE",
-        "appeal unavailable",
-        501,
-      ),
-    );
     const response = await request(app)
       .post(`/v1/ai-compliance/decisions/${DECISION_ID}/appeals`)
-      .send({ reason: "Additional transaction evidence is available" });
-    expect(response.status).toBe(501);
+      .send({
+        reason: "Additional transaction evidence is available",
+        txHash: TX_HASH,
+        onChainAppealId: ON_CHAIN_ID,
+      });
+    expect(response.status).toBe(403);
+    expect(response.body.error).toBe("WALLET_SESSION_REQUIRED");
+    expect(mockAIService.submitAppeal).not.toHaveBeenCalled();
+  });
+
+  it("passes the appeal receipt and wallet actor to the service", async () => {
+    mockAIService.submitAppeal.mockResolvedValue({ id: APPEAL_ID });
+    const response = await request(app)
+      .post(`/v1/ai-compliance/decisions/${DECISION_ID}/appeals`)
+      .send({
+        reason: "Additional transaction evidence is available",
+        txHash: TX_HASH,
+        onChainAppealId: ON_CHAIN_ID,
+      });
+    expect(response.status).toBe(201);
     expect(mockAIService.submitAppeal).toHaveBeenCalledWith(
       DECISION_ID,
-      "jwt-user",
+      SIGNER,
       "Additional transaction evidence is available",
       BUSINESS_ID,
+      { txHash: TX_HASH, onChainAppealId: ON_CHAIN_ID },
+      expect.anything(),
     );
   });
 
-  it("requires a final outcome when resolving an overturned appeal", async () => {
+  it("exposes the review step the contract requires", async () => {
+    mockAIService.startAppealReview.mockResolvedValue({
+      id: APPEAL_ID,
+      status: "UNDER_REVIEW",
+    });
+    const response = await request(app)
+      .post(`/v1/ai-compliance/appeals/${APPEAL_ID}/review`)
+      .send({ txHash: TX_HASH });
+    expect(response.status).toBe(200);
+    expect(mockAIService.startAppealReview).toHaveBeenCalledWith(
+      APPEAL_ID,
+      SIGNER,
+      BUSINESS_ID,
+      { txHash: TX_HASH },
+      expect.anything(),
+    );
+  });
+
+  it("refuses a caller-supplied appeal outcome", async () => {
+    // Replaces an older rule that asked the caller for finalOutcome when
+    // overturning. An appeals process exists to be contestable; the result must
+    // come from the receipt, not from whoever is filing the paperwork.
     const response = await request(app)
       .post(`/v1/ai-compliance/appeals/${APPEAL_ID}/resolve`)
       .send({
         outcome: "OVERTURNED",
         reviewNotes: "The appeal evidence changes the outcome",
+        txHash: TX_HASH,
       });
     expect(response.status).toBe(400);
     expect(mockAIService.resolveAppeal).not.toHaveBeenCalled();
   });
 
   it("passes complete appeal resolution evidence to the service", async () => {
-    mockAIService.resolveAppeal.mockRejectedValue(
-      new AIComplianceError(
-        "AI_APPEAL_VERIFICATION_UNAVAILABLE",
-        "appeal unavailable",
-        501,
-      ),
-    );
+    mockAIService.resolveAppeal.mockResolvedValue({ id: APPEAL_ID });
     const response = await request(app)
       .post(`/v1/ai-compliance/appeals/${APPEAL_ID}/resolve`)
       .send({
-        outcome: "OVERTURNED",
         reviewNotes: "The appeal evidence changes the outcome",
-        finalOutcome: "APPROVE",
+        txHash: TX_HASH,
       });
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(200);
     expect(mockAIService.resolveAppeal).toHaveBeenCalledWith(
       APPEAL_ID,
       SIGNER,
-      "OVERTURNED",
       "The appeal evidence changes the outcome",
       BUSINESS_ID,
-      "APPROVE",
+      { txHash: TX_HASH },
+      expect.anything(),
     );
   });
 
