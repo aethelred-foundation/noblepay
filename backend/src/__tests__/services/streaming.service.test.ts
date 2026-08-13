@@ -18,6 +18,10 @@ function stream(overrides: Record<string, unknown> = {}) {
     endTime: new Date("2026-07-21T12:01:00.000Z"),
     cliffEnd: null,
     pausedAt: null,
+    totalPausedSeconds: 0,
+    onChainStreamId: null,
+    createTxHash: null,
+    lastEventTxHash: null,
     status: "ACTIVE",
     createdAt: new Date("2026-07-21T11:00:00.000Z"),
     ...overrides,
@@ -27,7 +31,12 @@ function stream(overrides: Record<string, unknown> = {}) {
 function setup() {
   const prisma = {
     business: { findUnique: jest.fn() },
-    paymentStream: { findMany: jest.fn(), findFirst: jest.fn() },
+    paymentStream: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
   };
   const service = new StreamingService(prisma as never, {} as AuditService);
   return { prisma, service };
@@ -196,44 +205,30 @@ describe("StreamingService production behavior", () => {
     expect(prisma.paymentStream.findFirst).not.toHaveBeenCalled();
   });
 
-  it("fails every unverified stream mutation closed", async () => {
+  it("refuses a rate change permanently — the contract has no such function", async () => {
+    // Not a gate awaiting a verifier. StreamingPayments has no rate-adjustment
+    // function and no event for one: a stream's rate is fixed at creation so a
+    // sender cannot renege after the fact. 422, not 501.
     const { service } = setup();
     await expect(
-      service.createStream(
-        {
-          sender: wallet,
-          recipient,
-          totalAmount: "100",
-          currency: "USDC",
-          endTime: "2026-08-01T00:00:00.000Z",
-        },
-        "business-1",
-      ),
-    ).rejects.toMatchObject({ statusCode: 501 });
-    await expect(
-      service.pauseStream("stream-1", wallet, "business-1"),
-    ).rejects.toMatchObject({
-      code: "ONCHAIN_SETTLEMENT_UNAVAILABLE",
-      statusCode: 501,
-    });
-    await expect(
       service.adjustRate("stream-1", "2", wallet, "business-1"),
-    ).rejects.toMatchObject({ statusCode: 501 });
-    await expect(
-      service.createBatchStreams({
-        businessId: "business-1",
-        streams: [],
-      }),
     ).rejects.toMatchObject({
-      code: "ONCHAIN_SETTLEMENT_UNAVAILABLE",
+      code: "STREAM_RATE_IMMUTABLE",
+      statusCode: 422,
+    });
+  });
+
+  it("refuses batch creation because the batch event identifies nothing", async () => {
+    // BatchStreamsCreated reports a count and a total, not the stream ids.
+    // Recording N streams on the strength of that would be evidence about none
+    // of them; each stream has its own StreamCreated receipt instead.
+    const { service } = setup();
+    await expect(
+      service.createBatchStreams({ businessId: "business-1", streams: [] }),
+    ).rejects.toMatchObject({
+      code: "BATCH_STREAM_UNVERIFIABLE",
       statusCode: 501,
     });
-    await expect(
-      service.resumeStream("stream-1", wallet, "business-1"),
-    ).rejects.toMatchObject({ statusCode: 501 });
-    await expect(
-      service.cancelStream("stream-1", wallet, "business-1"),
-    ).rejects.toMatchObject({ statusCode: 501 });
   });
 
   it("applies all optional filters while preserving wallet ownership", async () => {
@@ -322,5 +317,94 @@ describe("StreamingService production behavior", () => {
       "stream-sooner",
       "stream-later",
     ]);
+  });
+});
+
+/**
+ * Regression for NP-STREAM-01.
+ *
+ * The bug: calculateBalance ignored accumulated pause time, so a stream that
+ * had been paused and resumed reported the whole pause interval as streamed.
+ * It was unreachable while pause/resume were gated, and opening those gates is
+ * what would have made it reachable — so this pins the arithmetic rather than
+ * trusting that the fix stays.
+ */
+describe("stream balance excludes paused time", () => {
+  const START = new Date("2026-07-21T12:00:00.000Z");
+  const END = new Date("2026-07-21T12:01:40.000Z"); // 100 seconds
+
+  // Read the balance 60 seconds into the stream.
+  beforeEach(() => {
+    jest.useFakeTimers().setSystemTime(new Date("2026-07-21T12:01:00.000Z"));
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  const paused = (totalPausedSeconds: number) =>
+    stream({
+      startTime: START,
+      endTime: END,
+      totalAmount: new Prisma.Decimal("100"),
+      ratePerSecond: new Prisma.Decimal("1"),
+      withdrawn: new Prisma.Decimal("0"),
+      totalPausedSeconds,
+      status: "ACTIVE",
+      pausedAt: null,
+    });
+
+  it("reports 30 streamed, not 60, after a 30 second pause", async () => {
+    // The worked example from the finding: 100 tokens over 100s at 1/s, paused
+    // at t=10 for 30s, read at t=60. The contract pays 30. Before the fix this
+    // said 60 — the API promising money that does not exist.
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.paymentStream.findFirst.mockResolvedValue(paused(30));
+
+    const balance = await service.getStreamBalance("stream-1", "business-1");
+
+    // 60s wall clock minus 30s paused.
+    expect(balance.elapsedSeconds).toBe(30);
+    expect(balance.streamed).toBe("30");
+    expect(balance.withdrawable).toBe("30");
+  });
+
+  it("shortens the total duration by the pause as well", async () => {
+    // The contract subtracts pause time from BOTH elapsed and total. Taking it
+    // off only one would leave percentComplete wrong even where streamed is
+    // right.
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.paymentStream.findFirst.mockResolvedValue(paused(30));
+
+    const balance = await service.getStreamBalance("stream-1", "business-1");
+
+    expect(balance.totalSeconds).toBe(70);
+    expect(balance.percentComplete).toBeCloseTo((30 / 70) * 100, 6);
+  });
+
+  it("is unchanged for a stream that was never paused", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.paymentStream.findFirst.mockResolvedValue(paused(0));
+
+    const balance = await service.getStreamBalance("stream-1", "business-1");
+
+    expect(balance.totalSeconds).toBe(100);
+    expect(balance.streamed).toBe("60");
+  });
+
+  it("never reports negative progress if the pause exceeds the elapsed time", async () => {
+    // Defensive: a clock skew or a repaired totalPausedSeconds larger than the
+    // wall-clock elapsed must clamp to zero, not go negative and invert the
+    // arithmetic.
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.paymentStream.findFirst.mockResolvedValue(paused(90));
+
+    const balance = await service.getStreamBalance("stream-1", "business-1");
+
+    expect(balance.elapsedSeconds).toBeGreaterThanOrEqual(0);
+    expect(Number(balance.streamed)).toBeGreaterThanOrEqual(0);
   });
 });

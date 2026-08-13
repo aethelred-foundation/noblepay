@@ -483,6 +483,10 @@ export const CreateStreamSchema = z
     ratePerSecond: advancedPositiveDecimal.optional(),
     autoCompound: z.boolean().optional(),
     metadata: boundedMetadata,
+    // The receipt for the stream that already exists on chain. A stream record
+    // without one is an unverifiable claim that an escrow was funded.
+    txHash: bytes32Hash,
+    onChainStreamId: bytes32Hash,
   })
   .strict()
   .superRefine((value, context) => {
@@ -785,10 +789,14 @@ export type LiquidityPositionQuery = z.infer<
   typeof LiquidityPositionQuerySchema
 >;
 export type StreamListQuery = z.infer<typeof StreamListQuerySchema>;
+export const StreamReceiptSchema = z.object({ txHash: bytes32Hash }).strict();
+
 export const CloseFXHedgeSchema = z.object({ txHash: bytes32Hash }).strict();
 
 export type FXRatesQuery = z.infer<typeof FXRatesQuerySchema>;
 export type CreateFXHedge = z.infer<typeof CreateFXHedgeSchema>;
+export type CreateStream = z.infer<typeof CreateStreamSchema>;
+export type StreamReceipt = z.infer<typeof StreamReceiptSchema>;
 export type CloseFXHedge = z.infer<typeof CloseFXHedgeSchema>;
 export type FXHedgeListQuery = z.infer<typeof FXHedgeListQuerySchema>;
 export type CrossChainRouteQuery = z.infer<typeof CrossChainRouteQuerySchema>;

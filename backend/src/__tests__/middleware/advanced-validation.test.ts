@@ -68,8 +68,14 @@ describe("advanced route validation", () => {
       currency: "USDC",
       startTime: "2026-07-21T10:00:00.000Z",
       endTime: "2026-07-22T10:00:00.000Z",
+      // A stream record without a receipt is an unverifiable claim that an
+      // escrow was funded.
+      txHash: `0x${"c".repeat(64)}`,
+      onChainStreamId: `0x${"d".repeat(64)}`,
     };
     expect(CreateStreamSchema.safeParse(valid).success).toBe(true);
+    const { txHash: _t, ...noReceipt } = valid;
+    expect(CreateStreamSchema.safeParse(noReceipt).success).toBe(false);
     expect(
       CreateStreamSchema.safeParse({ ...valid, recipient: address }).success,
     ).toBe(false);

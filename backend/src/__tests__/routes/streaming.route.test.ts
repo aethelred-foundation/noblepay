@@ -7,8 +7,16 @@ const mockStreamingService = {
   cancelStream: jest.fn(),
   adjustRate: jest.fn(),
   createBatchStreams: jest.fn(),
+  completeStream: jest.fn(),
+  recordWithdrawal: jest.fn(),
   getAnalytics: jest.fn(),
 };
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 3,
+  }),
+}));
 let authenticated = true;
 
 jest.mock("../../lib/db", () => ({ prisma: {} }));
@@ -54,13 +62,23 @@ const app = express();
 app.use(express.json());
 app.use("/v1/streaming", router);
 
-const validStream = {
+const TX_HASH = `0x${"c".repeat(64)}`;
+const ON_CHAIN_ID = `0x${"d".repeat(64)}`;
+const RECEIPT = { txHash: TX_HASH };
+
+const streamInput = {
   sender: "0x1111111111111111111111111111111111111111",
   recipient: "0x2222222222222222222222222222222222222222",
   totalAmount: "100",
   currency: "USDC",
   startTime: "2026-07-21T10:00:00.000Z",
   endTime: "2026-08-21T10:00:00.000Z",
+};
+
+const validStream = {
+  ...streamInput,
+  txHash: TX_HASH,
+  onChainStreamId: ON_CHAIN_ID,
 };
 
 describe("streaming routes", () => {
@@ -101,31 +119,56 @@ describe("streaming routes", () => {
     expect(mockStreamingService.createStream).not.toHaveBeenCalled();
   });
 
-  it("validates a create request before surfacing the fail-closed response", async () => {
-    mockStreamingService.createStream.mockRejectedValue(
-      new StreamError(
-        "ONCHAIN_SETTLEMENT_UNAVAILABLE",
-        "Receipt verifier unavailable",
-        501,
-      ),
-    );
+  it("splits the receipt out of the create request", async () => {
+    mockStreamingService.createStream.mockResolvedValue({ id: "stream-1" });
 
     const response = await request(app).post("/v1/streaming").send(validStream);
 
-    expect(response.status).toBe(501);
+    expect(response.status).toBe(201);
     expect(mockStreamingService.createStream).toHaveBeenCalledWith(
-      validStream,
+      streamInput,
       "business-1",
+      { txHash: TX_HASH, onChainStreamId: ON_CHAIN_ID },
+      expect.anything(),
     );
   });
 
-  it("requires empty bodies for state-changing stream actions", async () => {
-    const invalid = await request(app)
-      .post("/v1/streaming/stream-1/pause")
-      .send({ pretendSuccess: true });
+  it("refuses a create with no receipt", async () => {
+    const response = await request(app).post("/v1/streaming").send(streamInput);
 
-    expect(invalid.status).toBe(400);
+    expect(response.status).toBe(400);
+    expect(mockStreamingService.createStream).not.toHaveBeenCalled();
+  });
+
+  it("requires a receipt, and only a receipt, on state-changing actions", async () => {
+    const unknownField = await request(app)
+      .post("/v1/streaming/stream-1/pause")
+      .send({ ...RECEIPT, pretendSuccess: true });
+    expect(unknownField.status).toBe(400);
+
+    const noReceipt = await request(app)
+      .post("/v1/streaming/stream-1/pause")
+      .send({});
+    expect(noReceipt.status).toBe(400);
+
     expect(mockStreamingService.pauseStream).not.toHaveBeenCalled();
+  });
+
+  it("records a withdrawal so withdrawable stops over-reporting", async () => {
+    mockStreamingService.recordWithdrawal.mockResolvedValue({ id: "stream-1" });
+
+    const response = await request(app)
+      .post("/v1/streaming/stream-1/withdrawals")
+      .send(RECEIPT);
+
+    expect(response.status).toBe(200);
+    expect(mockStreamingService.recordWithdrawal).toHaveBeenCalledWith(
+      "stream-1",
+      "business-1",
+      "business-1",
+      RECEIPT,
+      expect.anything(),
+    );
   });
 
   it("passes tenant identity to balance reads", async () => {
@@ -144,61 +187,59 @@ describe("streaming routes", () => {
   });
 
   it.each([
-    [
-      "pause",
-      "pauseStream",
-      "/v1/streaming/stream-1/pause",
-      {},
-      ["stream-1", "business-1", "business-1"],
-    ],
-    [
-      "resume",
-      "resumeStream",
-      "/v1/streaming/stream-1/resume",
-      {},
-      ["stream-1", "business-1", "business-1"],
-    ],
-    [
-      "cancel",
-      "cancelStream",
-      "/v1/streaming/stream-1/cancel",
-      {},
-      ["stream-1", "business-1", "business-1"],
-    ],
-    [
-      "rate adjustment",
-      "adjustRate",
-      "/v1/streaming/stream-1/adjust-rate",
-      { ratePerSecond: "2" },
-      ["stream-1", "2", "business-1", "business-1"],
-    ],
-    [
-      "batch creation",
-      "createBatchStreams",
-      "/v1/streaming/batch",
-      { streams: [validStream], label: "payroll" },
-      [{ streams: [validStream], label: "payroll", businessId: "business-1" }],
-    ],
-  ])(
-    "validates %s and preserves the settlement-unavailable result",
-    async (_name, method, path, body, expectedArgs) => {
-      (mockStreamingService as any)[method].mockRejectedValue(
-        new StreamError(
-          "ONCHAIN_SETTLEMENT_UNAVAILABLE",
-          "Receipt verifier unavailable",
-          501,
-        ),
-      );
+    ["pause", "pauseStream", "/v1/streaming/stream-1/pause"],
+    ["resume", "resumeStream", "/v1/streaming/stream-1/resume"],
+    ["cancel", "cancelStream", "/v1/streaming/stream-1/cancel"],
+    ["complete", "completeStream", "/v1/streaming/stream-1/complete"],
+  ])("passes the %s receipt to the service", async (_name, method, path) => {
+    (mockStreamingService as any)[method].mockResolvedValue({ id: "stream-1" });
 
-      const response = await request(app).post(path).send(body);
+    const response = await request(app).post(path).send(RECEIPT);
 
-      expect(response.status).toBe(501);
-      expect(response.body.error).toBe("ONCHAIN_SETTLEMENT_UNAVAILABLE");
-      expect((mockStreamingService as any)[method]).toHaveBeenCalledWith(
-        ...expectedArgs,
-      );
-    },
-  );
+    expect(response.status).toBe(200);
+    expect((mockStreamingService as any)[method]).toHaveBeenCalledWith(
+      "stream-1",
+      "business-1",
+      "business-1",
+      RECEIPT,
+      expect.anything(),
+    );
+  });
+
+  it("surfaces a permanent rate refusal as 422, not a gate", async () => {
+    // The contract has no rate-adjustment function, so this is never coming.
+    mockStreamingService.adjustRate.mockRejectedValue(
+      new StreamError(
+        "STREAM_RATE_IMMUTABLE",
+        "A stream's rate is fixed at creation",
+        422,
+      ),
+    );
+
+    const response = await request(app)
+      .post("/v1/streaming/stream-1/adjust-rate")
+      .send({ ratePerSecond: "2" });
+
+    expect(response.status).toBe(422);
+    expect(response.body.error).toBe("STREAM_RATE_IMMUTABLE");
+  });
+
+  it("surfaces the batch refusal with its own reason", async () => {
+    mockStreamingService.createBatchStreams.mockRejectedValue(
+      new StreamError(
+        "BATCH_STREAM_UNVERIFIABLE",
+        "BatchStreamsCreated does not identify the streams it created",
+        501,
+      ),
+    );
+
+    const response = await request(app)
+      .post("/v1/streaming/batch")
+      .send({ streams: [validStream], label: "payroll" });
+
+    expect(response.status).toBe(501);
+    expect(response.body.error).toBe("BATCH_STREAM_UNVERIFIABLE");
+  });
 
   it("returns tenant-scoped stream analytics", async () => {
     mockStreamingService.getAnalytics.mockResolvedValue({
@@ -217,9 +258,9 @@ describe("streaming routes", () => {
     ["create", "post", "/v1/streaming", validStream],
     ["list", "get", "/v1/streaming", undefined],
     ["balance", "get", "/v1/streaming/stream-1/balance", undefined],
-    ["pause", "post", "/v1/streaming/stream-1/pause", {}],
-    ["resume", "post", "/v1/streaming/stream-1/resume", {}],
-    ["cancel", "post", "/v1/streaming/stream-1/cancel", {}],
+    ["pause", "post", "/v1/streaming/stream-1/pause", RECEIPT],
+    ["resume", "post", "/v1/streaming/stream-1/resume", RECEIPT],
+    ["cancel", "post", "/v1/streaming/stream-1/cancel", RECEIPT],
     [
       "adjust",
       "post",

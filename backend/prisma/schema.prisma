@@ -530,9 +530,21 @@ model PaymentStream {
   createdAt     DateTime     @default(now()) @map("created_at")
   pausedAt      DateTime?    @map("paused_at")
 
+  // Accumulated paused time, taken from the pausedDuration the contract reports
+  // in StreamResumed. Without it, a resumed stream's pause interval vanishes
+  // from the balance calculation and the API promises money the contract will
+  // not pay — see docs/audit/NP-STREAM-01. Seconds, to match the contract.
+  totalPausedSeconds Int @default(0) @map("total_paused_seconds")
+
+  // On-chain linkage.
+  onChainStreamId String? @map("on_chain_stream_id")
+  createTxHash    String? @map("create_tx_hash")
+  lastEventTxHash String? @map("last_event_tx_hash")
+
   @@index([sender])
   @@index([recipient])
   @@index([status])
+  @@index([onChainStreamId])
   @@map("payment_streams")
 }
 

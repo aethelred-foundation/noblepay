@@ -9,6 +9,8 @@ import {
   requireRole,
 } from "../middleware/rbac";
 import { logger } from "../lib/logger";
+import { StreamExecutionError } from "../services/streaming-execution";
+import { loadNoblePayChainConfiguration } from "../lib/production-config";
 import {
   AdjustStreamRateSchema,
   AdvancedResourceParamsSchema,
@@ -16,8 +18,11 @@ import {
   CreateStreamSchema,
   EmptyBodySchema,
   StreamListQuerySchema,
+  StreamReceiptSchema,
   validate,
+  type CreateStream,
   type StreamListQuery,
+  type StreamReceipt,
 } from "../middleware/validation";
 import type {
   BatchStreamInput,
@@ -38,9 +43,13 @@ router.post(
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
+      const { txHash, onChainStreamId, ...input } =
+        req.body as unknown as CreateStream;
       const stream = await streamingService.createStream(
-        req.body as CreateStreamInput,
+        input as CreateStreamInput,
         req.businessId,
+        { txHash, onChainStreamId },
+        loadNoblePayChainConfiguration(),
       );
       res.status(201).json({ success: true, data: stream });
     } catch (error) {
@@ -93,7 +102,7 @@ router.post(
   extractRole,
   requirePermission("streams:manage"),
   validate(AdvancedResourceParamsSchema, "params"),
-  validate(EmptyBodySchema),
+  validate(StreamReceiptSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
@@ -101,6 +110,8 @@ router.post(
         req.params.id,
         req.businessId,
         req.businessId,
+        { txHash: (req.body as StreamReceipt).txHash },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: stream });
     } catch (error) {
@@ -115,7 +126,7 @@ router.post(
   extractRole,
   requirePermission("streams:manage"),
   validate(AdvancedResourceParamsSchema, "params"),
-  validate(EmptyBodySchema),
+  validate(StreamReceiptSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
@@ -123,6 +134,8 @@ router.post(
         req.params.id,
         req.businessId,
         req.businessId,
+        { txHash: (req.body as StreamReceipt).txHash },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: stream });
     } catch (error) {
@@ -137,7 +150,7 @@ router.post(
   extractRole,
   requirePermission("streams:manage"),
   validate(AdvancedResourceParamsSchema, "params"),
-  validate(EmptyBodySchema),
+  validate(StreamReceiptSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
       if (!req.businessId) return unauthorized(res);
@@ -145,8 +158,61 @@ router.post(
         req.params.id,
         req.businessId,
         req.businessId,
+        { txHash: (req.body as StreamReceipt).txHash },
+        loadNoblePayChainConfiguration(),
       );
       res.json({ success: true, data: result });
+    } catch (error) {
+      handleError(error, res);
+    }
+  },
+);
+
+// withdrawn feeds `withdrawable = streamed - withdrawn`, and nothing advanced
+// it before this, so any stream drawn against reported more available than it
+// actually had. See docs/audit/NP-STREAM-01.
+router.post(
+  "/:id/withdrawals",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("streams:manage"),
+  validate(AdvancedResourceParamsSchema, "params"),
+  validate(StreamReceiptSchema),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!req.businessId) return unauthorized(res);
+      const stream = await streamingService.recordWithdrawal(
+        req.params.id,
+        req.businessId,
+        req.businessId,
+        { txHash: (req.body as StreamReceipt).txHash },
+        loadNoblePayChainConfiguration(),
+      );
+      res.json({ success: true, data: stream });
+    } catch (error) {
+      handleError(error, res);
+    }
+  },
+);
+
+router.post(
+  "/:id/complete",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("streams:manage"),
+  validate(AdvancedResourceParamsSchema, "params"),
+  validate(StreamReceiptSchema),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      if (!req.businessId) return unauthorized(res);
+      const stream = await streamingService.completeStream(
+        req.params.id,
+        req.businessId,
+        req.businessId,
+        { txHash: (req.body as StreamReceipt).txHash },
+        loadNoblePayChainConfiguration(),
+      );
+      res.json({ success: true, data: stream });
     } catch (error) {
       handleError(error, res);
     }
@@ -220,6 +286,12 @@ function unauthorized(res: Response): void {
 }
 
 function handleError(error: unknown, res: Response): void {
+  if (error instanceof StreamExecutionError) {
+    res
+      .status(error.statusCode)
+      .json({ error: error.reason, message: error.message });
+    return;
+  }
   if (error instanceof StreamError) {
     res
       .status(error.statusCode)
