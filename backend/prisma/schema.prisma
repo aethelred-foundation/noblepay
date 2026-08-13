@@ -725,9 +725,22 @@ model CrossChainTransfer {
   completedAt   DateTime?      @map("completed_at")
   metadata      Json?
 
+  // The CrossChainRouter transfer id this record mirrors. sourceTxHash and
+  // destTxHash already existed, but nothing tied a row to the bytes32 id the
+  // contract uses, so a receipt could not be matched to a record.
+  //
+  // Note the asymmetry between the two hashes: sourceTxHash is verified
+  // against the Aethelred chain, whose anchor the operator has confirmed.
+  // destTxHash is whatever a relay asserted in TransferRelayed on the source
+  // chain — it is a claim recorded on chain, not a transaction this system has
+  // seen on the destination chain. They are not equally trustworthy and should
+  // not be presented as though they were.
+  onChainTransferId String? @map("on_chain_transfer_id")
+
   @@index([sourceChain, destChain])
   @@index([sender])
   @@index([status])
+  @@index([onChainTransferId])
   @@map("crosschain_transfers")
 }
 

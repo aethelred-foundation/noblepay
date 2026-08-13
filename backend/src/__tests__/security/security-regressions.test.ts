@@ -1,4 +1,12 @@
 /** Release-blocking regressions for previously identified trust-boundary bugs. */
+const verifyInitiation = jest.fn();
+const verifyRecovery = jest.fn();
+
+jest.mock("../../services/crosschain-execution", () => ({
+  verifyTransferInitiation: (...a: unknown[]) => verifyInitiation(...a),
+  verifyTransferRecovery: (...a: unknown[]) => verifyRecovery(...a),
+}));
+
 import jwt from "jsonwebtoken";
 import { Prisma } from "@prisma/client";
 import {
@@ -372,11 +380,69 @@ describe("NP-05/NP-10: compliance data fails closed", () => {
 });
 
 describe("NP-06: cross-chain recovery and tenant boundaries", () => {
-  it("fails transfer initiation and recovery closed without verified receipts", async () => {
+  // The service resolves its chain registry before it verifies anything, so
+  // these tests need one configured to reach the code under test at all.
+  const chainRegistry = JSON.stringify([
+    {
+      id: "aethelred",
+      chainId: 7332,
+      name: "Aethelred",
+      type: "EVM",
+      rpcUrl: "https://rpc.aethelred.example",
+      explorer: "https://explorer.aethelred.example",
+      avgBlockTime: 2,
+      finality: 12,
+      nativeToken: "AETHEL",
+      supportedTokens: ["USDC"],
+    },
+    {
+      id: "ethereum",
+      chainId: 11155111,
+      name: "Ethereum Sepolia",
+      type: "EVM",
+      rpcUrl: "https://rpc.ethereum.example",
+      explorer: "https://explorer.ethereum.example",
+      avgBlockTime: 12,
+      finality: 12,
+      nativeToken: "ETH",
+      supportedTokens: ["USDC"],
+    },
+  ]);
+  let savedRegistry: string | undefined;
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    savedRegistry = process.env.CROSSCHAIN_CHAINS_JSON;
+    process.env.CROSSCHAIN_CHAINS_JSON = chainRegistry;
+  });
+
+  afterEach(() => {
+    if (savedRegistry === undefined) delete process.env.CROSSCHAIN_CHAINS_JSON;
+    else process.env.CROSSCHAIN_CHAINS_JSON = savedRegistry;
+  });
+
+  // These paths used to be closed by a blanket 501. They are open now, backed
+  // by receipt verification, so the property under test moves with them: it is
+  // no longer "this always refuses" but "nothing is written unless the chain
+  // agrees". A regression that let an unverified transfer through would be the
+  // same security failure the 501 was standing in for.
+  it("writes nothing when the source receipt fails verification", async () => {
     const prisma: any = {
-      crossChainTransfer: { create: jest.fn(), update: jest.fn() },
+      crossChainTransfer: {
+        create: jest.fn(),
+        update: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
     };
     const service = new CrossChainService(prisma, {} as any, jest.fn());
+
+    verifyInitiation.mockRejectedValue(
+      Object.assign(new Error("commitment mismatch"), {
+        reason: "TRANSFER_RECIPIENT_MISMATCH",
+        statusCode: 422,
+      }),
+    );
+
     await expect(
       service.initiateTransfer(
         {
@@ -388,18 +454,39 @@ describe("NP-06: cross-chain recovery and tenant boundaries", () => {
         },
         WALLET_A,
         BUSINESS_A,
+        { txHash: `0x${"c".repeat(64)}`, onChainTransferId: `0x${"d".repeat(64)}` },
+        { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 } as any,
       ),
-    ).rejects.toMatchObject({
-      code: "BRIDGE_EXECUTION_UNAVAILABLE",
-      statusCode: 501,
-    });
-    await expect(
-      service.recoverTransfer("transfer-1", WALLET_A, BUSINESS_A),
-    ).rejects.toMatchObject({
-      code: "RECOVERY_EXECUTION_UNAVAILABLE",
-      statusCode: 501,
-    });
+    ).rejects.toMatchObject({ reason: "TRANSFER_RECIPIENT_MISMATCH" });
+
     expect(prisma.crossChainTransfer.create).not.toHaveBeenCalled();
+  });
+
+  it("will not recover another tenant's transfer", async () => {
+    // The lookup is scoped to the authenticated business's own wallet, so a
+    // transfer belonging to WALLET_B is simply not found — and no receipt is
+    // even fetched, let alone written.
+    const prisma: any = {
+      business: { findUnique: jest.fn().mockResolvedValue({ address: WALLET_A }) },
+      crossChainTransfer: {
+        create: jest.fn(),
+        update: jest.fn(),
+        findFirst: jest.fn().mockResolvedValue(null),
+      },
+    };
+    const service = new CrossChainService(prisma, {} as any, jest.fn());
+
+    await expect(
+      service.recoverTransfer(
+        "transfer-1",
+        WALLET_A,
+        BUSINESS_A,
+        { txHash: `0x${"f".repeat(64)}` },
+        { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 } as any,
+      ),
+    ).rejects.toMatchObject({ code: "TRANSFER_NOT_FOUND", statusCode: 404 });
+
+    expect(verifyRecovery).not.toHaveBeenCalled();
     expect(prisma.crossChainTransfer.update).not.toHaveBeenCalled();
   });
 

@@ -584,6 +584,11 @@ export const CreateCrossChainTransferSchema = z
     amount: advancedPositiveDecimal,
     recipient: ethereumAddress,
     metadata: boundedMetadata,
+    // The receipt for the escrow that already happened on the source chain.
+    // Required, because a transfer record without one is an unverifiable claim
+    // that funds moved.
+    txHash: bytes32Hash,
+    onChainTransferId: bytes32Hash,
   })
   .strict()
   .refine((value) => value.sourceChain !== value.destinationChain, {
@@ -611,7 +616,11 @@ export const CrossChainTransferListQuerySchema = z
   })
   .strict();
 export const RecoverCrossChainTransferSchema = z
-  .object({ transferId: opaqueResourceId })
+  .object({
+    transferId: opaqueResourceId,
+    // The source-chain transaction that refunded the escrow.
+    txHash: bytes32Hash,
+  })
   .strict();
 export const AdvancedPaginationSchema = z.object({ page, limit }).strict();
 
@@ -753,6 +762,12 @@ export type StreamListQuery = z.infer<typeof StreamListQuerySchema>;
 export type FXRatesQuery = z.infer<typeof FXRatesQuerySchema>;
 export type FXHedgeListQuery = z.infer<typeof FXHedgeListQuerySchema>;
 export type CrossChainRouteQuery = z.infer<typeof CrossChainRouteQuerySchema>;
+export type CreateCrossChainTransfer = z.infer<
+  typeof CreateCrossChainTransferSchema
+>;
+export type RecoverCrossChainTransfer = z.infer<
+  typeof RecoverCrossChainTransferSchema
+>;
 export type CrossChainTransferListQuery = z.infer<
   typeof CrossChainTransferListQuerySchema
 >;

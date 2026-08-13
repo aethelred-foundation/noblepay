@@ -6,6 +6,11 @@ import {
 } from "@prisma/client";
 import { JsonRpcProvider } from "ethers";
 import { AuditService } from "./audit";
+import {
+  verifyTransferInitiation,
+  verifyTransferRecovery,
+} from "./crosschain-execution";
+import type { NoblePayChainConfiguration } from "../lib/production-config";
 
 export type TransferStatus =
   | "INITIATED"
@@ -211,7 +216,7 @@ function relayRecord(node: StoredRelayNode): RelayNode {
 export class CrossChainService {
   constructor(
     private readonly prisma: PrismaClient,
-    private readonly _auditService: AuditService,
+    private readonly auditService: AuditService,
     private readonly chainProbe: ChainProbe = async (chain) => {
       const provider = new JsonRpcProvider(chain.rpcUrl, chain.chainId, {
         staticNetwork: true,
@@ -302,16 +307,145 @@ export class CrossChainService {
     );
   }
 
+  /**
+   * Record a transfer whose escrow has already been confirmed on the source
+   * chain.
+   *
+   * This does not bridge anything. The API holds no key: the sender escrows
+   * funds in CrossChainRouter from their own wallet, then reports the
+   * transaction, and the record is written only if the chain corroborates it.
+   *
+   * The record is created in INITIATED — the escrow is proven, delivery is not.
+   * Advancing past that depends on a destination-chain receipt this system
+   * cannot yet verify (see crosschain-execution.ts), so nothing here will mark
+   * a transfer COMPLETED.
+   */
   async initiateTransfer(
-    _input: CrossChainTransferInput,
-    _sender: string,
-    _businessId: string,
-  ): Promise<never> {
-    throw new CrossChainError(
-      "BRIDGE_EXECUTION_UNAVAILABLE",
-      "Cross-chain transfers are disabled until source and destination receipts can be verified",
-      501,
+    input: CrossChainTransferInput,
+    sender: string,
+    businessId: string,
+    initiation: { txHash: string; onChainTransferId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<CrossChainTransfer> {
+    if (
+      !input.sourceChain ||
+      !input.destinationChain ||
+      input.sourceChain === input.destinationChain
+    ) {
+      throw new CrossChainError(
+        "INVALID_ROUTE",
+        "Select two different configured chains",
+      );
+    }
+    if (!input.recipient?.trim()) {
+      throw new CrossChainError(
+        "INVALID_RECIPIENT",
+        "A destination recipient is required",
+      );
+    }
+
+    const chains = this.configuredChains();
+    const source = chains.find((chain) => chain.id === input.sourceChain);
+    const destination = chains.find(
+      (chain) => chain.id === input.destinationChain,
     );
+    if (!source || !destination) {
+      throw new CrossChainError(
+        "CHAIN_NOT_FOUND",
+        "Source or destination chain is not configured",
+        404,
+      );
+    }
+
+    // Replaying the same receipt returns the existing record; offering a
+    // different one for the same on-chain transfer is a contradiction, not a
+    // retry.
+    const existing = await this.prisma.crossChainTransfer.findFirst({
+      where: { onChainTransferId: initiation.onChainTransferId.toLowerCase() },
+    });
+    if (existing) {
+      if (existing.sourceTxHash === initiation.txHash.toLowerCase()) {
+        return transferRecord(existing, businessId);
+      }
+      throw new CrossChainError(
+        "TRANSFER_ALREADY_RECORDED",
+        `This on-chain transfer is already recorded under ${existing.sourceTxHash ?? "an unrecorded transaction"}`,
+        409,
+      );
+    }
+
+    // Throws TransferVerificationError with a specific reason if any check
+    // fails, including a recipient that does not match the on-chain commitment.
+    const verified = await verifyTransferInitiation(config, {
+      txHash: initiation.txHash,
+      onChainTransferId: initiation.onChainTransferId,
+      expectedSender: sender,
+      expectedRecipient: input.recipient,
+      expectedDestinationChainId: destination.chainId,
+    });
+
+    const created = await this.prisma.crossChainTransfer.create({
+      data: {
+        sourceChain: input.sourceChain,
+        destChain: input.destinationChain,
+        sender,
+        recipient: input.recipient,
+        // The caller's figure, in the human units this column has always held.
+        // The chain's raw base-unit figure goes to metadata instead of here,
+        // because converting between them needs the token's decimals and this
+        // column is read by code that assumes human units.
+        amount: new Prisma.Decimal(input.amount),
+        currency: input.token,
+        status: "INITIATED",
+        sourceTxHash: verified.txHash,
+        onChainTransferId: verified.onChainTransferId,
+        initiatedAt: verified.initiatedAt,
+        metadata: {
+          ...(input.metadata ?? {}),
+          onChain: {
+            transferId: verified.onChainTransferId,
+            sender: verified.sender,
+            sourceToken: verified.sourceToken,
+            amount: verified.amount,
+            fee: verified.fee,
+            destinationChainId: verified.destinationChainId,
+            recipientHash: verified.recipientHash,
+            blockNumber: verified.blockNumber,
+            chainStatus: verified.chainStatus,
+            amountBasis: "RAW_TOKEN_BASE_UNITS",
+            // Said plainly so nobody reads the whole record as verified: the
+            // escrow, sender, destination chain and recipient commitment were
+            // checked against the chain. The human-units `amount` column was
+            // not — that comparison needs token decimals this service does not
+            // have, and guessing them is how NP-TREASURY-01 happened.
+            verifiedFields: [
+              "sender",
+              "destinationChainId",
+              "recipientHash",
+              "amount(raw)",
+            ],
+            unverifiedFields: ["amount(human)", "currency"],
+          },
+        },
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: sender,
+      description: `Cross-chain transfer escrowed on chain: ${input.sourceChain} to ${input.destinationChain} via ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        transferId: created.id,
+        onChainTransferId: verified.onChainTransferId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        destinationChainId: verified.destinationChainId,
+      },
+    });
+
+    return transferRecord(created, businessId);
   }
 
   async getTransfer(
@@ -374,16 +508,90 @@ export class CrossChainService {
     );
   }
 
+  /**
+   * Record a refund whose receipt has already been confirmed on the source
+   * chain.
+   *
+   * Recovery happens on the source chain — CrossChainRouter returns the
+   * escrowed principal and fees to the original sender — so unlike delivery,
+   * it can be verified at full strength against the pinned network.
+   */
   async recoverTransfer(
-    _transferId: string,
-    _actor: string,
-    _businessId?: string,
-  ): Promise<never> {
-    throw new CrossChainError(
-      "RECOVERY_EXECUTION_UNAVAILABLE",
-      "Transfer recovery is disabled until bridge recovery receipts can be verified",
-      501,
-    );
+    transferId: string,
+    actor: string,
+    businessId: string,
+    recovery: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<CrossChainTransfer> {
+    const wallet = await this.businessWallet(businessId);
+    const transfer = await this.prisma.crossChainTransfer.findFirst({
+      where: {
+        id: transferId,
+        sender: { equals: wallet, mode: "insensitive" },
+      },
+    });
+    if (!transfer) {
+      throw new CrossChainError(
+        "TRANSFER_NOT_FOUND",
+        "Transfer not found",
+        404,
+      );
+    }
+    if (transfer.status === "RECOVERED") {
+      return transferRecord(transfer, businessId);
+    }
+    if (!transfer.onChainTransferId) {
+      // Rows predating on-chain linkage cannot be matched to a receipt, and
+      // guessing which transfer a refund belongs to is not recovery.
+      throw new CrossChainError(
+        "TRANSFER_NOT_ON_CHAIN",
+        "This transfer has no on-chain id, so a recovery receipt cannot be matched to it",
+        409,
+      );
+    }
+
+    const verified = await verifyTransferRecovery(config, {
+      txHash: recovery.txHash,
+      onChainTransferId: transfer.onChainTransferId,
+      expectedSender: transfer.sender,
+    });
+
+    const metadata = objectMetadata(transfer.metadata);
+    const updated = await this.prisma.crossChainTransfer.update({
+      where: { id: transfer.id },
+      data: {
+        status: "RECOVERED",
+        completedAt: verified.recoveredAt,
+        metadata: {
+          ...metadata,
+          recovery: {
+            txHash: verified.txHash,
+            blockNumber: verified.blockNumber,
+            refundAmount: verified.refundAmount,
+            refundedTo: verified.sender,
+            recoveredAt: verified.recoveredAt.toISOString(),
+            amountBasis: "RAW_TOKEN_BASE_UNITS",
+          },
+        },
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor,
+      description: `Cross-chain transfer escrow refunded on chain: ${transfer.id} via ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        transferId: transfer.id,
+        onChainTransferId: verified.onChainTransferId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        refundAmount: verified.refundAmount,
+      },
+    });
+
+    return transferRecord(updated, businessId);
   }
 
   async getRelayNodes(pagination?: {

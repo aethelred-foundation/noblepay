@@ -1,3 +1,11 @@
+const mockVerifyInitiation = jest.fn();
+const mockVerifyRecovery = jest.fn();
+
+jest.mock("../../services/crosschain-execution", () => ({
+  verifyTransferInitiation: (...a: unknown[]) => mockVerifyInitiation(...a),
+  verifyTransferRecovery: (...a: unknown[]) => mockVerifyRecovery(...a),
+}));
+
 import { Prisma } from "@prisma/client";
 import { CrossChainService } from "../../services/crosschain";
 import type { AuditService } from "../../services/audit";
@@ -56,21 +64,31 @@ function transfer(overrides: Record<string, unknown> = {}) {
 function setup(chainProbe = jest.fn()) {
   const prisma = {
     business: { findUnique: jest.fn() },
-    crossChainTransfer: { findMany: jest.fn(), findFirst: jest.fn() },
+    crossChainTransfer: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
     relayNode: { findMany: jest.fn(), count: jest.fn() },
   };
+  const auditService = { createAuditEntry: jest.fn() };
   const service = new CrossChainService(
     prisma as never,
-    {} as AuditService,
+    auditService as unknown as AuditService,
     chainProbe as never,
   );
-  return { prisma, service, chainProbe };
+  return { prisma, service, chainProbe, auditService };
 }
 
 describe("CrossChainService production behavior", () => {
   const originalEnv = process.env;
 
   beforeEach(() => {
+    // The verifier mocks live at module scope, so they carry call history
+    // between tests unless cleared here. setup() builds fresh prisma mocks per
+    // call, so clearing everything is safe.
+    jest.clearAllMocks();
     process.env = {
       ...originalEnv,
       NODE_ENV: "test",
@@ -359,27 +377,234 @@ describe("CrossChainService production behavior", () => {
     ).rejects.toMatchObject({ code: "TRANSFER_NOT_FOUND", statusCode: 404 });
   });
 
-  it("fails bridge initiation and recovery closed", async () => {
-    const { service } = setup();
-    await expect(
-      service.initiateTransfer(
-        {
-          sourceChain: "aethelred",
-          destinationChain: "ethereum",
-          token: "USDC",
-          amount: "1",
-          recipient: "0x2222222222222222222222222222222222222222",
-        },
+  describe("bridge initiation", () => {
+    const chainCfg = { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 };
+    const receipt = {
+      txHash: `0x${"c".repeat(64)}`,
+      onChainTransferId: `0x${"d".repeat(64)}`,
+    };
+    const input = {
+      sourceChain: "aethelred",
+      destinationChain: "ethereum",
+      token: "USDC",
+      amount: "1",
+      recipient: "0x2222222222222222222222222222222222222222",
+    };
+
+    const verified = {
+      onChainTransferId: receipt.onChainTransferId,
+      sender: wallet,
+      sourceToken: "0x4444444444444444444444444444444444444444",
+      amount: "1000000",
+      fee: "2500",
+      destinationChainId: 11155111,
+      recipientHash: `0x${"e".repeat(64)}`,
+      txHash: receipt.txHash,
+      blockNumber: 8811,
+      initiatedAt: new Date("2026-07-21T11:00:00.000Z"),
+      chainStatus: "INITIATED" as const,
+    };
+
+    it("verifies the escrow against the DESTINATION chain's id, not its name", async () => {
+      // The service must translate the configured chain id into the numeric
+      // chain id the event carries; passing the string through would make the
+      // destination check unenforceable.
+      const { prisma, service } = setup();
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(null);
+      prisma.crossChainTransfer.create.mockResolvedValue(
+        transfer({ status: "INITIATED" }),
+      );
+      mockVerifyInitiation.mockResolvedValue(verified);
+
+      await service.initiateTransfer(
+        input,
         wallet,
         "business-1",
-      ),
-    ).rejects.toMatchObject({
-      code: "BRIDGE_EXECUTION_UNAVAILABLE",
-      statusCode: 501,
+        receipt,
+        chainCfg as never,
+      );
+
+      expect(mockVerifyInitiation).toHaveBeenCalledWith(
+        chainCfg,
+        expect.objectContaining({
+          expectedSender: wallet,
+          expectedRecipient: input.recipient,
+          expectedDestinationChainId: 11155111,
+        }),
+      );
     });
-    await expect(
-      service.recoverTransfer("transfer-1", wallet, "business-1"),
-    ).rejects.toMatchObject({ statusCode: 501 });
+
+    it("records the chain's raw amount in metadata, not in the human-units column", async () => {
+      // The column is Decimal(36,18) and read as human units everywhere else;
+      // writing raw base units into it would silently corrupt every reader.
+      const { prisma, service } = setup();
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(null);
+      prisma.crossChainTransfer.create.mockResolvedValue(
+        transfer({ status: "INITIATED" }),
+      );
+      mockVerifyInitiation.mockResolvedValue(verified);
+
+      await service.initiateTransfer(
+        input,
+        wallet,
+        "business-1",
+        receipt,
+        chainCfg as never,
+      );
+
+      const written = prisma.crossChainTransfer.create.mock.calls[0][0].data;
+      expect(written.amount.toString()).toBe("1");
+      expect(written.metadata.onChain.amount).toBe("1000000");
+      expect(written.metadata.onChain.amountBasis).toBe("RAW_TOKEN_BASE_UNITS");
+      expect(written.metadata.onChain.unverifiedFields).toContain(
+        "amount(human)",
+      );
+    });
+
+    it("returns the existing record when the same receipt is replayed", async () => {
+      const { prisma, service } = setup();
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(
+        transfer({
+          onChainTransferId: receipt.onChainTransferId.toLowerCase(),
+          sourceTxHash: receipt.txHash.toLowerCase(),
+        }),
+      );
+
+      const result = await service.initiateTransfer(
+        input,
+        wallet,
+        "business-1",
+        receipt,
+        chainCfg as never,
+      );
+
+      expect(result.id).toBe("transfer-1");
+      expect(prisma.crossChainTransfer.create).not.toHaveBeenCalled();
+      expect(mockVerifyInitiation).not.toHaveBeenCalled();
+    });
+
+    it("refuses a SECOND, different receipt for the same on-chain transfer", async () => {
+      // Not a retry — a contradiction. One escrow cannot have two transactions.
+      const { prisma, service } = setup();
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(
+        transfer({
+          onChainTransferId: receipt.onChainTransferId.toLowerCase(),
+          sourceTxHash: `0x${"9".repeat(64)}`,
+        }),
+      );
+
+      await expect(
+        service.initiateTransfer(
+          input,
+          wallet,
+          "business-1",
+          receipt,
+          chainCfg as never,
+        ),
+      ).rejects.toMatchObject({
+        code: "TRANSFER_ALREADY_RECORDED",
+        statusCode: 409,
+      });
+    });
+
+    it("refuses an unconfigured destination chain before touching the RPC", async () => {
+      const { prisma, service } = setup();
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(null);
+
+      await expect(
+        service.initiateTransfer(
+          { ...input, destinationChain: "solana" },
+          wallet,
+          "business-1",
+          receipt,
+          chainCfg as never,
+        ),
+      ).rejects.toMatchObject({ code: "CHAIN_NOT_FOUND", statusCode: 404 });
+      expect(mockVerifyInitiation).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("bridge recovery", () => {
+    const chainCfg = { rpcUrl: "http://rpc.invalid", minimumConfirmations: 3 };
+    const txHash = `0x${"f".repeat(64)}`;
+
+    it("refuses to match a refund receipt to a row with no on-chain id", async () => {
+      // Guessing which transfer a refund belongs to is not recovery.
+      const { prisma, service } = setup();
+      prisma.business.findUnique.mockResolvedValue({ address: wallet });
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(
+        transfer({ status: "STUCK", onChainTransferId: null }),
+      );
+
+      await expect(
+        service.recoverTransfer(
+          "transfer-1",
+          wallet,
+          "business-1",
+          { txHash },
+          chainCfg as never,
+        ),
+      ).rejects.toMatchObject({
+        code: "TRANSFER_NOT_ON_CHAIN",
+        statusCode: 409,
+      });
+      expect(mockVerifyRecovery).not.toHaveBeenCalled();
+    });
+
+    it("is idempotent once a transfer is already recovered", async () => {
+      const { prisma, service } = setup();
+      prisma.business.findUnique.mockResolvedValue({ address: wallet });
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(
+        transfer({ status: "RECOVERED" }),
+      );
+
+      const result = await service.recoverTransfer(
+        "transfer-1",
+        wallet,
+        "business-1",
+        { txHash },
+        chainCfg as never,
+      );
+
+      expect(result.status).toBe("RECOVERED");
+      expect(mockVerifyRecovery).not.toHaveBeenCalled();
+      expect(prisma.crossChainTransfer.update).not.toHaveBeenCalled();
+    });
+
+    it("binds the refund to the transfer's own sender", async () => {
+      const { prisma, service } = setup();
+      prisma.business.findUnique.mockResolvedValue({ address: wallet });
+      prisma.crossChainTransfer.findFirst.mockResolvedValue(
+        transfer({
+          status: "STUCK",
+          onChainTransferId: `0x${"d".repeat(64)}`,
+        }),
+      );
+      prisma.crossChainTransfer.update.mockResolvedValue(
+        transfer({ status: "RECOVERED" }),
+      );
+      mockVerifyRecovery.mockResolvedValue({
+        onChainTransferId: `0x${"d".repeat(64)}`,
+        sender: wallet,
+        refundAmount: "1002500",
+        txHash,
+        blockNumber: 8811,
+        recoveredAt: new Date("2026-07-21T12:00:00.000Z"),
+      });
+
+      await service.recoverTransfer(
+        "transfer-1",
+        wallet,
+        "business-1",
+        { txHash },
+        chainCfg as never,
+      );
+
+      expect(mockVerifyRecovery).toHaveBeenCalledWith(
+        chainCfg,
+        expect.objectContaining({ expectedSender: wallet, txHash }),
+      );
+    });
   });
 
   it("returns only persisted relay registry records with bounded pagination", async () => {
