@@ -165,7 +165,14 @@ try {
         checkpointFixture,
         "checkpoint file",
       ),
-    /parent must not grant group or other permissions/u,
+    // A checkpoint is written at the default "secret" sensitivity, so a 0777
+    // parent is refused. The assertion targets the two things the message must
+    // always carry — the offending directory and the chmod that fixes it —
+    // rather than its exact prose.
+    (error) =>
+      /parent directory is too permissive/u.test(error.message) &&
+      error.message.includes(insecureDirectory) &&
+      /chmod 700/u.test(error.message),
   );
 
   const releaseEnvironment = Object.fromEntries(

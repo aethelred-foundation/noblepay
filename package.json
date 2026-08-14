@@ -2,7 +2,7 @@
   "name": "@aethelred/noblepay",
   "version": "1.0.0",
   "packageManager": "npm@11.16.0",
-  "description": "NoblePay — Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
+  "description": "NoblePay \u2014 Enterprise Cross-Border Payment Platform with TEE Compliance on Aethelred",
   "private": true,
   "scripts": {
     "dev": "next dev -p ${PORT:-3008}",
@@ -28,7 +28,7 @@
     "validate:frontend": "npm run type-check && npm run lint && npm run build && npm run test:e2e && npm run test:ci",
     "validate:backend": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx prisma generate && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx prisma validate && test -f prisma/migrations/migration_lock.toml && test -f prisma/migrations/20260316_init/migration.sql && echo 'Migration artifacts verified' && npx tsc --noEmit && npx jest --runInBand --forceExit --detectOpenHandles",
     "test:deployment-governance": "node scripts/test-deployment-governance.mjs",
-    "validate:contracts": "cd contracts && npx hardhat clean && npx hardhat compile && node ../scripts/deploy-devnet-core.mjs --verify-artifacts && node ../scripts/test-deployment-governance.mjs && node ../scripts/test-testnet-token-provisioning.mjs && npx hardhat test",
+    "validate:contracts": "cd contracts && npx hardhat clean && npx hardhat compile && node ../scripts/deploy-devnet-core.mjs --verify-artifacts && node ../scripts/test-deployment-governance.mjs && node ../scripts/test-operator-artifact-permissions.mjs && node ../scripts/test-testnet-token-provisioning.mjs && npx hardhat test",
     "tokens:testnet:provision": "node scripts/provision-testnet-tokens.mjs",
     "test:testnet-token-provisioning": "node scripts/test-testnet-token-provisioning.mjs",
     "validate:gateway": "cd services/gateway && GOTOOLCHAIN=go1.25.12 go vet ./... && GOTOOLCHAIN=go1.25.12 go test ./... -race -count=1 -timeout 300s && GOTOOLCHAIN=go1.25.12 go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...",
@@ -37,7 +37,8 @@
     "validate:security": "cd backend && DATABASE_URL=${DATABASE_URL:-postgresql://localhost:5432/noblepay} npx jest --runInBand --forceExit --detectOpenHandles src/__tests__/security/exploit-simulations.test.ts",
     "validate:all": "npm run validate:dependencies && npm run validate:frontend && npm run validate:backend && npm run validate:contracts && npm run validate:gateway && npm run validate:compliance && npm run validate:security",
     "prerelease": "npm run validate:all",
-    "check:boundary": "node scripts/check-conformance-boundary.mjs"
+    "check:boundary": "node scripts/check-conformance-boundary.mjs",
+    "test:operator-permissions": "node scripts/test-operator-artifact-permissions.mjs"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",

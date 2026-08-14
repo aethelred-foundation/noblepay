@@ -118,7 +118,15 @@ async function main() {
   const payloadFile = cliPathOption(process.argv, "--payload-file", {
     required: true,
   });
-  const payload = readSecureJSONFile(payloadFile, "governance acceptance payload");
+  // "integrity", not "secret": the payload is a chain id, a block anchor, a
+  // target address and calldata — all public once broadcast. What must not
+  // happen is someone else rewriting the target or calldata this script is
+  // about to submit, so group/other WRITE is refused and read is allowed.
+  const payload = readSecureJSONFile(
+    payloadFile,
+    "governance acceptance payload",
+    { sensitivity: "integrity" },
+  );
 
   for (const field of ["chainId", "requiredExecutor", "target", "calldata", "value"]) {
     if (payload[field] === undefined || payload[field] === null) {

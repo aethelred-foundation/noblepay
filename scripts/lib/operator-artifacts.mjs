@@ -46,15 +46,68 @@ function requireAbsolutePath(path, label) {
   return path;
 }
 
-function secureParentDirectory(path, label) {
+/**
+ * Two kinds of operator artifact, with different threat models.
+ *
+ * "secret" — a key file. Disclosure is the whole risk, so nothing outside the
+ * owner may read it: mode 0600, parent 0700.
+ *
+ * "integrity" — an input the script acts on but which contains no secret, such
+ * as a governance payload of chain id, block anchor, target address and
+ * calldata. All of that is public the moment it is broadcast. What matters is
+ * that nobody else can CHANGE it, because rewriting `target` or `calldata`
+ * would make this script broadcast a different call than the operator
+ * reviewed. So group/other write is refused and group/other read is not.
+ *
+ * Defaulting to "secret" keeps every existing caller strict; only a call site
+ * that has thought about it opts down.
+ */
+const SENSITIVITY = {
+  secret: {
+    fileMask: 0o077,
+    dirMask: 0o077,
+    fileFix: "600",
+    dirFix: "700",
+    why: "it may be read by others",
+  },
+  integrity: {
+    fileMask: 0o022,
+    dirMask: 0o022,
+    fileFix: "644",
+    dirFix: "755",
+    why: "others may change what this script acts on",
+  },
+};
+
+/** Renders a mode as the four-digit octal an operator would pass to chmod. */
+function octal(mode) {
+  return (mode & 0o7777).toString(8).padStart(4, "0");
+}
+
+function permissionError(label, path, stat, kind, sensitivity) {
+  const rule = SENSITIVITY[sensitivity];
+  return new Error(
+    `${label} is too permissive: ${rule.why}.\n` +
+      `  ${kind}: ${path}\n` +
+      `  mode:  ${octal(stat.mode)} (must not grant ` +
+      `${sensitivity === "secret" ? "any group or other access" : "group or other WRITE access"})\n` +
+      `  fix:   chmod ${sensitivity === "secret" ? (kind === "directory" ? rule.dirFix : rule.fileFix) : kind === "directory" ? rule.dirFix : rule.fileFix} ${path}`,
+  );
+}
+
+function secureParentDirectory(path, label, sensitivity = "secret") {
   const parentPath = dirname(requireAbsolutePath(path, label));
   const parent = lstatSync(parentPath);
   if (!parent.isDirectory() || parent.isSymbolicLink()) {
     throw new Error(`${label} parent must be a regular directory`);
   }
-  if ((parent.mode & 0o077) !== 0) {
-    throw new Error(
-      `${label} parent must not grant group or other permissions`,
+  if ((parent.mode & SENSITIVITY[sensitivity].dirMask) !== 0) {
+    throw permissionError(
+      `${label} parent directory`,
+      parentPath,
+      parent,
+      "directory",
+      sensitivity,
     );
   }
   return parentPath;
@@ -94,7 +147,11 @@ export function cliPathOption(argv, name, { required = false } = {}) {
   return values.length === 0 ? null : requireAbsolutePath(values[0], name);
 }
 
-function secureFileStat(path, label, { allowMissing = false } = {}) {
+function secureFileStat(
+  path,
+  label,
+  { allowMissing = false, sensitivity = "secret" } = {},
+) {
   requireAbsolutePath(path, label);
   let stat;
   try {
@@ -106,8 +163,8 @@ function secureFileStat(path, label, { allowMissing = false } = {}) {
   if (!stat.isFile() || stat.isSymbolicLink()) {
     throw new Error(`${label} must be a regular file, not a symlink`);
   }
-  if ((stat.mode & 0o077) !== 0) {
-    throw new Error(`${label} must not grant group or other permissions`);
+  if ((stat.mode & SENSITIVITY[sensitivity].fileMask) !== 0) {
+    throw permissionError(label, path, stat, "file", sensitivity);
   }
   if (stat.size > MAX_OPERATOR_ARTIFACT_BYTES) {
     throw new Error(`${label} exceeds the 2 MiB operator-artifact limit`);
@@ -123,9 +180,13 @@ export function assertNewSecureArtifactPath(path, label) {
   }
 }
 
-export function readSecureJSONFile(path, label, { allowMissing = false } = {}) {
-  secureParentDirectory(path, label);
-  const stat = secureFileStat(path, label, { allowMissing });
+export function readSecureJSONFile(
+  path,
+  label,
+  { allowMissing = false, sensitivity = "secret" } = {},
+) {
+  secureParentDirectory(path, label, sensitivity);
+  const stat = secureFileStat(path, label, { allowMissing, sensitivity });
   if (!stat) return null;
   let value;
   try {
