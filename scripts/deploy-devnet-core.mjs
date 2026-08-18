@@ -2136,9 +2136,59 @@ async function finalize() {
   }
 }
 
+/**
+ * Report a failure with enough detail to act on.
+ *
+ * This used to print `error.shortMessage` in preference to `error.message`.
+ * For a viem RPC error the shortMessage is a generic five-word string —
+ * "Missing or invalid parameters." for any -32602 — while everything that
+ * identifies the failure (the RPC method, its arguments, and the node's own
+ * message) lives in `message`, `details` and `metaMessages`. Preferring the
+ * short form meant an operator saw a sentence that could describe a hundred
+ * different problems, which is not a diagnosis.
+ *
+ * The short form is kept as the headline and the rest printed underneath.
+ */
+function describeFailure(error) {
+  const parts = [];
+  const headline =
+    error?.shortMessage ?? error?.message ?? String(error);
+  parts.push(`FAIL: ${headline}`);
+
+  // The node's own words, when it gave any.
+  if (error?.details && error.details !== headline) {
+    parts.push(`\n  node said: ${error.details}`);
+  }
+
+  // viem puts the request body here — this is what names the RPC method and
+  // the exact arguments that were rejected.
+  if (Array.isArray(error?.metaMessages) && error.metaMessages.length > 0) {
+    parts.push("", ...error.metaMessages.map((line) => `  ${line}`));
+  }
+
+  // Walk the cause chain; the innermost error usually carries the raw payload.
+  let cause = error?.cause;
+  const seen = new Set();
+  while (cause && !seen.has(cause)) {
+    seen.add(cause);
+    const causeText = cause.shortMessage ?? cause.message;
+    if (causeText && causeText !== headline) {
+      parts.push(`  caused by: ${causeText}`);
+    }
+    if (cause.details) parts.push(`    details: ${cause.details}`);
+    cause = cause.cause;
+  }
+
+  if (error?.stack && process.env.DEPLOY_DEBUG === "1") {
+    parts.push("", error.stack);
+  } else {
+    parts.push("", "  Re-run with DEPLOY_DEBUG=1 for a stack trace.");
+  }
+
+  return parts.join("\n");
+}
+
 (DEPLOYMENT_MODE === "bootstrap" ? bootstrap() : finalize()).catch((error) => {
-  console.error(
-    `FAIL: ${error.shortMessage ?? error.message ?? String(error)}`,
-  );
+  console.error(describeFailure(error));
   process.exitCode = 1;
 });
