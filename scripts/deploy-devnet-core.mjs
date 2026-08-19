@@ -1377,6 +1377,54 @@ function contractAbis() {
   };
 }
 
+/**
+ * Largest [from, to] span a single eth_getLogs call may cover.
+ *
+ * Nodes cap this to bound the work one request can cause; Aethelred's rejects
+ * anything wider than 10000 with "maximum [from, to] blocks distance: 10000".
+ * The default matches that. Override for a node with a different limit.
+ */
+const MAX_LOG_SCAN_SPAN = (() => {
+  const raw = process.env.MAX_LOG_SCAN_SPAN;
+  if (!raw) return 10000n;
+  const parsed = BigInt(raw);
+  if (parsed <= 0n) throw new Error("MAX_LOG_SCAN_SPAN must be positive");
+  return parsed;
+})();
+
+/**
+ * getContractEvents over a range wider than one request may cover.
+ *
+ * The history this walks runs from a contract's deployment block to the release
+ * block, so the span grows with every block the chain produces. It was 84276
+ * when this surfaced. Splitting it is not a workaround for one node's limit —
+ * an unbounded single request was always going to fail eventually, and the only
+ * question was when.
+ *
+ * Windows are walked in ascending order and concatenated, because callers here
+ * fold the results with last-write-wins semantics: a token enabled then later
+ * disabled must end up disabled. Reordering the chunks would silently invert
+ * that.
+ */
+async function getContractEventsChunked(client, params) {
+  const { fromBlock, toBlock, ...rest } = params;
+  const logs = [];
+  for (let start = fromBlock; start <= toBlock; start += MAX_LOG_SCAN_SPAN) {
+    const end =
+      start + MAX_LOG_SCAN_SPAN - 1n > toBlock
+        ? toBlock
+        : start + MAX_LOG_SCAN_SPAN - 1n;
+    logs.push(
+      ...(await client.getContractEvents({
+        ...rest,
+        fromBlock: start,
+        toBlock: end,
+      })),
+    );
+  }
+  return logs;
+}
+
 async function assertExactSupportedTokenSet(
   client,
   address,
@@ -1385,7 +1433,7 @@ async function assertExactSupportedTokenSet(
   label,
   blockNumber,
 ) {
-  const logs = await client.getContractEvents({
+  const logs = await getContractEventsChunked(client, {
     address,
     abi,
     eventName: "TokenSupported",
