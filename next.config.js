@@ -41,6 +41,12 @@ const WALLET_FRAME_ORIGINS = [
   "https://cca-lite.coinbase.com",
 ];
 
+// Mirrored from @noblepay/types' public testnet RPC policy so next.config.js,
+// which runs before any workspace build output exists, cannot drift from it.
+const INSECURE_TESTNET_RPC_ACKNOWLEDGEMENT =
+  "acknowledge-evaluation-only-plaintext-rpc";
+const AETHELRED_PUBLIC_TESTNET_CHAIN_ID = 7332;
+
 function requiredEnv(name) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required for production builds`);
@@ -125,12 +131,42 @@ function validateProductionEnvironment() {
       "NEXT_PUBLIC_AETHELRED_NETWORK_ANCHOR_HASH must be a 32-byte 0x-prefixed block hash",
     );
   }
-  const chainRpc = parsedFrontendURL("NEXT_PUBLIC_AETHELRED_RPC_URL", [
-    "https:",
-  ]);
-  const chainWebsocket = parsedFrontendURL("NEXT_PUBLIC_AETHELRED_WS_URL", [
-    "wss:",
-  ]);
+  // The chain RPC may be plaintext ONLY under the same acknowledged
+  // evaluation mode the deployment scripts already honour. Without this the
+  // frontend could not be built for a deployment the rest of the stack
+  // finalises happily: deploy-devnet-core.mjs accepts
+  // ALLOW_INSECURE_TESTNET_RPC=acknowledge-evaluation-only-plaintext-rpc for
+  // the public testnet, so a build that refuses the same endpoint outright is
+  // not stricter, only inconsistent.
+  //
+  // The conditions are deliberately the same ones the deploy path enforces,
+  // not a looser "if testnet" shortcut:
+  //   - the exact acknowledgement string, not any truthy value
+  //   - testnet environment on the public-testnet chain id
+  //   - the immutable anchor, which is required above regardless
+  // Everything the browser talks to directly — the API, its websocket, the
+  // site origin — stays https/wss with no exception.
+  const insecureChainRpcAcknowledged =
+    process.env.NEXT_PUBLIC_ALLOW_INSECURE_TESTNET_RPC?.trim() ===
+      INSECURE_TESTNET_RPC_ACKNOWLEDGEMENT &&
+    chainEnvironment === "testnet" &&
+    chainId === AETHELRED_PUBLIC_TESTNET_CHAIN_ID;
+
+  const chainRpc = parsedFrontendURL(
+    "NEXT_PUBLIC_AETHELRED_RPC_URL",
+    insecureChainRpcAcknowledged ? ["https:", "http:"] : ["https:"],
+  );
+  const chainWebsocket = parsedFrontendURL(
+    "NEXT_PUBLIC_AETHELRED_WS_URL",
+    insecureChainRpcAcknowledged ? ["wss:", "ws:"] : ["wss:"],
+  );
+  if (insecureChainRpcAcknowledged && chainRpc.protocol === "http:") {
+    console.warn(
+      "WARNING: building against a plaintext evaluation RPC " +
+        `(${chainRpc.origin}). Acknowledged via ` +
+        "NEXT_PUBLIC_ALLOW_INSECURE_TESTNET_RPC. Never use this for mainnet.",
+    );
+  }
   const chainExplorer = parsedFrontendURL(
     "NEXT_PUBLIC_AETHELRED_EXPLORER_URL",
     ["https:"],
