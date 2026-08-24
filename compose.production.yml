@@ -99,6 +99,11 @@ services:
         NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${WALLETCONNECT_PROJECT_ID:?set WALLETCONNECT_PROJECT_ID}
         NEXT_PUBLIC_SENTRY_DSN: ${NEXT_PUBLIC_SENTRY_DSN:-}
         NEXT_PUBLIC_APP_VERSION: ${NEXT_PUBLIC_APP_VERSION:?set NEXT_PUBLIC_APP_VERSION}
+        # Optional, and deliberately :- rather than :? — an https deployment
+        # must not be forced to declare an acknowledgement it does not need.
+        # Either spelling is accepted so the value can be shared with the
+        # server-side ALLOW_INSECURE_TESTNET_RPC the deploy scripts read.
+        NEXT_PUBLIC_ALLOW_INSECURE_TESTNET_RPC: ${NEXT_PUBLIC_ALLOW_INSECURE_TESTNET_RPC:-${ALLOW_INSECURE_TESTNET_RPC:-}}
     restart: unless-stopped
     environment:
       NODE_ENV: production
