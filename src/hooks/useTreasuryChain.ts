@@ -70,7 +70,7 @@ export interface ChainBudget {
   active: boolean;
 }
 
-interface ChainOverviewConfigured {
+export interface ChainOverviewConfigured {
   configured: true;
   address: string;
   nativeBalance: string;
@@ -90,13 +90,15 @@ interface ChainOverviewConfigured {
   readAtBlock: string;
 }
 
-interface ChainOverviewUnconfigured {
+export interface ChainOverviewUnconfigured {
   configured: false;
   reason: string;
   dataSource: "CHAIN_MULTISIG_TREASURY";
 }
 
-type ChainOverviewResponse = ChainOverviewConfigured | ChainOverviewUnconfigured;
+export type ChainOverviewResponse =
+  | ChainOverviewConfigured
+  | ChainOverviewUnconfigured;
 
 interface ChainProposalsResponse {
   configured: boolean;
@@ -156,6 +158,22 @@ export function useTreasuryChain() {
   const overview = overviewQuery.data ?? null;
   const configured = overview?.configured ?? null;
 
+  /*
+   * Narrow once, explicitly, into an annotated local.
+   *
+   * `overview?.configured ? overview : null` reads as if it narrows, and it
+   * does inside this file. What it does NOT do is survive into the hook's
+   * INFERRED return type: overviewQuery.data comes back through react-query's
+   * generics, and from 5.101 those are deferred enough that the narrowing is
+   * dropped when the return object's type is computed. Callers then saw the
+   * full ChainOverviewResponse and every property access failed.
+   *
+   * The annotation below is what makes the type a fact rather than something
+   * re-derived per call site, per library version.
+   */
+  const configuredOverview: ChainOverviewConfigured | null =
+    overview !== null && overview.configured ? overview : null;
+
   return {
     /**
      * null while loading, false when no treasury address is deployed for this
@@ -164,11 +182,11 @@ export function useTreasuryChain() {
      * collapsing them shows an empty treasury during the first render.
      */
     configured,
-    overview: overview?.configured ? overview : null,
+    overview: configuredOverview,
     proposals: proposalsQuery.data?.proposals ?? [],
     budgets: budgetsQuery.data?.budgets ?? [],
-    amountBasis: overview?.configured ? overview.amountBasis : null,
-    readAtBlock: overview?.configured ? overview.readAtBlock : null,
+    amountBasis: configuredOverview?.amountBasis ?? null,
+    readAtBlock: configuredOverview?.readAtBlock ?? null,
     isLoading:
       overviewQuery.isLoading ||
       proposalsQuery.isLoading ||

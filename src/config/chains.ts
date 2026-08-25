@@ -19,6 +19,16 @@ const CONFIGURATION_NODE_ENV = IS_UNCONFIGURED_VERCEL_PREVIEW
   ? "development"
   : process.env.NODE_ENV;
 
+/**
+ * The acknowledged plaintext-RPC exception, mirrored from next.config.js.
+ *
+ * next.config.js runs before any bundling and cannot import from src/, so the
+ * value is stated in both places. A test pins them together.
+ */
+export const INSECURE_TESTNET_RPC_ACKNOWLEDGEMENT =
+  "acknowledge-evaluation-only-plaintext-rpc";
+const AETHELRED_PUBLIC_TESTNET_CHAIN_ID = 7332;
+
 const LOCAL_ENDPOINTS = {
   rpc: "http://127.0.0.1:8545",
   websocket: "ws://127.0.0.1:8546",
@@ -70,6 +80,13 @@ export function resolvePublicChainUrl(
   productionProtocol: "https:" | "wss:",
   fallback: string,
   nodeEnv = process.env.NODE_ENV,
+  /**
+   * Whether this endpoint may be plaintext under the acknowledged evaluation
+   * exception. Opt-in per call site, and only the chain RPC and its websocket
+   * pass true: the site origin and the application API are what the browser
+   * talks to directly and stay https/wss unconditionally.
+   */
+  allowAcknowledgedPlaintext = false,
 ): string {
   const raw = value?.trim();
   if (!raw) {
@@ -97,9 +114,21 @@ export function resolvePublicChainUrl(
     );
   }
   if (nodeEnv === "production" && url.protocol !== productionProtocol) {
-    throw new Error(
-      `${name} must use ${productionProtocol.slice(0, -1)} in production`,
-    );
+    // Same exception, and the same conditions, that next.config.js applies at
+    // build time. Without it a build could succeed and then throw here while
+    // collecting page data, which is a worse failure than refusing up front.
+    const acknowledged =
+      allowAcknowledgedPlaintext &&
+      process.env.NEXT_PUBLIC_ALLOW_INSECURE_TESTNET_RPC?.trim() ===
+        INSECURE_TESTNET_RPC_ACKNOWLEDGEMENT &&
+      process.env.NEXT_PUBLIC_CHAIN_ENV?.trim() === "testnet" &&
+      Number(process.env.NEXT_PUBLIC_AETHELRED_CHAIN_ID) ===
+        AETHELRED_PUBLIC_TESTNET_CHAIN_ID;
+    if (!acknowledged) {
+      throw new Error(
+        `${name} must use ${productionProtocol.slice(0, -1)} in production`,
+      );
+    }
   }
 
   return url.toString().replace(/\/$/, "");
@@ -119,6 +148,7 @@ const AETHELRED_RPC_URL = resolvePublicChainUrl(
   "https:",
   LOCAL_ENDPOINTS.rpc,
   CONFIGURATION_NODE_ENV,
+  true,
 );
 const AETHELRED_WS_URL = resolvePublicChainUrl(
   "NEXT_PUBLIC_AETHELRED_WS_URL",
@@ -126,6 +156,7 @@ const AETHELRED_WS_URL = resolvePublicChainUrl(
   "wss:",
   LOCAL_ENDPOINTS.websocket,
   CONFIGURATION_NODE_ENV,
+  true,
 );
 const AETHELRED_EXPLORER_URL = resolvePublicChainUrl(
   "NEXT_PUBLIC_AETHELRED_EXPLORER_URL",
