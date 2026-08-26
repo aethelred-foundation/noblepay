@@ -531,6 +531,18 @@ docker compose \
   up -d --wait postgres migrate backend frontend proxy
 ```
 
+`up --wait` reports a failed one-shot service only as `exit 1`; it does not
+print what the container said. `migrate` is the one that fails this way,
+because it runs to completion rather than staying up. Read its output before
+diagnosing anything else:
+
+```bash
+docker compose \
+  --env-file /etc/noblepay/production.env \
+  -f compose.production.yml \
+  logs migrate
+```
+
 Enable the optional single-instance gateway only after its credentials,
 durable volume, `INDEXER_START_BLOCK`, and confirmations have been reviewed:
 

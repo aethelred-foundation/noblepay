@@ -1,5 +1,12 @@
 generator client {
   provider = "prisma-client-js"
+  // Pinned rather than detected. Without this Prisma picks an engine from the
+  // libssl it finds at run time, which differs between the build image
+  // (bookworm) and the distroless runtime, and silently falls back to
+  // openssl-1.1.x when it cannot tell - then tries to download the right engine
+  // on first use, inside a container that should never need network or write
+  // access. "native" keeps local development working.
+  binaryTargets = ["native", "debian-openssl-3.0.x"]
 }
 
 datasource db {
