@@ -1,6 +1,7 @@
 import { Interface, JsonRpcProvider, ZeroAddress, getAddress } from "ethers";
 import { prisma } from "../lib/db";
 import {
+  complianceEvaluationAcknowledged,
   loadNoblePayChainConfiguration,
   NoblePayChainConfiguration,
   noblePayNetworkIdentityMatches,
@@ -21,6 +22,18 @@ const ERC20_METADATA_INTERFACE = new Interface([
 
 export type ReadinessState = "ready" | "unavailable";
 
+/**
+ * Compliance has a third state the others do not.
+ *
+ * Reporting "ready" when no compliance service exists would tell a monitoring
+ * system that screening works. Reporting "unavailable" would keep the container
+ * unhealthy forever. Neither is true, so evaluation mode says so in its own
+ * word and anything reading /readyz has to notice it.
+ */
+export type ComplianceReadinessState =
+  | ReadinessState
+  | "evaluation-unconfigured";
+
 export interface ReadinessDependencies {
   database(): Promise<void>;
   compliance(): Promise<void>;
@@ -32,7 +45,7 @@ export interface ReadinessResult {
   ready: boolean;
   checks: {
     database: ReadinessState;
-    compliance: ReadinessState;
+    compliance: ComplianceReadinessState;
     rpc: ReadinessState;
     contracts: ReadinessState;
   };
@@ -61,6 +74,7 @@ function bounded<T>(operation: Promise<T>, timeoutMs: number): Promise<T> {
 export async function runReadinessChecks(
   dependencies: ReadinessDependencies,
   timeoutMs = 5_000,
+  evaluationMode = complianceEvaluationAcknowledged(),
 ): Promise<ReadinessResult> {
   const names = ["database", "compliance", "rpc", "contracts"] as const;
   const results = await Promise.allSettled(
@@ -72,8 +86,17 @@ export async function runReadinessChecks(
       results[index].status === "fulfilled" ? "ready" : "unavailable",
     ]),
   ) as ReadinessResult["checks"];
+
+  // Distinguish "no compliance service, and we said so" from "the compliance
+  // service is down". Only the former lets the container become healthy.
+  if (evaluationMode && checks.compliance === "ready") {
+    checks.compliance = "evaluation-unconfigured";
+  }
+
   return {
-    ready: Object.values(checks).every((state) => state === "ready"),
+    ready: Object.values(checks).every(
+      (state) => state === "ready" || state === "evaluation-unconfigured",
+    ),
     checks,
   };
 }
@@ -91,6 +114,12 @@ export function createDefaultReadinessDependencies(): ReadinessDependencies {
       await prisma.$queryRaw`SELECT 1`;
     },
     async compliance() {
+      // Nothing to probe when no compliance service is configured and that has
+      // been acknowledged. runReadinessChecks relabels this as
+      // "evaluation-unconfigured" so the absence stays visible.
+      if (complianceEvaluationAcknowledged() && !process.env.COMPLIANCE_API_URL) {
+        return;
+      }
       const baseUrl = parseExternalComplianceUrl(
         process.env.COMPLIANCE_API_URL,
       ).origin;

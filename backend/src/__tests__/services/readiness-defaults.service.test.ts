@@ -7,6 +7,9 @@ const mockJsonRpcProvider = jest.fn();
 
 jest.mock("../../lib/db", () => ({ prisma: mockPrisma }));
 jest.mock("../../lib/production-config", () => ({
+  // These tests cover the real compliance probe, so evaluation mode is off.
+  // Its own behaviour is covered in lib/compliance-evaluation-mode.test.ts.
+  complianceEvaluationAcknowledged: () => false,
   loadNoblePayChainConfiguration: () => mockLoadChainConfiguration(),
   noblePayNetworkIdentityMatches: (
     config: {

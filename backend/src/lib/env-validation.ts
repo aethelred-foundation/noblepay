@@ -1,4 +1,5 @@
 import {
+  complianceEvaluationAcknowledged,
   configuredSanctionsMaxAgeMs,
   loadNoblePayChainConfiguration,
   parseBusinessVerifierAddress,
@@ -40,7 +41,16 @@ export function collectProductionEnvErrors(
   if (!secretIsStrong(env.API_KEY_HASH_SECRET)) {
     errors.push("API_KEY_HASH_SECRET must be at least 32 bytes");
   }
-  if (!secretIsStrong(env.COMPLIANCE_API_KEY)) {
+  /*
+   * Compliance configuration is required unless this deployment has explicitly
+   * acknowledged running without an audited compliance service. The
+   * acknowledgement does not make screening permissive: every screening path
+   * refuses when the service is unconfigured, and continues to do so here. It
+   * only decides whether that missing configuration stops the process from
+   * booting at all.
+   */
+  const complianceEvaluation = complianceEvaluationAcknowledged(env);
+  if (!complianceEvaluation && !secretIsStrong(env.COMPLIANCE_API_KEY)) {
     errors.push("COMPLIANCE_API_KEY must be at least 32 bytes");
   }
   if (!env.DATABASE_URL) errors.push("DATABASE_URL is required");
@@ -58,10 +68,21 @@ export function collectProductionEnvErrors(
   } catch (error) {
     errors.push((error as Error).message);
   }
-  try {
-    parseExternalComplianceUrl(env.COMPLIANCE_API_URL);
-  } catch (error) {
-    errors.push((error as Error).message);
+  if (!complianceEvaluation) {
+    try {
+      parseExternalComplianceUrl(env.COMPLIANCE_API_URL);
+    } catch (error) {
+      errors.push((error as Error).message);
+    }
+  } else if (env.COMPLIANCE_API_URL?.trim()) {
+    // Acknowledged, but a URL was supplied anyway. Still validate it: a
+    // half-configured compliance service is a worse state than none, and the
+    // acknowledgement is for the absence of one, not for a broken one.
+    try {
+      parseExternalComplianceUrl(env.COMPLIANCE_API_URL);
+    } catch (error) {
+      errors.push((error as Error).message);
+    }
   }
   try {
     configuredSanctionsMaxAgeMs(env.COMPLIANCE_MAX_DATASET_AGE_HOURS);

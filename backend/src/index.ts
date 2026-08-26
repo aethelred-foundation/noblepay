@@ -8,6 +8,7 @@ import { logger, generateCorrelationId } from "./lib/logger";
 import { register, httpRequestDuration, httpRequestTotal } from "./lib/metrics";
 import { disconnectDatabase } from "./lib/db";
 import { collectProductionEnvErrors } from "./lib/env-validation";
+import { complianceEvaluationAcknowledged } from "./lib/production-config";
 import {
   authenticateAPIKey,
   createTierRateLimit,
@@ -59,6 +60,24 @@ export function validateProductionEnv(): void {
       "Refusing to start — fix the environment variables above and restart.",
     );
     process.exit(1);
+  }
+
+  /*
+   * Say it out loud, every boot.
+   *
+   * A deployment running without compliance screening must not be something
+   * anyone discovers later from a config file. Payments still cannot be
+   * screened — every screening path refuses with a 501 — so the practical
+   * effect is that payment processing is closed while the rest of the service
+   * runs. That is worth stating plainly rather than implying by absence.
+   */
+  if (complianceEvaluationAcknowledged()) {
+    logger.warn(
+      "EVALUATION MODE: no audited compliance service is configured. " +
+        "Compliance screening is DISABLED and every payment requiring a " +
+        "screening verdict will be REFUSED with 501. Acknowledged via " +
+        "COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT. Never use this for real traffic.",
+    );
   }
 }
 

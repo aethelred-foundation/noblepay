@@ -101,6 +101,50 @@ export function parseHttpUrl(raw: string | undefined, label: string): URL {
   return parsed;
 }
 
+/**
+ * The exact acknowledgement that puts compliance into evaluation mode.
+ *
+ * Deliberately a single fixed string rather than any truthy value, matching the
+ * plaintext-RPC acknowledgement already used elsewhere in this stack. A boolean
+ * flag can be set by accident; this cannot.
+ */
+export const COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT =
+  "acknowledge-evaluation-only-no-compliance-screening";
+
+/** The public testnet. Evaluation mode is refused on any other chain. */
+const AETHELRED_PUBLIC_TESTNET_CHAIN_ID = "7332";
+
+/**
+ * Whether this deployment may run WITHOUT an audited compliance service.
+ *
+ * This does not weaken screening. Every path that would call the compliance
+ * service already refuses when it is unconfigured — three call sites in
+ * services/compliance.ts, each throwing COMPLIANCE_SUBMISSION_NOT_CONFIGURED
+ * with a 501. What this controls is narrower: whether the backend REFUSES TO
+ * BOOT over the missing configuration, or boots with those paths closed so the
+ * rest of the stack can be exercised.
+ *
+ * The distinction worth holding onto: no payment gets screened either way. The
+ * difference is between a container that will not start and a container that
+ * starts and declines to process payments.
+ *
+ * Conditions are conjunctive and none of them is a default:
+ *   - the exact acknowledgement string
+ *   - NEXT_PUBLIC_CHAIN_ENV=testnet
+ *   - the public-testnet chain id
+ * Mainnet cannot reach this state no matter what is set.
+ */
+export function complianceEvaluationAcknowledged(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    env.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT?.trim() ===
+      COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT &&
+    env.NEXT_PUBLIC_CHAIN_ENV?.trim() === "testnet" &&
+    env.NOBLEPAY_CHAIN_ID?.trim() === AETHELRED_PUBLIC_TESTNET_CHAIN_ID
+  );
+}
+
 export function parseExternalComplianceUrl(
   raw = process.env.COMPLIANCE_API_URL,
 ): URL {

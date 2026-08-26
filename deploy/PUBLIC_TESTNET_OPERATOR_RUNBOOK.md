@@ -487,6 +487,40 @@ The expected host bindings are:
 | Optional Go gateway     |    `4018` | `127.0.0.1`  |
 | Unprivileged Nginx edge |    `8080` | `0.0.0.0`    |
 
+### Running without an audited compliance service (evaluation only)
+
+The backend refuses to boot without `COMPLIANCE_API_URL` and
+`COMPLIANCE_API_KEY`, and `/readyz` — which is the container health check —
+probes the compliance service's `/v1/health`. The compliance engine bundled in
+this repository (`crates/noblepay-compliance`) cannot satisfy that: it is a
+reference engine for contract testing, it refuses to start unless
+`COMPLIANCE_ENV=test`, and the fixture it serves reports
+`source: "test-fixture"` and `dataset_digest: "test-only"`, both of which the
+backend rejects by design.
+
+For an evaluation deployment with no compliance vendor yet, set:
+
+```
+COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT=acknowledge-evaluation-only-no-compliance-screening
+```
+
+It is accepted only alongside `NEXT_PUBLIC_CHAIN_ENV=testnet` and
+`NOBLEPAY_CHAIN_ID=7332`. Mainnet cannot reach this state.
+
+What it does and does not do:
+
+- **Does**: let the process boot, and let `/readyz` return 200 so the container
+  becomes healthy and the rest of the stack can be exercised. The compliance
+  check reports `evaluation-unconfigured`, not `ready`, so anything reading
+  `/readyz` sees the absence rather than inferring screening works.
+- **Does not**: make screening permissive. Every payment requiring a compliance
+  verdict is still refused with `COMPLIANCE_SUBMISSION_NOT_CONFIGURED` (501).
+  No payment is screened either way; the difference is between a container that
+  will not start and one that starts with payment processing closed.
+
+The backend logs a warning naming this on every boot. Remove the variable as
+soon as an audited compliance service is configured.
+
 The production environment still requires independent high-entropy
 `POSTGRES_PASSWORD`, `JWT_SECRET`, `API_KEY_HASH_SECRET`,
 `COMPLIANCE_API_KEY`, Travel Rule keyring, real external compliance origin,

@@ -881,4 +881,62 @@ describe("ComplianceService verified submission", () => {
       },
     });
   });
+
+  /**
+   * Evaluation mode must not make screening permissive.
+   *
+   * COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT lets the process boot without an
+   * audited compliance service. It must not, under any circumstances, let a
+   * payment through unscreened. This is the test that says so.
+   */
+  it("still REFUSES to screen a payment in compliance evaluation mode", async () => {
+    delete process.env.COMPLIANCE_API_URL;
+    delete process.env.COMPLIANCE_API_KEY;
+    process.env.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT =
+      "acknowledge-evaluation-only-no-compliance-screening";
+    process.env.NEXT_PUBLIC_CHAIN_ENV = "testnet";
+
+    const payment: any = {
+      id: PAYMENT_DB_ID,
+      paymentId: PAYMENT_ID,
+      businessId: "biz-1",
+      sender: "0x4444444444444444444444444444444444444444",
+      recipient: "0x5555555555555555555555555555555555555555",
+      amount: new Prisma.Decimal("1.234567"),
+      currency: "USDC",
+      purposeHash: `0x${"12".repeat(32)}`,
+      status: "PENDING",
+    };
+    const prisma: any = {
+      payment: { findFirst: jest.fn().mockResolvedValue(payment) },
+      complianceScreening: { count: jest.fn().mockResolvedValue(0) },
+      complianceSubmissionIntent: {
+        upsert: jest.fn(),
+        updateMany: jest.fn(),
+        findUnique: jest.fn(),
+      },
+      $transaction: jest.fn(),
+    };
+    global.fetch = jest.fn(async () => {
+      throw new Error("no compliance request may be attempted");
+    }) as any;
+
+    const service = new ComplianceService(prisma, {} as any, {} as any);
+    await expect(
+      service.submitForScreening(
+        { paymentId: payment.id, priority: "normal" },
+        "biz-1",
+      ),
+    ).rejects.toMatchObject({
+      code: "COMPLIANCE_SUBMISSION_NOT_CONFIGURED",
+      statusCode: 501,
+    });
+
+    // Nothing was attempted and nothing was recorded: refused, not approved.
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+
+    delete process.env.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT;
+    delete process.env.NEXT_PUBLIC_CHAIN_ENV;
+  });
 });
