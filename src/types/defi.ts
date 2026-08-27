@@ -25,7 +25,7 @@ export interface LiquidityPool {
   /** 24-hour trading volume (USD) */
   volume24h: number;
   /** Current APY for liquidity providers */
-  apy: number;
+  apy: number | null;
   /** Fee tier in basis points (e.g. 30 = 0.30%) */
   feeBps: number;
   /** Pool status */
@@ -53,11 +53,11 @@ export interface LPPosition {
   /** Share of pool as percentage (0-100) */
   poolShare: number;
   /** Current value of position (USD) */
-  valueUsd: number;
+  valueUsd: number | null;
   /** Unclaimed fees earned (USD) */
   unclaimedFees: number;
   /** Impermanent loss percentage */
-  impermanentLoss: number;
+  impermanentLoss: number | null;
   /** Position opened timestamp (Unix ms) */
   enteredAt: number;
 }
@@ -94,7 +94,7 @@ export interface PaymentStream {
   /** Whether the stream is cancelable */
   cancelable: boolean;
   /** Last withdrawal timestamp (Unix ms) */
-  lastWithdrawal: number;
+  lastWithdrawal: number | null;
 }
 
 /** Real-time stream balance snapshot */
@@ -135,7 +135,7 @@ export interface FXHedge {
   /** Current market rate */
   currentRate: number;
   /** Unrealized PnL (USD) */
-  unrealizedPnl: number;
+  unrealizedPnl: number | null;
   /** Hedge status */
   status: HedgeStatus;
   /** Expiry timestamp (Unix ms) */
@@ -143,7 +143,7 @@ export interface FXHedge {
   /** Creation timestamp (Unix ms) */
   createdAt: number;
   /** Collateral deposited (USD) */
-  collateral: number;
+  collateral: number | null;
 }
 
 /** Real-time FX rate data */
@@ -153,7 +153,7 @@ export interface FXRate {
   /** Current mid rate */
   rate: number;
   /** 24h change percentage */
-  change24h: number;
+  change24h: number | null;
   /** Bid price */
   bid: number;
   /** Ask price */
@@ -169,16 +169,16 @@ export interface ExposureReport {
   /** Hedged percentage (0-100) */
   hedgedPercentage: number;
   /** Unhedged exposure (USD) */
-  unhedgedExposure: number;
+  unhedgedExposure: number | null;
   /** Exposure breakdown by currency pair */
   byPair: {
     pair: string;
     exposure: number;
     hedged: number;
-    unhedged: number;
+    unhedged: number | null;
   }[];
   /** Value at Risk (95% confidence, USD) */
-  valueAtRisk: number;
+  valueAtRisk: number | null;
   /** Report generation timestamp (Unix ms) */
   generatedAt: number;
 }

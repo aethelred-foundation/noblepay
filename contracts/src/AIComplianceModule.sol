@@ -104,7 +104,7 @@ contract AIComplianceModule is AccessControl, Pausable, ReentrancyGuard {
         AppealStatus status;
         address reviewer;                // Compliance officer reviewing
         bytes32 reviewReasonHash;        // Hash of review reasoning
-        DecisionOutcome revisedOutcome;  // New outcome if overturned
+        DecisionOutcome revisedOutcome;  // Effective outcome; original until overturned
         uint256 filedAt;
         uint256 resolvedAt;
     }
@@ -387,7 +387,7 @@ contract AIComplianceModule is AccessControl, Pausable, ReentrancyGuard {
             status: AppealStatus.PENDING,
             reviewer: address(0),
             reviewReasonHash: bytes32(0),
-            revisedOutcome: DecisionOutcome.APPROVED, // placeholder
+            revisedOutcome: d.outcome,
             filedAt: block.timestamp,
             resolvedAt: 0
         });
@@ -526,7 +526,12 @@ contract AIComplianceModule is AccessControl, Pausable, ReentrancyGuard {
         string calldata _version,
         bytes32 _modelHash
     ) external onlyRole(AI_OPERATOR_ROLE) returns (bytes32 modelId) {
-        modelId = keccak256(abi.encodePacked(_name, _version, _modelHash));
+        // abi.encode (not encodePacked): both name and version are dynamic
+        // strings, and encodePacked would let ("ab","c") and ("a","bc") hash to
+        // the same modelId — an attacker could pre-register a colliding id to
+        // block a legitimate model name (DoS). abi.encode length-prefixes the
+        // dynamic fields, so distinct inputs always produce distinct ids.
+        modelId = keccak256(abi.encode(_name, _version, _modelHash));
         if (models[modelId].registeredAt != 0) revert ModelAlreadyExists();
 
         models[modelId] = AIModel({

@@ -1,247 +1,228 @@
-import { renderHook, act } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { useInvoices } from "@/hooks/useInvoices";
+
+const mockRefetch = jest.fn().mockResolvedValue(undefined);
+const mockReset = jest.fn();
+const mockInvalidate = jest.fn().mockResolvedValue(undefined);
+const mockApiRequest = jest.fn().mockResolvedValue({});
+const mockQueryOptions: Record<string, any> = {};
+const mockQueryStates: Record<string, any> = {};
+const mockMutationOptions: any[] = [];
+let mockMutationIndex = 0;
+
+jest.mock("@tanstack/react-query", () => ({
+  useQuery: (options: any) => {
+    const key = options.queryKey.join(":");
+    mockQueryOptions[key] = options;
+    return {
+      data: mockQueryStates[key]?.data,
+      isLoading: mockQueryStates[key]?.isLoading ?? false,
+      error: mockQueryStates[key]?.error ?? null,
+      refetch: mockRefetch,
+    };
+  },
+  useMutation: (options: any) => {
+    const index = mockMutationIndex++;
+    mockMutationOptions[index] = options;
+    return {
+      mutateAsync: async (value: unknown) => options.mutationFn(value),
+      isPending: false,
+      error: null,
+      reset: mockReset,
+    };
+  },
+  useQueryClient: () => ({ invalidateQueries: mockInvalidate }),
+}));
+jest.mock("@/lib/api", () => ({
+  ...jest.requireActual("@/lib/api"),
+  apiRequest: (...args: unknown[]) => mockApiRequest(...args),
+}));
+
+const invoice = {
+  id: "inv-verified-1",
+  invoiceNumber: "NP-0001",
+  businessId: "00000000-0000-4000-8000-000000000001",
+  issuer: "0x1111111111111111111111111111111111111111",
+  debtor: "0x2222222222222222222222222222222222222222",
+  debtorName: "Buyer Ltd",
+  description: "Verified services",
+  amount: "1000",
+  currency: "USDC",
+  outstandingAmount: "600",
+  financedAmount: "400",
+  maturityDate: "2026-08-21T10:00:00.000Z",
+  status: "PARTIALLY_FINANCED",
+  discountRate: 0.02,
+  creditScore: null,
+  createdAt: "2026-07-21T10:00:00.000Z",
+  settledAt: null,
+  settlementReference: null,
+};
+const financing = {
+  id: "finance-1",
+  invoiceId: invoice.id,
+  amount: "400",
+  discountRate: 0.02,
+  netProceeds: "392",
+  factor: "factor-1",
+  term: 31,
+  status: "FUNDED",
+  externalReference: "gateway-1",
+  createdAt: "2026-07-21T10:05:00.000Z",
+};
 
 describe("useInvoices", () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    jest.clearAllMocks();
+    mockMutationIndex = 0;
+    mockMutationOptions.length = 0;
+    Object.keys(mockQueryStates).forEach((key) => delete mockQueryStates[key]);
+    mockQueryStates["invoices:list"] = { data: [invoice] };
+    mockQueryStates[`invoices:financing:${invoice.id}`] = { data: [financing] };
+    mockQueryStates["invoices:analytics"] = {
+      data: {
+        totalReceivables: "1000",
+        totalFinanced: "400",
+        totalOutstanding: "600",
+        avgDaysToPayment: 18.5,
+        overdueAmount: "0",
+        overdueCount: 0,
+        financingUtilization: 0.4,
+        agingBuckets: [{ range: "0-30 days", amount: "600", count: 1 }],
+        byCurrency: { USDC: { total: "1000", financed: "400", count: 1 } },
+      },
+    };
+    mockQueryStates[`invoices:credit-score:${invoice.businessId}`] = {
+      data: {
+        businessId: invoice.businessId,
+        score: null,
+        grade: "UNRATED",
+        sampleSize: 1,
+        factors: [
+          {
+            name: "Observed invoices",
+            value: 1,
+            description: "At least three matured invoices are required",
+          },
+        ],
+        history: [],
+        methodology: "NoblePay observed invoice performance v1",
+        lastUpdated: "2026-07-21T10:00:00.000Z",
+      },
+    };
   });
 
-  afterEach(() => {
-    jest.useRealTimers();
+  it("maps durable invoices, gateway financing history, analytics, and unrated credit", () => {
+    const { result } = renderHook(() => useInvoices(invoice.businessId));
+
+    expect(result.current.invoices[0]).toEqual(
+      expect.objectContaining({
+        invoiceNumber: "NP-0001",
+        status: "Financed",
+        outstandingAmount: 600,
+        financedAmount: 400,
+        creditScore: null,
+      }),
+    );
+    expect(result.current.financingRequests[0]).toEqual(
+      expect.objectContaining({
+        amount: 400,
+        netProceeds: 392,
+        externalReference: "gateway-1",
+      }),
+    );
+    expect(result.current.creditScore).toEqual(
+      expect.objectContaining({ score: null, grade: "UNRATED", sampleSize: 1 }),
+    );
+    expect(result.current.analytics?.byCurrency.USDC).toEqual({
+      total: 1000,
+      financed: 400,
+      count: 1,
+    });
   });
 
-  it("returns loading state initially", () => {
-    const { result } = renderHook(() => useInvoices());
+  it("loads every authoritative invoice read endpoint", async () => {
+    renderHook(() => useInvoices(invoice.businessId));
+    const signal = new AbortController().signal;
+    await mockQueryOptions["invoices:list"].queryFn({ signal });
+    await mockQueryOptions[`invoices:financing:${invoice.id}`].queryFn({
+      signal,
+    });
+    await mockQueryOptions["invoices:analytics"].queryFn({ signal });
+    await mockQueryOptions[
+      `invoices:credit-score:${invoice.businessId}`
+    ].queryFn({ signal });
 
-    expect(result.current.isLoading).toBe(true);
-    expect(result.current.invoices).toEqual([]);
-    expect(result.current.financingRequests).toEqual([]);
-    expect(result.current.creditScore).toBeNull();
-    expect(result.current.analytics).toBeNull();
+    expect(mockApiRequest.mock.calls.map(([path]) => path)).toEqual([
+      "/v1/invoices",
+      `/v1/invoices/${invoice.id}/financing`,
+      "/v1/invoices/analytics",
+      `/v1/invoices/credit-score/${invoice.businessId}`,
+    ]);
   });
 
-  it("loads mock data after timeout", () => {
-    const { result } = renderHook(() => useInvoices());
+  it("keeps invoice records available when role-gated analytics are denied", () => {
+    const analyticsError = new Error("analytics permission denied");
+    mockQueryStates["invoices:analytics"] = { error: analyticsError };
+    const { result } = renderHook(() => useInvoices(invoice.businessId));
 
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.invoices.length).toBe(4);
-    expect(result.current.financingRequests.length).toBe(1);
-    expect(result.current.creditScore).not.toBeNull();
-    expect(result.current.analytics).not.toBeNull();
+    expect(result.current.error).toBeNull();
+    expect(result.current.analyticsError).toBe(analyticsError);
+    expect(result.current.invoices).toHaveLength(1);
   });
 
-  it("invoices have correct structure", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
+  it("uses exact durable mutation contracts and financing idempotency", async () => {
+    const { result } = renderHook(() => useInvoices(invoice.businessId));
+    await result.current.createInvoice({
+      payerAddress: invoice.debtor,
+      payerName: "Buyer Ltd",
+      amount: 1000,
+      currency: "USDC",
+      dueInDays: 30,
+      description: "Verified services",
     });
+    await result.current.requestFinancing(invoice.id, 400);
+    await result.current.settleInvoice(invoice.id, "settlement-verified-1");
+    await result.current.disputeInvoice(
+      invoice.id,
+      "The delivered services do not match the invoice.",
+    );
 
-    const invoice = result.current.invoices[0];
-    expect(invoice).toHaveProperty("id");
-    expect(invoice).toHaveProperty("invoiceNumber");
-    expect(invoice).toHaveProperty("issuer");
-    expect(invoice).toHaveProperty("issuerName");
-    expect(invoice).toHaveProperty("payer");
-    expect(invoice).toHaveProperty("payerName");
-    expect(invoice).toHaveProperty("amount");
-    expect(invoice).toHaveProperty("currency");
-    expect(invoice).toHaveProperty("status");
-    expect(invoice).toHaveProperty("issuedAt");
-    expect(invoice).toHaveProperty("dueAt");
-    expect(invoice).toHaveProperty("description");
-    expect(invoice).toHaveProperty("tokenized");
+    expect(mockApiRequest).toHaveBeenNthCalledWith(
+      1,
+      "/v1/invoices",
+      expect.objectContaining({
+        method: "POST",
+        json: expect.objectContaining({
+          debtor: invoice.debtor,
+          amount: "1000",
+          description: "Verified services",
+        }),
+      }),
+    );
+    expect(mockApiRequest).toHaveBeenNthCalledWith(
+      2,
+      `/v1/invoices/${invoice.id}/finance`,
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          "Idempotency-Key": expect.stringMatching(
+            /^invoice-finance-[A-Za-z0-9-]+$/,
+          ),
+        },
+        json: { amount: "400" },
+      }),
+    );
+    expect(mockApiRequest.mock.calls.slice(2).map(([path]) => path)).toEqual([
+      `/v1/invoices/${invoice.id}/settle`,
+      `/v1/invoices/${invoice.id}/dispute`,
+    ]);
   });
 
-  it("includes invoices of various statuses", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const statuses = result.current.invoices.map((i) => i.status);
-    expect(statuses).toContain("Issued");
-    expect(statuses).toContain("Financed");
-    expect(statuses).toContain("Overdue");
-    expect(statuses).toContain("Paid");
-  });
-
-  it("financing requests have correct structure", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const req = result.current.financingRequests[0];
-    expect(req).toHaveProperty("id");
-    expect(req).toHaveProperty("invoiceId");
-    expect(req).toHaveProperty("invoiceNumber");
-    expect(req).toHaveProperty("borrower");
-    expect(req).toHaveProperty("requestedAmount");
-    expect(req).toHaveProperty("approvedAmount");
-    expect(req).toHaveProperty("advanceRate");
-    expect(req).toHaveProperty("interestRate");
-    expect(req).toHaveProperty("fee");
-    expect(req).toHaveProperty("status");
-    expect(req).toHaveProperty("creditScore");
-  });
-
-  it("credit score has correct structure", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const cs = result.current.creditScore!;
-    expect(cs.score).toBe(742);
-    expect(cs.grade).toBe("AA");
-    expect(cs.maxFinancingAmount).toBe(2_000_000);
-    expect(cs.maxAdvanceRate).toBe(85);
-    expect(cs.onTimePaymentRate).toBeCloseTo(95.8, 1);
-    expect(cs.defaultCount).toBe(0);
-  });
-
-  it("analytics has correct structure with monthly data", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const analytics = result.current.analytics!;
-    expect(analytics.totalIssued).toBe(47);
-    expect(analytics.totalOutstanding).toBe(505_000);
-    expect(analytics.totalOverdue).toBe(75_000);
-    expect(analytics.monthlyVolume.length).toBe(6);
-    expect(analytics.monthlyVolume[0]).toHaveProperty("month");
-    expect(analytics.monthlyVolume[0]).toHaveProperty("issued");
-    expect(analytics.monthlyVolume[0]).toHaveProperty("paid");
-    expect(analytics.monthlyVolume[0]).toHaveProperty("financed");
-  });
-
-  it("createInvoice adds a new invoice", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialCount = result.current.invoices.length;
-
-    act(() => {
-      result.current.createInvoice({
-        payerAddress: "0xpayer",
-        payerName: "Test Payer",
-        amount: 50_000,
-        currency: "USDC",
-        dueInDays: 30,
-        description: "Test invoice",
-      });
-    });
-
-    expect(result.current.invoices.length).toBe(initialCount + 1);
-    const newInvoice = result.current.invoices[0]; // prepended
-    expect(newInvoice.status).toBe("Draft");
-    expect(newInvoice.amount).toBe(50_000);
-    expect(newInvoice.currency).toBe("USDC");
-    expect(newInvoice.payerName).toBe("Test Payer");
-    expect(newInvoice.description).toBe("Test invoice");
-    expect(newInvoice.tokenized).toBe(false);
-    expect(newInvoice.invoiceNumber).toMatch(/^NP-2026-/);
-    expect(newInvoice.daysUntilDue).toBe(30);
-  });
-
-  it("requestFinancing adds a new financing request", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialCount = result.current.financingRequests.length;
-
-    act(() => {
-      result.current.requestFinancing("inv-001", 200_000);
-    });
-
-    expect(result.current.financingRequests.length).toBe(initialCount + 1);
-    const newReq = result.current.financingRequests[0]; // prepended
-    expect(newReq.invoiceId).toBe("inv-001");
-    expect(newReq.requestedAmount).toBe(200_000);
-    expect(newReq.status).toBe("Pending");
-    expect(newReq.creditScore).toBe(742);
-    expect(newReq.advanceRate).toBe(85);
-    expect(newReq.fee).toBeCloseTo(1000, 0);
-  });
-
-  it("requestFinancing does nothing for unknown invoice", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    const initialCount = result.current.financingRequests.length;
-
-    act(() => {
-      result.current.requestFinancing("inv-nonexistent", 100_000);
-    });
-
-    expect(result.current.financingRequests.length).toBe(initialCount);
-  });
-
-  it("tokenizeInvoice marks invoice as tokenized", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    // inv-003 is not tokenized
-    expect(
-      result.current.invoices.find((i) => i.id === "inv-003")?.tokenized,
-    ).toBe(false);
-
-    act(() => {
-      result.current.tokenizeInvoice("inv-003");
-    });
-
-    const updated = result.current.invoices.find((i) => i.id === "inv-003");
-    expect(updated?.tokenized).toBe(true);
-    expect(updated?.tokenId).toBeDefined();
-  });
-
-  it("tokenizeInvoice does not affect other invoices", () => {
-    const { result } = renderHook(() => useInvoices());
-
-    act(() => {
-      jest.advanceTimersByTime(600);
-    });
-
-    act(() => {
-      result.current.tokenizeInvoice("inv-003");
-    });
-
-    // inv-001 should remain the same
-    const inv1 = result.current.invoices.find((i) => i.id === "inv-001");
-    expect(inv1?.tokenized).toBe(true);
-    expect(inv1?.tokenId).toBe("1001");
-  });
-
-  it("cleans up timer on unmount", () => {
-    const clearTimeoutSpy = jest.spyOn(global, "clearTimeout");
-    const { unmount } = renderHook(() => useInvoices());
-
-    unmount();
-
-    expect(clearTimeoutSpy).toHaveBeenCalled();
-    clearTimeoutSpy.mockRestore();
+  it("invalidates invoice reads after every successful mutation", async () => {
+    renderHook(() => useInvoices(invoice.businessId));
+    for (const mutation of mockMutationOptions) await mutation.onSuccess();
+    expect(mockInvalidate).toHaveBeenCalledTimes(4);
+    expect(mockInvalidate).toHaveBeenCalledWith({ queryKey: ["invoices"] });
   });
 });

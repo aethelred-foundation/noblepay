@@ -1,13 +1,27 @@
 import { resetAllMocks } from "../setup";
 import jwt from "jsonwebtoken";
 
-const TEST_JWT_SECRET = "test-secret";
+const TEST_JWT_SECRET = "noblepay-test-secret-not-for-production";
 
 // Mock ws module
 const mockWSSInstance = {
   on: jest.fn(),
   close: jest.fn(),
 };
+const mockBusinessFindUnique = jest.fn();
+const mockCurrentAuthorization = jest.fn();
+
+jest.mock("../../lib/db", () => ({
+  prisma: {
+    business: {
+      findUnique: (...args: unknown[]) => mockBusinessFindUnique(...args),
+    },
+  },
+}));
+jest.mock("../../lib/business-registry-authorization", () => ({
+  getCurrentBusinessRegistryAuthorization: (address: string) =>
+    mockCurrentAuthorization(address),
+}));
 
 jest.mock("ws", () => ({
   WebSocketServer: jest.fn(() => mockWSSInstance),
@@ -18,10 +32,24 @@ jest.mock("ws", () => ({
 }));
 
 import { WebSocketService } from "../../services/websocket";
-import { WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 function createTestJWT(businessId: string): string {
-  return jwt.sign({ sub: businessId, businessId, tier: "ENTERPRISE" }, TEST_JWT_SECRET, { expiresIn: "1h" });
+  return jwt.sign(
+    {
+      sub: "0x1234567890abcdef1234567890abcdef12345678",
+      businessId,
+      tier: "ENTERPRISE",
+      role: "ADMIN",
+    },
+    TEST_JWT_SECRET,
+    {
+      algorithm: "HS256",
+      expiresIn: "1h",
+      issuer: "noblepay-api",
+      audience: "noblepay-web",
+    },
+  );
 }
 
 function createMockWS(readyState: number = WebSocket.OPEN as number) {
@@ -41,6 +69,19 @@ function createMockHTTPServer() {
 
 beforeEach(() => {
   resetAllMocks();
+  mockBusinessFindUnique.mockResolvedValue({
+    id: "biz-test",
+    address: "0x1234567890abcdef1234567890abcdef12345678",
+  });
+  mockBusinessFindUnique.mockImplementation(async ({ where }: any) => ({
+    id: where.id,
+    address: "0x1234567890abcdef1234567890abcdef12345678",
+  }));
+  mockCurrentAuthorization.mockResolvedValue({
+    active: true,
+    status: "VERIFIED",
+    wallet: "0x1234567890abcdef1234567890abcdef12345678",
+  });
   jest.useFakeTimers();
 });
 
@@ -58,7 +99,18 @@ describe("WebSocketService", () => {
 
       service.attach(server);
 
-      expect(mockWSSInstance.on).toHaveBeenCalledWith("connection", expect.any(Function));
+      expect(WebSocketServer).toHaveBeenCalledWith(
+        expect.objectContaining({
+          server,
+          path: "/ws",
+          maxPayload: 16 * 1024,
+          perMessageDeflate: false,
+        }),
+      );
+      expect(mockWSSInstance.on).toHaveBeenCalledWith(
+        "connection",
+        expect.any(Function),
+      );
       service.close();
     });
   });
@@ -113,6 +165,49 @@ describe("WebSocketService", () => {
       service.close();
     });
 
+    it.each([
+      ["SUSPENDED", false],
+      ["REVOKED", false],
+      ["RPC_FAILURE", true],
+    ])(
+      "does not authenticate a wallet session when current-chain authorization is %s",
+      async (status, rpcFailure) => {
+        if (rpcFailure)
+          mockCurrentAuthorization.mockRejectedValue(
+            new Error("RPC unavailable"),
+          );
+        else
+          mockCurrentAuthorization.mockResolvedValue({
+            active: false,
+            status,
+            wallet: "0x1234567890abcdef1234567890abcdef12345678",
+          });
+        const service = new WebSocketService();
+        service.attach(createMockHTTPServer());
+        const connectionHandler = mockWSSInstance.on.mock.calls.find(
+          (call: any) => call[0] === "connection",
+        )![1];
+        const ws = createMockWS();
+        await connectionHandler(ws, {
+          socket: { remoteAddress: "127.0.0.1" },
+          headers: {
+            cookie: `noblepay_session=${encodeURIComponent(createTestJWT("biz-1"))}`,
+          },
+        });
+        const messageHandler = ws.on.mock.calls.find(
+          (call: any) => call[0] === "message",
+        )![1];
+        ws.send.mockClear();
+        await messageHandler(
+          JSON.stringify({ action: "subscribe", channel: "payments" }),
+        );
+        const response = JSON.parse(ws.send.mock.calls[0][0]);
+        expect(response.payload.rejected).toContain("payments");
+        expect(response.payload.channels).toEqual(["system"]);
+        service.close();
+      },
+    );
+
     it("should handle client disconnect", () => {
       const service = new WebSocketService();
       service.attach(createMockHTTPServer());
@@ -125,7 +220,9 @@ describe("WebSocketService", () => {
       connectionHandler(ws, { socket: { remoteAddress: "127.0.0.1" } });
 
       // Find the close handler
-      const closeHandler = ws.on.mock.calls.find((c: any) => c[0] === "close")![1];
+      const closeHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "close",
+      )![1];
       closeHandler();
 
       expect(service.getStats().totalConnections).toBe(0);
@@ -144,7 +241,9 @@ describe("WebSocketService", () => {
       const ws = createMockWS();
       connectionHandler(ws, { socket: { remoteAddress: "127.0.0.1" } });
 
-      const errorHandler = ws.on.mock.calls.find((c: any) => c[0] === "error")![1];
+      const errorHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "error",
+      )![1];
       errorHandler(new Error("Connection reset"));
 
       expect(service.getStats().totalConnections).toBe(0);
@@ -163,7 +262,9 @@ describe("WebSocketService", () => {
       const ws = createMockWS();
       connectionHandler(ws, { socket: { remoteAddress: "127.0.0.1" } });
 
-      const pongHandler = ws.on.mock.calls.find((c: any) => c[0] === "pong")![1];
+      const pongHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "pong",
+      )![1];
       pongHandler();
 
       // No error means the pong handler works
@@ -176,7 +277,7 @@ describe("WebSocketService", () => {
   // ─── handleMessage ────────────────────────────────────────────────────────
 
   describe("handleMessage (via message event)", () => {
-    function setupServiceWithClient(authenticated = false) {
+    async function setupServiceWithClient(authenticated = false) {
       const service = new WebSocketService();
       service.attach(createMockHTTPServer());
 
@@ -188,16 +289,20 @@ describe("WebSocketService", () => {
 
       if (authenticated) {
         const token = createTestJWT("biz-test");
-        connectionHandler(ws, {
+        await connectionHandler(ws, {
           socket: { remoteAddress: "127.0.0.1" },
-          headers: {},
-          url: `/ws?token=${token}`,
+          headers: { cookie: `noblepay_session=${encodeURIComponent(token)}` },
+          url: "/ws",
         });
       } else {
-        connectionHandler(ws, { socket: { remoteAddress: "127.0.0.1" } });
+        await connectionHandler(ws, {
+          socket: { remoteAddress: "127.0.0.1" },
+        });
       }
 
-      const messageHandler = ws.on.mock.calls.find((c: any) => c[0] === "message")![1];
+      const messageHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "message",
+      )![1];
 
       // Reset send mock after welcome message
       ws.send.mockClear();
@@ -205,10 +310,13 @@ describe("WebSocketService", () => {
       return { service, ws, messageHandler };
     }
 
-    it("should handle subscribe action with single channel (authenticated)", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient(true);
+    it("should handle subscribe action with single channel (authenticated)", async () => {
+      const { service, ws, messageHandler } =
+        await setupServiceWithClient(true);
 
-      messageHandler(JSON.stringify({ action: "subscribe", channel: "payments" }));
+      await messageHandler(
+        JSON.stringify({ action: "subscribe", channel: "payments" }),
+      );
 
       expect(ws.send).toHaveBeenCalledTimes(1);
       const response = JSON.parse(ws.send.mock.calls[0][0]);
@@ -218,11 +326,15 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should handle subscribe action with multiple channels (authenticated)", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient(true);
+    it("should handle subscribe action with multiple channels (authenticated)", async () => {
+      const { service, ws, messageHandler } =
+        await setupServiceWithClient(true);
 
-      messageHandler(
-        JSON.stringify({ action: "subscribe", channels: ["payments", "compliance", "treasury"] }),
+      await messageHandler(
+        JSON.stringify({
+          action: "subscribe",
+          channels: ["payments", "compliance", "treasury"],
+        }),
       );
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
@@ -233,10 +345,12 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should ignore invalid channel names", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient();
+    it("should ignore invalid channel names", async () => {
+      const { service, ws, messageHandler } = await setupServiceWithClient();
 
-      messageHandler(JSON.stringify({ action: "subscribe", channel: "invalid_channel" }));
+      await messageHandler(
+        JSON.stringify({ action: "subscribe", channel: "invalid_channel" }),
+      );
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       expect(response.payload.channels).not.toContain("invalid_channel");
@@ -244,15 +358,20 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should handle unsubscribe action", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient(true);
+    it("should handle unsubscribe action", async () => {
+      const { service, ws, messageHandler } =
+        await setupServiceWithClient(true);
 
       // Subscribe first (authenticated client can subscribe)
-      messageHandler(JSON.stringify({ action: "subscribe", channel: "payments" }));
+      await messageHandler(
+        JSON.stringify({ action: "subscribe", channel: "payments" }),
+      );
       ws.send.mockClear();
 
       // Unsubscribe
-      messageHandler(JSON.stringify({ action: "unsubscribe", channel: "payments" }));
+      await messageHandler(
+        JSON.stringify({ action: "unsubscribe", channel: "payments" }),
+      );
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       expect(response.payload.event).toBe("unsubscribed");
@@ -261,10 +380,12 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should not allow unsubscribe from system channel", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient();
+    it("should not allow unsubscribe from system channel", async () => {
+      const { service, ws, messageHandler } = await setupServiceWithClient();
 
-      messageHandler(JSON.stringify({ action: "unsubscribe", channel: "system" }));
+      await messageHandler(
+        JSON.stringify({ action: "unsubscribe", channel: "system" }),
+      );
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       expect(response.payload.channels).toContain("system");
@@ -272,13 +393,24 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should handle unsubscribe with multiple channels", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient(true);
+    it("should handle unsubscribe with multiple channels", async () => {
+      const { service, ws, messageHandler } =
+        await setupServiceWithClient(true);
 
-      messageHandler(JSON.stringify({ action: "subscribe", channels: ["payments", "compliance"] }));
+      await messageHandler(
+        JSON.stringify({
+          action: "subscribe",
+          channels: ["payments", "compliance"],
+        }),
+      );
       ws.send.mockClear();
 
-      messageHandler(JSON.stringify({ action: "unsubscribe", channels: ["payments", "system"] }));
+      await messageHandler(
+        JSON.stringify({
+          action: "unsubscribe",
+          channels: ["payments", "system"],
+        }),
+      );
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       // payments removed, system kept
@@ -288,11 +420,11 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should handle authenticate action with valid JWT token", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient();
+    it("should handle authenticate action with valid JWT token", async () => {
+      const { service, ws, messageHandler } = await setupServiceWithClient();
 
       const token = createTestJWT("biz-1");
-      messageHandler(JSON.stringify({ action: "authenticate", token }));
+      await messageHandler(JSON.stringify({ action: "authenticate", token }));
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       expect(response.payload.event).toBe("authenticated");
@@ -301,10 +433,10 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should handle ping action", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient();
+    it("should handle ping action", async () => {
+      const { service, ws, messageHandler } = await setupServiceWithClient();
 
-      messageHandler(JSON.stringify({ action: "ping" }));
+      await messageHandler(JSON.stringify({ action: "ping" }));
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       expect(response.payload.event).toBe("pong");
@@ -312,23 +444,21 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should handle authenticate action without token (keeps handshake businessId)", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient();
+    it("should reject authenticate action without a token", async () => {
+      const { service, ws, messageHandler } = await setupServiceWithClient();
 
-      messageHandler(JSON.stringify({ action: "authenticate" }));
+      await messageHandler(JSON.stringify({ action: "authenticate" }));
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
-      expect(response.payload.event).toBe("authenticated");
-      // businessId is null because no token was provided during handshake or authenticate
-      expect(response.payload.businessId).toBeNull();
+      expect(response.payload.event).toBe("auth_failed");
 
       service.close();
     });
 
-    it("should handle unknown action", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient();
+    it("should handle unknown action", async () => {
+      const { service, ws, messageHandler } = await setupServiceWithClient();
 
-      messageHandler(JSON.stringify({ action: "unknown_action" }));
+      await messageHandler(JSON.stringify({ action: "unknown_action" }));
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       expect(response.payload.event).toBe("error");
@@ -348,11 +478,15 @@ describe("WebSocketService", () => {
       const ws = createMockWS();
       connectionHandler(ws, { socket: { remoteAddress: "127.0.0.1" } });
 
-      const messageHandler = ws.on.mock.calls.find((c: any) => c[0] === "message")![1];
+      const messageHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "message",
+      )![1];
       ws.send.mockClear();
 
       // Simulate disconnect by triggering close handler
-      const closeHandler = ws.on.mock.calls.find((c: any) => c[0] === "close")![1];
+      const closeHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "close",
+      )![1];
       closeHandler();
 
       // Now send a message after disconnect -- client not found, should return early
@@ -364,10 +498,10 @@ describe("WebSocketService", () => {
       service.close();
     });
 
-    it("should handle invalid JSON", () => {
-      const { service, ws, messageHandler } = setupServiceWithClient();
+    it("should handle invalid JSON", async () => {
+      const { service, ws, messageHandler } = await setupServiceWithClient();
 
-      messageHandler("not valid json {{{");
+      await messageHandler("not valid json {{{");
 
       const response = JSON.parse(ws.send.mock.calls[0][0]);
       expect(response.payload.event).toBe("error");
@@ -380,7 +514,7 @@ describe("WebSocketService", () => {
   // ─── broadcast ────────────────────────────────────────────────────────────
 
   describe("broadcast", () => {
-    it("should broadcast to clients subscribed to a channel", () => {
+    it("should broadcast to clients subscribed to a channel", async () => {
       const service = new WebSocketService();
       service.attach(createMockHTTPServer());
 
@@ -393,21 +527,32 @@ describe("WebSocketService", () => {
       const ws2 = createMockWS();
 
       const token = createTestJWT("biz-1");
-      connectionHandler(ws1, {
+      await connectionHandler(ws1, {
         socket: { remoteAddress: "127.0.0.1" },
-        headers: {},
-        url: `/ws?token=${token}`,
+        headers: { cookie: `noblepay_session=${encodeURIComponent(token)}` },
+        url: "/ws",
       });
-      connectionHandler(ws2, { socket: { remoteAddress: "127.0.0.2" } });
+      await connectionHandler(ws2, {
+        socket: { remoteAddress: "127.0.0.2" },
+      });
 
       // Subscribe ws1 to payments (authenticated — should succeed)
-      const msg1Handler = ws1.on.mock.calls.find((c: any) => c[0] === "message")![1];
-      msg1Handler(JSON.stringify({ action: "subscribe", channel: "payments" }));
+      const msg1Handler = ws1.on.mock.calls.find(
+        (c: any) => c[0] === "message",
+      )![1];
+      await msg1Handler(
+        JSON.stringify({ action: "subscribe", channel: "payments" }),
+      );
 
       ws1.send.mockClear();
       ws2.send.mockClear();
 
-      service.broadcast("payments", "payment_update", { paymentId: "pay-1" });
+      await service.broadcast(
+        "payments",
+        "payment_update",
+        { paymentId: "pay-1" },
+        "biz-1",
+      );
 
       // ws1 should receive (subscribed to payments, authenticated)
       expect(ws1.send).toHaveBeenCalledTimes(1);
@@ -419,6 +564,75 @@ describe("WebSocketService", () => {
       expect(ws2.send).not.toHaveBeenCalled();
 
       service.close();
+    });
+
+    it.each([
+      ["SUSPENDED", false],
+      ["REVOKED", false],
+      ["RPC_FAILURE", true],
+    ])(
+      "closes an already-authenticated tenant before delivery when chain authorization becomes %s",
+      async (status, rpcFailure) => {
+        const service = new WebSocketService();
+        service.attach(createMockHTTPServer());
+        const connectionHandler = mockWSSInstance.on.mock.calls.find(
+          (call: any) => call[0] === "connection",
+        )![1];
+        const ws = createMockWS();
+        await connectionHandler(ws, {
+          socket: { remoteAddress: "127.0.0.1" },
+          headers: {
+            cookie: `noblepay_session=${encodeURIComponent(createTestJWT("biz-1"))}`,
+          },
+        });
+        const messageHandler = ws.on.mock.calls.find(
+          (call: any) => call[0] === "message",
+        )![1];
+        await messageHandler(
+          JSON.stringify({ action: "subscribe", channel: "payments" }),
+        );
+        ws.send.mockClear();
+        if (rpcFailure)
+          mockCurrentAuthorization.mockRejectedValue(
+            new Error("RPC unavailable"),
+          );
+        else
+          mockCurrentAuthorization.mockResolvedValue({
+            active: false,
+            status,
+            wallet: "0x1234567890abcdef1234567890abcdef12345678",
+          });
+
+        await service.broadcast(
+          "payments",
+          "payment_update",
+          { paymentId: "pay-revoked" },
+          "biz-1",
+        );
+
+        expect(ws.send).not.toHaveBeenCalled();
+        expect(ws.close).toHaveBeenCalledWith(
+          4003,
+          "Business authorization revoked or unavailable",
+        );
+        expect(service.getStats().totalConnections).toBe(0);
+        service.close();
+      },
+    );
+
+    it("refuses a non-system broadcast when its tenant target is missing at runtime", async () => {
+      const service = new WebSocketService();
+      const invokeWithoutTarget = service.broadcast as unknown as (
+        channel: string,
+        type: string,
+        payload: Record<string, unknown>,
+      ) => Promise<void>;
+
+      await expect(
+        invokeWithoutTarget("payments", "payment_update", {
+          paymentId: "pay-1",
+        }),
+      ).rejects.toThrow("targetBusinessId is required");
     });
 
     it("should not send to clients with closed connections", () => {
@@ -458,7 +672,9 @@ describe("WebSocketService", () => {
       const ws = createMockWS();
       connectionHandler(ws, { socket: { remoteAddress: "127.0.0.1" } });
 
-      const messageHandler = ws.on.mock.calls.find((c: any) => c[0] === "message")![1];
+      const messageHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "message",
+      )![1];
       ws.send.mockClear();
 
       // Send 101 messages to exceed the 100 limit
@@ -487,7 +703,7 @@ describe("WebSocketService", () => {
       expect(stats.avgMessageRate).toBe(0);
     });
 
-    it("should return correct channel subscriptions", () => {
+    it("should return correct channel subscriptions", async () => {
       const service = new WebSocketService();
       service.attach(createMockHTTPServer());
 
@@ -497,14 +713,21 @@ describe("WebSocketService", () => {
 
       const ws = createMockWS();
       const token = createTestJWT("biz-stats");
-      connectionHandler(ws, {
+      await connectionHandler(ws, {
         socket: { remoteAddress: "127.0.0.1" },
-        headers: {},
-        url: `/ws?token=${token}`,
+        headers: { cookie: `noblepay_session=${encodeURIComponent(token)}` },
+        url: "/ws",
       });
 
-      const messageHandler = ws.on.mock.calls.find((c: any) => c[0] === "message")![1];
-      messageHandler(JSON.stringify({ action: "subscribe", channels: ["payments", "compliance"] }));
+      const messageHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "message",
+      )![1];
+      await messageHandler(
+        JSON.stringify({
+          action: "subscribe",
+          channels: ["payments", "compliance"],
+        }),
+      );
 
       const stats = service.getStats();
       expect(stats.totalConnections).toBe(1);
@@ -528,16 +751,24 @@ describe("WebSocketService", () => {
       )![1];
 
       const ws = createMockWS();
-      ws.send.mockImplementation(() => { throw new Error("Send failed"); });
+      ws.send.mockImplementation(() => {
+        throw new Error("Send failed");
+      });
       connectionHandler(ws, { socket: { remoteAddress: "127.0.0.1" } });
 
       // The welcome message send threw, but should not crash
       // broadcast should also be handled gracefully
-      const messageHandler = ws.on.mock.calls.find((c: any) => c[0] === "message")![1];
+      const messageHandler = ws.on.mock.calls.find(
+        (c: any) => c[0] === "message",
+      )![1];
 
       // Re-mock send to throw for the subscribe response too
-      ws.send.mockImplementation(() => { throw new Error("Send failed again"); });
-      messageHandler(JSON.stringify({ action: "subscribe", channel: "payments" }));
+      ws.send.mockImplementation(() => {
+        throw new Error("Send failed again");
+      });
+      messageHandler(
+        JSON.stringify({ action: "subscribe", channel: "payments" }),
+      );
 
       // Should not crash the service
       expect(service.getStats().totalConnections).toBe(1);

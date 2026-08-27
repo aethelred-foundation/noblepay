@@ -1,253 +1,190 @@
-import { renderHook, act, waitFor } from "@testing-library/react";
+import { renderHook } from "@testing-library/react";
 import { useAICompliance } from "@/hooks/useAICompliance";
+
+const mockRefetch = jest.fn().mockResolvedValue(undefined);
+const mockApiRequest = jest.fn().mockResolvedValue({});
+const mockQueryOptions: Record<string, any> = {};
+const mockQueryStates: Record<string, any> = {};
+
+jest.mock("@tanstack/react-query", () => ({
+  useQuery: (options: any) => {
+    const key = options.queryKey.join(":");
+    mockQueryOptions[key] = options;
+    return {
+      data: mockQueryStates[key]?.data,
+      isLoading: mockQueryStates[key]?.isLoading ?? false,
+      error: mockQueryStates[key]?.error ?? null,
+      refetch: mockRefetch,
+    };
+  },
+}));
+jest.mock("@/lib/api", () => ({
+  ...jest.requireActual("@/lib/api"),
+  apiRequest: (...args: unknown[]) => mockApiRequest(...args),
+}));
+
+const timestamp = "2026-07-21T10:00:00.000Z";
+const decision = {
+  id: "dec-verified-1",
+  modelId: "model-1",
+  modelVersion: "1.0.0",
+  paymentId: "payment-1",
+  outcome: "ESCALATE",
+  originalOutcome: "FLAG",
+  confidence: 0.68,
+  riskScore: 72,
+  factors: [{ name: "corridor", contribution: 0.4, value: "AE-US" }],
+  explanation: "Verified engine explanation",
+  processingTimeMs: 24,
+  teeAttestation: null,
+  humanOverride: false,
+  overrideBy: null,
+  overrideReason: null,
+  createdAt: timestamp,
+};
+const model = {
+  id: "model-1",
+  name: "Payments Risk",
+  version: "1.0.0",
+  type: "PAYMENT_RISK",
+  status: "ACTIVE",
+  accuracy: 0.97,
+  precision: 0.96,
+  recall: 0.95,
+  f1Score: 0.955,
+  falsePositiveRate: null,
+  falseNegativeRate: null,
+  teeAttested: true,
+  attestationHash: null,
+  trainingDataHash: null,
+  deployedAt: timestamp,
+  lastEvaluated: null,
+  totalDecisions: 12,
+  metadata: {},
+};
+const appeal = {
+  id: "00000000-0000-4000-8000-000000000001",
+  decisionId: decision.id,
+  paymentId: decision.paymentId,
+  submittedBy: "reviewer-1",
+  reason: "The payment documentation should be reviewed.",
+  status: "SUBMITTED",
+  externalReference: "appeal-ext-1",
+  reviewer: null,
+  reviewNotes: null,
+  originalOutcome: "ESCALATE",
+  finalOutcome: null,
+  submittedAt: timestamp,
+  resolvedAt: null,
+};
 
 describe("useAICompliance", () => {
   beforeEach(() => {
-    jest.useFakeTimers();
+    jest.clearAllMocks();
+    Object.keys(mockQueryStates).forEach((key) => delete mockQueryStates[key]);
+    mockQueryStates["ai-compliance:models"] = { data: [model] };
+    mockQueryStates["ai-compliance:decisions"] = { data: [decision] };
+    mockQueryStates["ai-compliance:analytics"] = {
+      data: {
+        activeModels: 1,
+        totalDecisions: 1,
+        avgConfidence: 0.68,
+        avgProcessingTime: 24,
+        escalationRate: 1,
+        humanOverrideRate: 0,
+        appealRate: 1,
+        appealOverturnRate: 0,
+        modelPerformance: [],
+        biasMetrics: [],
+        recentDecisions: [decision],
+      },
+    };
+    mockQueryStates["ai-compliance:bias-metrics"] = {
+      data: [
+        {
+          jurisdiction: "AE",
+          totalScreened: 1,
+          flagRate: 1,
+          blockRate: 0,
+          falsePositiveRate: 0,
+          avgProcessingTime: 24,
+          deviationFromGlobal: null,
+        },
+      ],
+    };
+    mockQueryStates["ai-compliance:review-queue"] = { data: [decision] };
+    mockQueryStates["ai-compliance:appeals"] = { data: [appeal] };
   });
 
-  afterEach(() => {
-    jest.useRealTimers();
-  });
-
-  it("returns loading state initially", () => {
+  it("maps all durable AI records and preserves unknown metrics as null", () => {
     const { result } = renderHook(() => useAICompliance());
 
-    expect(result.current.isLoading).toBe(true);
-    expect(result.current.decisions).toEqual([]);
-    expect(result.current.models).toEqual([]);
-    expect(result.current.behavioralScores).toEqual([]);
-    expect(result.current.networkAnalysis).toBeNull();
-    expect(result.current.reports).toEqual([]);
-  });
-
-  it("loads mock data after timeout", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    expect(result.current.isLoading).toBe(false);
-    expect(result.current.decisions.length).toBe(4);
-    expect(result.current.models.length).toBe(4);
-    expect(result.current.behavioralScores.length).toBe(2);
-    expect(result.current.networkAnalysis).not.toBeNull();
-    expect(result.current.reports.length).toBe(2);
-  });
-
-  it("returns decisions with correct structure", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    const decision = result.current.decisions[0];
-    expect(decision).toHaveProperty("id");
-    expect(decision).toHaveProperty("paymentId");
-    expect(decision).toHaveProperty("modelId");
-    expect(decision).toHaveProperty("modelVersion");
-    expect(decision).toHaveProperty("outcome");
-    expect(decision).toHaveProperty("confidence");
-    expect(decision).toHaveProperty("confidenceLevel");
-    expect(decision).toHaveProperty("riskScore");
-    expect(decision).toHaveProperty("factors");
-    expect(decision).toHaveProperty("latencyMs");
-    expect(decision).toHaveProperty("decidedAt");
-    expect(decision).toHaveProperty("appealed");
-  });
-
-  it("returns models with correct structure", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    const model = result.current.models[0];
-    expect(model).toHaveProperty("id");
-    expect(model).toHaveProperty("name");
-    expect(model).toHaveProperty("version");
-    expect(model).toHaveProperty("status");
-    expect(model).toHaveProperty("accuracy");
-    expect(model).toHaveProperty("falsePositiveRate");
-    expect(model).toHaveProperty("falseNegativeRate");
-    expect(model).toHaveProperty("totalDecisions");
-    expect(model).toHaveProperty("avgLatencyMs");
-  });
-
-  it("returns network analysis with corridors", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    const analysis = result.current.networkAnalysis!;
-    expect(analysis.totalCorridors).toBe(24);
-    expect(analysis.highRiskCorridors).toBe(3);
-    expect(analysis.networkRiskScore).toBe(28);
-    expect(analysis.corridors.length).toBeGreaterThan(0);
-    expect(analysis.corridors[0]).toHaveProperty("sourceJurisdiction");
-    expect(analysis.corridors[0]).toHaveProperty("destJurisdiction");
-    expect(analysis.corridors[0]).toHaveProperty("riskLevel");
-  });
-
-  it("appealDecision marks a decision as appealed", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    // dec-001 is not appealed initially
-    expect(
-      result.current.decisions.find((d) => d.id === "dec-001")?.appealed,
-    ).toBe(false);
-
-    act(() => {
-      result.current.appealDecision("dec-001");
-    });
-
-    const updated = result.current.decisions.find((d) => d.id === "dec-001");
-    expect(updated?.appealed).toBe(true);
-    expect(updated?.appealOutcome).toBe("Pending");
-  });
-
-  it("appealDecision does not affect other decisions", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    act(() => {
-      result.current.appealDecision("dec-001");
-    });
-
-    // dec-004 should remain unchanged
-    const dec4 = result.current.decisions.find((d) => d.id === "dec-004");
-    expect(dec4?.appealed).toBe(false);
-  });
-
-  it("resolveAppeal updates the appeal outcome", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    // dec-002 has appealOutcome 'Pending'
-    act(() => {
-      result.current.resolveAppeal("dec-002", "Overturned");
-    });
-
-    const updated = result.current.decisions.find((d) => d.id === "dec-002");
-    expect(updated?.appealOutcome).toBe("Overturned");
-  });
-
-  it("resolveAppeal with Upheld outcome", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    act(() => {
-      result.current.resolveAppeal("dec-002", "Upheld");
-    });
-
-    const updated = result.current.decisions.find((d) => d.id === "dec-002");
-    expect(updated?.appealOutcome).toBe("Upheld");
-  });
-
-  it("submitReport updates report status and adds filing reference", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    // rpt-002 is in Draft status
-    expect(result.current.reports.find((r) => r.id === "rpt-002")?.status).toBe(
-      "Draft",
+    expect(result.current.models[0]).toEqual(
+      expect.objectContaining({
+        status: "ACTIVE",
+        falsePositiveRate: null,
+        deployedAt: Date.parse(timestamp),
+      }),
     );
-
-    act(() => {
-      result.current.submitReport("rpt-002");
-    });
-
-    const updated = result.current.reports.find((r) => r.id === "rpt-002");
-    expect(updated?.status).toBe("Submitted");
-    expect(updated?.submittedAt).toBeGreaterThan(0);
-    expect(updated?.filingReference).toBeDefined();
-    expect(updated?.filingReference).toMatch(/^REF-/);
-  });
-
-  it("submitReport does not affect other reports", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    act(() => {
-      result.current.submitReport("rpt-002");
-    });
-
-    const rpt1 = result.current.reports.find((r) => r.id === "rpt-001");
-    expect(rpt1?.status).toBe("Submitted");
-    expect(rpt1?.filingReference).toBe("UAECB-2026-Q1-0042");
-  });
-
-  it("getBehavioralScore finds a score by address", async () => {
-    const { result } = renderHook(() => useAICompliance());
-
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    const score = result.current.getBehavioralScore(
-      "0x1234567890abcdef1234567890abcdef12345678",
+    expect(result.current.decisions[0]).toEqual(
+      expect.objectContaining({
+        outcome: "ESCALATE",
+        originalOutcome: "FLAG",
+        createdAt: Date.parse(timestamp),
+      }),
     );
-    expect(score).toBeDefined();
-    expect(score?.score).toBe(87);
-    expect(score?.trend).toBe("Improving");
+    expect(result.current.appeals[0]).toEqual(
+      expect.objectContaining({
+        status: "SUBMITTED",
+        resolvedAt: null,
+      }),
+    );
+    expect(result.current.reviewQueue).toHaveLength(1);
+    expect(result.current.biasMetrics).toHaveLength(1);
+    expect(result.current.unsupportedCapabilities).toEqual([
+      "behavioral-scores",
+      "network-analysis",
+    ]);
   });
 
-  it("getBehavioralScore returns undefined for unknown address", async () => {
+  it("uses every server-authoritative AI read endpoint", async () => {
+    renderHook(() => useAICompliance());
+    const signal = new AbortController().signal;
+    for (const key of [
+      "ai-compliance:models",
+      "ai-compliance:decisions",
+      "ai-compliance:analytics",
+      "ai-compliance:bias-metrics",
+      "ai-compliance:review-queue",
+      "ai-compliance:appeals",
+    ]) {
+      await mockQueryOptions[key].queryFn({ signal });
+    }
+    expect(mockApiRequest.mock.calls.map(([path]) => path)).toEqual([
+      "/v1/ai-compliance/models",
+      "/v1/ai-compliance/decisions?limit=50",
+      "/v1/ai-compliance/analytics",
+      "/v1/ai-compliance/bias-metrics",
+      "/v1/ai-compliance/review-queue",
+      "/v1/ai-compliance/appeals",
+    ]);
+  });
+
+  it("keeps read-only AI records available when review permission is denied", () => {
+    const reviewError = new Error("review permission denied");
+    mockQueryStates["ai-compliance:review-queue"] = { error: reviewError };
     const { result } = renderHook(() => useAICompliance());
 
-    act(() => {
-      jest.advanceTimersByTime(700);
-    });
-
-    const score = result.current.getBehavioralScore("0xunknown");
-    expect(score).toBeUndefined();
+    expect(result.current.error).toBeNull();
+    expect(result.current.reviewQueueError).toBe(reviewError);
+    expect(result.current.decisions).toHaveLength(1);
   });
 
-  it("returns callback functions that are stable references", () => {
-    const { result, rerender } = renderHook(() => useAICompliance());
-
-    const firstAppeal = result.current.appealDecision;
-    const firstResolve = result.current.resolveAppeal;
-    const firstSubmit = result.current.submitReport;
-
-    rerender();
-
-    expect(result.current.appealDecision).toBe(firstAppeal);
-    expect(result.current.resolveAppeal).toBe(firstResolve);
-    expect(result.current.submitReport).toBe(firstSubmit);
-  });
-
-  it("cleans up timer on unmount", () => {
-    const clearTimeoutSpy = jest.spyOn(global, "clearTimeout");
-    const { unmount } = renderHook(() => useAICompliance());
-
-    unmount();
-
-    expect(clearTimeoutSpy).toHaveBeenCalled();
-    clearTimeoutSpy.mockRestore();
+  it("does not expose unverified AI mutation methods", () => {
+    const { result } = renderHook(() => useAICompliance());
+    expect(result.current).not.toHaveProperty("runDecision");
+    expect(result.current).not.toHaveProperty("overrideDecision");
+    expect(result.current).not.toHaveProperty("appealDecision");
+    expect(result.current).not.toHaveProperty("resolveAppeal");
   });
 });

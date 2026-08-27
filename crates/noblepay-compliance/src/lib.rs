@@ -1,8 +1,8 @@
 //! # NoblePay TEE Compliance Engine
 //!
-//! Privacy-preserving compliance infrastructure for enterprise payment screening.
-//! Runs inside AWS Nitro Enclaves to ensure that sensitive counterparty data never
-//! leaves the trusted execution environment in plaintext.
+//! Local reference implementation for enterprise payment-screening integration.
+//! It is not a production TEE service. Production deployments must use an
+//! independently audited external compliance provider implementing the same API.
 //!
 //! ## Architecture
 //!
@@ -31,18 +31,20 @@
 //! | Flag       | Description                                      |
 //! |------------|--------------------------------------------------|
 //! | `mock-tee` | Deterministic mock attestation (must opt-in)    |
-//! | `nitro`    | AWS Nitro Enclave attestation via NSM device      |
-//! | `sgx`      | Intel SGX attestation (experimental)              |
 //!
-//! ## Quick Start
+//! ## Local test quick start
 //!
-//! ```rust,no_run
+//! The fixture constructor is deliberately available only with the `mock-tee`
+//! feature. It cannot be selected by an ordinary production build.
+//!
+//! ```text
+//! cargo test --features mock-tee
+//!
 //! use noblepay_compliance::engine::ComplianceEngine;
-//! use noblepay_compliance::types::Payment;
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let engine = ComplianceEngine::new().await;
+//!     let _engine = ComplianceEngine::new().await;
 //!     // screen a payment ...
 //! }
 //! ```

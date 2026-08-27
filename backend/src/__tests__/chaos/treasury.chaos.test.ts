@@ -1,392 +1,246 @@
-/**
- * Treasury Persistence Chaos Tests
- *
- * Simulates database outages during treasury operations and verifies that:
- * - The service returns 503 PERSISTENCE_FAILURE (never 404) when the DB is down
- * - In-memory state is never mutated when persistence fails
- * - Recovery after DB returns yields consistent state
- */
-import { createMockPrisma, resetAllMocks } from "../setup";
-import { TreasuryService, TreasuryError } from "../../services/treasury";
-import { AuditService } from "../../services/audit";
+const mockVerifyTreasuryExecution = jest.fn();
+jest.mock("../../services/treasury-execution", () => ({
+  verifyTreasuryExecution: (...a: unknown[]) => mockVerifyTreasuryExecution(...a),
+  TreasuryExecutionError: class extends Error {},
+}));
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+import { Prisma } from "@prisma/client";
+import { TreasuryService } from "../../services/treasury";
 
-let prisma: ReturnType<typeof createMockPrisma>;
-let auditService: AuditService;
-let treasuryService: TreasuryService;
-let originalNodeEnv: string | undefined;
+const BUSINESS_ID = "business-chaos";
+const SIGNER = "0x1111111111111111111111111111111111111111";
+const NOW = new Date("2026-07-21T12:00:00.000Z");
 
-/**
- * Creates a proposal in-memory AND in the mock DB so that it can be
- * looked up via both paths. We run this while NODE_ENV=test so that
- * the create path uses the in-memory fallback (Prisma mock `.create`
- * does not throw). Then we flip NODE_ENV to "production" for the
- * chaos portion of each test.
- */
-async function seedProposal(
-  opts: {
-    amount?: string;
-    approvers?: string[];
-    status?: string;
-  } = {},
-) {
-  // Ensure create goes through (NODE_ENV=test => in-memory fallback on Prisma failure)
-  const prevEnv = process.env.NODE_ENV;
-  process.env.NODE_ENV = "test";
+function proposal(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "proposal-chaos",
+    type: "TRANSFER",
+    title: "Chaos transfer",
+    description: "Exercise durable failure boundaries",
+    amount: new Prisma.Decimal("500"),
+    currency: "USDC",
+    recipient: "0x2222222222222222222222222222222222222222",
+    status: "PENDING",
+    requiredSigs: 2,
+    currentSigs: 0,
+    signers: [],
+    approvedBy: [],
+    timelockUntil: null,
+    createdBy: SIGNER,
+    businessId: BUSINESS_ID,
+    expiresAt: new Date("2026-07-28T12:00:00.000Z"),
+    executedAt: null,
+    createdAt: NOW,
+    metadata: { category: "OPERATIONS" },
+    ...overrides,
+  } as any;
+}
 
-  const proposal = await treasuryService.createProposal(
-    {
-      title: "Chaos test proposal",
-      description: "Used by chaos test suite",
-      type: "TRANSFER",
-      amount: opts.amount ?? "5000",
-      currency: "USDC",
+function setup() {
+  const prisma: any = {
+    spendingPolicy: {
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      update: jest.fn(),
     },
-    "0xproposer",
-    "biz-chaos",
+    yieldStrategy: { findMany: jest.fn() },
+    treasuryProposal: {
+      create: jest.fn(),
+      findFirst: jest.fn(),
+      findMany: jest.fn(),
+      update: jest.fn(),
+    },
+    $transaction: jest.fn(),
+  };
+  const audit = { createAuditEntry: jest.fn().mockResolvedValue({}) };
+  prisma.$transaction.mockImplementation(
+    async (operation: (tx: any) => unknown) => operation(prisma),
   );
-
-  const proposalId = proposal.id as string;
-
-  // If we need approvers, add them while still in test mode
-  if (opts.approvers) {
-    for (const signer of opts.approvers) {
-      await treasuryService.approveProposal(proposalId, signer);
-    }
-  }
-
-  process.env.NODE_ENV = prevEnv;
-  return { proposalId, proposal };
+  prisma.spendingPolicy.findFirst.mockResolvedValue({
+    category: "OPERATIONS",
+    requiresMultiSig: true,
+    approvalThreshold: 2,
+    isActive: true,
+  });
+  return { prisma, audit, service: new TreasuryService(prisma, audit as any) };
 }
 
-function dbConnectionError() {
-  const err = new Error(
-    "Can't reach database server at `db.example.com`:`5432`",
-  );
-  (err as any).code = "P1001";
-  return err;
-}
+const validInput = {
+  title: "Chaos transfer",
+  description: "Exercise durable failure boundaries",
+  type: "TRANSFER" as const,
+  amount: "500",
+  currency: "USDC",
+  recipient: "0x2222222222222222222222222222222222222222",
+  category: "OPERATIONS" as const,
+};
 
-// ─── Setup / Teardown ─────────────────────────────────────────────────────────
+describe("Treasury durable chaos boundaries", () => {
+  beforeEach(() => jest.useFakeTimers().setSystemTime(NOW));
+  afterEach(() => jest.useRealTimers());
 
-beforeEach(() => {
-  resetAllMocks();
-  originalNodeEnv = process.env.NODE_ENV;
-
-  prisma = createMockPrisma();
-  auditService = new AuditService(prisma);
-  jest.spyOn(auditService, "createAuditEntry").mockResolvedValue({} as any);
-  treasuryService = new TreasuryService(prisma, auditService);
-});
-
-afterEach(() => {
-  process.env.NODE_ENV = originalNodeEnv;
-});
-
-// ─── Tests ────────────────────────────────────────────────────────────────────
-
-describe("Treasury Persistence Chaos", () => {
-  // ─── DB Outage During Proposal Restore ────────────────────────────────────
-
-  describe("DB outage during proposal restore", () => {
-    it("should return 503 PERSISTENCE_FAILURE, not 404 PROPOSAL_NOT_FOUND", async () => {
-      // The proposal exists in the DB but NOT in memory.
-      // Simulate: findUnique throws a connection error.
-      process.env.NODE_ENV = "production";
-
-      prisma.treasuryProposal.findUnique.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      await expect(
-        treasuryService.approveProposal("prop-abc123", "0xsigner"),
-      ).rejects.toMatchObject({
-        code: "PERSISTENCE_FAILURE",
-        statusCode: 503,
-      });
-    });
-
-    it("should NOT create any in-memory state on DB failure", async () => {
-      process.env.NODE_ENV = "production";
-
-      prisma.treasuryProposal.findUnique.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      try {
-        await treasuryService.approveProposal("prop-ghost", "0xsigner");
-      } catch {
-        // expected
-      }
-
-      // Now let findUnique return null (proposal does not exist in-memory)
-      // If a ghost entry was created, the next call would find it in memory
-      // and NOT hit Prisma at all.
-      prisma.treasuryProposal.findUnique.mockResolvedValueOnce(null);
-
-      await expect(
-        treasuryService.approveProposal("prop-ghost", "0xsigner"),
-      ).rejects.toMatchObject({
-        code: "PROPOSAL_NOT_FOUND",
-        statusCode: 404,
-      });
+  it("returns a typed service-unavailable error when proposal persistence fails", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.create.mockRejectedValue(
+      new Error("database unavailable"),
+    );
+    await expect(
+      service.createProposal(validInput, SIGNER, BUSINESS_ID),
+    ).rejects.toMatchObject({
+      code: "PERSISTENCE_FAILURE",
+      statusCode: 503,
     });
   });
 
-  // ─── DB Outage During Approval ────────────────────────────────────────────
-
-  describe("DB outage during approval", () => {
-    it("should return 503 PERSISTENCE_FAILURE when update throws", async () => {
-      const { proposalId } = await seedProposal();
-
-      // Switch to production mode so persistence failures are not swallowed
-      process.env.NODE_ENV = "production";
-
-      // The proposal is already in memory from seedProposal, so findUnique
-      // will not be called. Mock update to fail.
-      prisma.treasuryProposal.update.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      await expect(
-        treasuryService.approveProposal(proposalId, "0xsigner-chaos"),
-      ).rejects.toMatchObject({
-        code: "PERSISTENCE_FAILURE",
-        statusCode: 503,
-      });
+  it("does not attempt persistence when policy storage has no active monetary policy", async () => {
+    const { prisma, service } = setup();
+    prisma.spendingPolicy.findFirst.mockResolvedValue(null);
+    await expect(
+      service.createProposal(validInput, SIGNER, BUSINESS_ID),
+    ).rejects.toMatchObject({
+      code: "POLICY_NOT_FOUND",
+      statusCode: 409,
     });
+    expect(prisma.treasuryProposal.create).not.toHaveBeenCalled();
+  });
 
-    it("should NOT modify in-memory approvers list on DB failure", async () => {
-      const { proposalId } = await seedProposal();
-
-      process.env.NODE_ENV = "production";
-      prisma.treasuryProposal.update.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      try {
-        await treasuryService.approveProposal(proposalId, "0xsigner-chaos");
-      } catch {
-        // expected
-      }
-
-      // Verify the signer was NOT added — re-approve with the same signer
-      // should NOT throw DUPLICATE_APPROVAL.
-      // Reset mock so persistence succeeds this time.
-      prisma.treasuryProposal.update.mockResolvedValueOnce({});
-      const result = await treasuryService.approveProposal(
-        proposalId,
-        "0xsigner-chaos",
-      );
-
-      expect(result).toHaveProperty("approved");
-      // The signer was accepted, confirming it was not already in the list
+  it("rejects positive-zero monetary values before any database lookup", async () => {
+    const { prisma, service } = setup();
+    await expect(
+      service.createProposal(
+        { ...validInput, amount: "0" },
+        SIGNER,
+        BUSINESS_ID,
+      ),
+    ).rejects.toMatchObject({
+      code: "INVALID_MONETARY_PROPOSAL",
+      statusCode: 400,
     });
+    expect(prisma.spendingPolicy.findFirst).not.toHaveBeenCalled();
+  });
 
-    it("should NOT change in-memory proposal status on DB failure", async () => {
-      // Use amount < 10000 => requires 2 approvals
-      const { proposalId } = await seedProposal({ approvers: ["0xsigner1"] });
-
-      process.env.NODE_ENV = "production";
-
-      // The second approval would flip status to APPROVED, but DB fails
-      prisma.treasuryProposal.update.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      try {
-        await treasuryService.approveProposal(proposalId, "0xsigner2");
-      } catch {
-        // expected
-      }
-
-      // Status should still be PENDING (not APPROVED)
-      // Retry with working DB — if status had been flipped to APPROVED,
-      // the service would throw INVALID_STATE ("expected PENDING").
-      prisma.treasuryProposal.update.mockResolvedValueOnce({});
-      const result = await treasuryService.approveProposal(
-        proposalId,
-        "0xsigner2",
-      );
-
-      expect(result.approved).toBe(true);
-      expect(result.status).toBe("APPROVED");
+  it("conceals missing or foreign proposals during approval", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findFirst.mockResolvedValue(null);
+    await expect(
+      service.approveProposal("proposal-foreign", SIGNER, BUSINESS_ID),
+    ).rejects.toMatchObject({
+      code: "PROPOSAL_NOT_FOUND",
+      statusCode: 404,
+    });
+    expect(prisma.treasuryProposal.findFirst).toHaveBeenCalledWith({
+      where: { id: "proposal-foreign", businessId: BUSINESS_ID },
     });
   });
 
-  // ─── DB Outage During Execution ───────────────────────────────────────────
-
-  describe("DB outage during execution", () => {
-    it("should return 503 PERSISTENCE_FAILURE when update throws", async () => {
-      // amount < 10000 => 2 approvals, 0 timelock
-      const { proposalId } = await seedProposal({
-        approvers: ["0xsigner1", "0xsigner2"],
-      });
-
-      process.env.NODE_ENV = "production";
-      prisma.treasuryProposal.update.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      await expect(
-        treasuryService.executeProposal(proposalId, "0xexecutor"),
-      ).rejects.toMatchObject({
-        code: "PERSISTENCE_FAILURE",
-        statusCode: 503,
-      });
-    });
-
-    it("should keep in-memory status as APPROVED, not EXECUTED", async () => {
-      const { proposalId } = await seedProposal({
-        approvers: ["0xsigner1", "0xsigner2"],
-      });
-
-      process.env.NODE_ENV = "production";
-      prisma.treasuryProposal.update.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      try {
-        await treasuryService.executeProposal(proposalId, "0xexecutor");
-      } catch {
-        // expected
-      }
-
-      // If status was mutated to EXECUTED, retrying would throw
-      // INVALID_STATE ("expected APPROVED"). A successful retry confirms
-      // the in-memory status is still APPROVED.
-      prisma.treasuryProposal.update.mockResolvedValueOnce({});
-      const result = await treasuryService.executeProposal(
-        proposalId,
-        "0xexecutor",
-      );
-
-      expect(result.success).toBe(true);
-      expect(result.txHash).toMatch(/^0x[a-f0-9]{64}$/);
+  it("translates a transaction outage into a typed persistence failure", async () => {
+    const { prisma, service } = setup();
+    prisma.$transaction.mockRejectedValue(
+      new Error("serialization connection lost"),
+    );
+    await expect(
+      service.approveProposal("proposal-chaos", SIGNER, BUSINESS_ID),
+    ).rejects.toMatchObject({
+      code: "PERSISTENCE_FAILURE",
+      statusCode: 503,
     });
   });
 
-  // ─── Recovery After DB Returns ────────────────────────────────────────────
-
-  describe("recovery after DB returns", () => {
-    it("should succeed on second attempt after DB comes back", async () => {
-      const { proposalId } = await seedProposal();
-
-      process.env.NODE_ENV = "production";
-
-      // First attempt: DB down
-      prisma.treasuryProposal.update.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      await expect(
-        treasuryService.approveProposal(proposalId, "0xrecovery-signer"),
-      ).rejects.toMatchObject({
-        code: "PERSISTENCE_FAILURE",
-        statusCode: 503,
-      });
-
-      // Second attempt: DB recovered
-      prisma.treasuryProposal.update.mockResolvedValueOnce({});
-
-      const result = await treasuryService.approveProposal(
-        proposalId,
-        "0xrecovery-signer",
-      );
-
-      expect(result).toHaveProperty("approved");
-      expect(result).toHaveProperty("remainingApprovals");
-      expect(result).toHaveProperty("status");
+  it("durably expires a stale proposal and refuses its approval", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findFirst.mockResolvedValue(
+      proposal({ expiresAt: new Date("2026-07-20T00:00:00.000Z") }),
+    );
+    prisma.treasuryProposal.update.mockResolvedValue(
+      proposal({ status: "EXPIRED" }),
+    );
+    await expect(
+      service.approveProposal("proposal-chaos", SIGNER, BUSINESS_ID),
+    ).rejects.toMatchObject({
+      code: "PROPOSAL_EXPIRED",
+      statusCode: 409,
     });
-
-    it("should have consistent state between memory and DB mock after recovery", async () => {
-      const { proposalId } = await seedProposal({
-        approvers: ["0xsigner1"],
-      });
-
-      process.env.NODE_ENV = "production";
-
-      // First: DB outage during the final approval
-      prisma.treasuryProposal.update.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      await expect(
-        treasuryService.approveProposal(proposalId, "0xsigner2"),
-      ).rejects.toMatchObject({ code: "PERSISTENCE_FAILURE" });
-
-      // Second: DB recovered — capture the data passed to Prisma update
-      let persistedData: any = null;
-      prisma.treasuryProposal.update.mockImplementationOnce(
-        async (args: any) => {
-          persistedData = args.data;
-          return {};
-        },
-      );
-
-      const result = await treasuryService.approveProposal(
-        proposalId,
-        "0xsigner2",
-      );
-
-      // In-memory says APPROVED
-      expect(result.status).toBe("APPROVED");
-      expect(result.approved).toBe(true);
-
-      // The data sent to Prisma should match
-      expect(persistedData).not.toBeNull();
-      expect(persistedData.status).toBe("APPROVED");
-      expect(persistedData.approvedBy).toContain("0xsigner2");
-      expect(persistedData.currentSigs).toBe(2);
+    expect(prisma.treasuryProposal.update).toHaveBeenCalledWith({
+      where: { id: "proposal-chaos" },
+      data: { status: "EXPIRED" },
     });
   });
 
-  // ─── Never 404 on DB Failure ──────────────────────────────────────────────
-
-  describe("never 404 on DB failure", () => {
-    it("approveProposal should return 503, not 404, when DB is down and proposal is not in memory", async () => {
-      process.env.NODE_ENV = "production";
-
-      prisma.treasuryProposal.findUnique.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      await expect(
-        treasuryService.approveProposal("prop-db-only-1", "0xsigner"),
-      ).rejects.toMatchObject({
-        code: "PERSISTENCE_FAILURE",
-        statusCode: 503,
-      });
+  it("rejects a duplicate signer inside the serializable transaction", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findFirst.mockResolvedValue(
+      proposal({ approvedBy: [SIGNER], currentSigs: 1 }),
+    );
+    await expect(
+      service.approveProposal("proposal-chaos", SIGNER, BUSINESS_ID),
+    ).rejects.toMatchObject({
+      code: "DUPLICATE_APPROVAL",
+      statusCode: 409,
     });
+    expect(prisma.treasuryProposal.update).not.toHaveBeenCalled();
+  });
 
-    it("executeProposal should return 503, not 404, when DB is down and proposal is not in memory", async () => {
-      process.env.NODE_ENV = "production";
-
-      prisma.treasuryProposal.findUnique.mockRejectedValueOnce(
-        dbConnectionError(),
-      );
-
-      await expect(
-        treasuryService.executeProposal("prop-db-only-2", "0xexecutor"),
-      ).rejects.toMatchObject({
-        code: "PERSISTENCE_FAILURE",
-        statusCode: 503,
-      });
+  it("does not accept another approval after a competing transaction reached threshold", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findFirst.mockResolvedValue(
+      proposal({
+        status: "APPROVED",
+        approvedBy: ["signer-a", "signer-b"],
+        currentSigs: 2,
+      }),
+    );
+    await expect(
+      service.approveProposal("proposal-chaos", "signer-c", BUSINESS_ID),
+    ).rejects.toMatchObject({
+      code: "INVALID_STATE",
+      statusCode: 409,
     });
+    expect(prisma.treasuryProposal.update).not.toHaveBeenCalled();
+  });
 
-    it("should still return 404 when DB is up but proposal genuinely does not exist", async () => {
-      process.env.NODE_ENV = "production";
+  it("never performs a DB-only execution when receipt verification is unavailable", async () => {
+    const { prisma, service } = setup();
+    // An APPROVED proposal, so the refusal comes from verification failing
+    // rather than from the state check short-circuiting earlier.
+    prisma.treasuryProposal.findFirst.mockResolvedValue(
+      proposal({ status: "APPROVED" }),
+    );
+    mockVerifyTreasuryExecution.mockRejectedValue(
+      new Error("EXECUTION_RPC_UNAVAILABLE"),
+    );
+    await expect(
+      service.executeProposal(
+        "proposal-chaos",
+        SIGNER,
+        BUSINESS_ID,
+        {
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    },
+        { rpcUrl: "http://rpc.invalid", minimumConfirmations: 1 } as never,
+      ),
+    ).rejects.toThrow();
+    // The invariant, not the error code: when the chain cannot corroborate the
+    // execution, nothing is written. Asserting the absence of the write is what
+    // makes this a chaos test rather than a message assertion — the reason for
+    // the refusal may change, but a DB-only execution must never appear.
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(prisma.treasuryProposal.update).not.toHaveBeenCalled();
+  });
 
-      // DB responds fine — proposal simply does not exist
-      prisma.treasuryProposal.findUnique.mockResolvedValueOnce(null);
-
-      await expect(
-        treasuryService.approveProposal("prop-nonexistent", "0xsigner"),
-      ).rejects.toMatchObject({
-        code: "PROPOSAL_NOT_FOUND",
-        statusCode: 404,
-      });
+  it("keeps list reads tenant-scoped when no records are available", async () => {
+    const { prisma, service } = setup();
+    prisma.treasuryProposal.findMany.mockResolvedValue([]);
+    await expect(
+      service.listProposals(BUSINESS_ID, "PENDING", { page: 100, limit: 100 }),
+    ).resolves.toEqual([]);
+    expect(prisma.treasuryProposal.findMany).toHaveBeenCalledWith({
+      where: { businessId: BUSINESS_ID, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      skip: 9900,
+      take: 100,
     });
   });
 });

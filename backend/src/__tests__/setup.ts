@@ -16,8 +16,6 @@ jest.mock("../../src/lib/logger", () => ({
   logger: mockLogger,
   generateCorrelationId: jest.fn().mockReturnValue("test-correlation-id"),
   createRequestLogger: jest.fn().mockReturnValue(mockLogger),
-  maskIdentifier: jest.fn((value?: string | null) => value ?? undefined),
-  maskTransactionHash: jest.fn((value?: string | null) => value ?? undefined),
 }));
 
 // ─── Mock Metrics ────────────────────────────────────────────────────────────
@@ -35,7 +33,6 @@ jest.mock("../../src/lib/metrics", () => ({
   activeBusinesses: mockGauge,
   httpRequestDuration: mockHistogram,
   httpRequestTotal: mockCounter,
-  teeNodesActive: mockGauge,
   teeAttestationFailures: mockCounter,
   register: { metrics: jest.fn() },
 }));
@@ -65,9 +62,10 @@ export function createMockPrisma() {
     business: createMockModel(),
     auditLog: createMockModel(),
     complianceScreening: createMockModel(),
-    tEENode: createMockModel(),
+    complianceSubmissionIntent: createMockModel(),
     aPIKey: createMockModel(),
     travelRuleRecord: createMockModel(),
+    walletChallenge: createMockModel(),
     treasuryProposal: createMockModel(),
     $connect: jest.fn(),
     $disconnect: jest.fn(),

@@ -10,11 +10,8 @@
 //! | GET    | `/v1/metrics`         | Compliance pipeline metrics          |
 //! | POST   | `/v1/sanctions/update`| Trigger sanctions list refresh       |
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-
 use axum::{
-    extract::{Request, State},
+    extract::{DefaultBodyLimit, Request, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::IntoResponse,
@@ -23,12 +20,11 @@ use axum::{
 };
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::trace::TraceLayer;
 use tracing::{error, info, warn};
-use uuid::Uuid;
 
-use crate::attestation::TeePlatform;
 use crate::engine::ComplianceEngine;
 use crate::types::*;
 
@@ -80,10 +76,7 @@ fn build_cors_layer() -> CorsLayer {
 
     CorsLayer::new()
         .allow_origin(allow_origin)
-        .allow_methods([
-            axum::http::Method::GET,
-            axum::http::Method::POST,
-        ])
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
         .allow_headers([
             axum::http::header::CONTENT_TYPE,
             axum::http::header::AUTHORIZATION,
@@ -134,13 +127,27 @@ async fn auth_middleware(
         });
 
     match provided_key {
-        Some(ref key) if key == api_key => next.run(req).await.into_response(),
+        Some(ref key) if constant_time_eq(key.as_bytes(), api_key.as_bytes()) => {
+            next.run(req).await.into_response()
+        }
         _ => (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({"error": "invalid or missing API key"})),
         )
             .into_response(),
     }
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    let mut difference = left.len() ^ right.len();
+    let length = left.len().max(right.len());
+    for index in 0..length {
+        difference |= usize::from(
+            left.get(index).copied().unwrap_or_default()
+                ^ right.get(index).copied().unwrap_or_default(),
+        );
+    }
+    difference == 0
 }
 
 /// Build the Axum router with all compliance API routes.
@@ -152,10 +159,7 @@ pub fn build_router(engine: ComplianceEngine) -> Router {
 
 /// Build the router with an explicit API key (useful for testing).
 pub fn build_router_with_api_key(engine: ComplianceEngine, api_key: Option<String>) -> Router {
-    let state = AppState {
-        engine,
-        api_key,
-    };
+    let state = AppState { engine, api_key };
 
     let cors = build_cors_layer();
 
@@ -169,17 +173,20 @@ pub fn build_router_with_api_key(engine: ComplianceEngine, api_key: Option<Strin
         .route("/v1/behavioral/profiles", post(build_profiles))
         .route("/v1/corridor/analyze", post(corridor_analyze))
         .route("/v1/graph/add", post(graph_add_transaction))
-        .layer(middleware::from_fn_with_state(state.clone(), auth_middleware));
-
-    // Unauthenticated read-only routes
-    let public_routes = Router::new()
-        .route("/v1/health", get(health_check))
         .route("/v1/metrics", get(get_metrics))
-        .route("/v1/graph/analyze", get(graph_analyze));
+        .route("/v1/graph/analyze", get(graph_analyze))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
+
+    // Health is the only unauthenticated route; it exposes no payment data.
+    let public_routes = Router::new().route("/v1/health", get(health_check));
 
     Router::new()
         .merge(authenticated_routes)
         .merge(public_routes)
+        .layer(DefaultBodyLimit::max(1 << 20))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
         .with_state(state)
@@ -187,49 +194,38 @@ pub fn build_router_with_api_key(engine: ComplianceEngine, api_key: Option<Strin
 
 /// Start the HTTP server with graceful shutdown.
 ///
-/// In non-test mode, refuses to start if `COMPLIANCE_API_KEY` is not set
-/// (fail closed).
+/// This bundled server is local/test infrastructure only. Production callers
+/// must configure the backend and gateway with an independently audited
+/// external compliance service.
 pub async fn serve(engine: ComplianceEngine, addr: SocketAddr) -> anyhow::Result<()> {
-    // Fail closed: refuse to start without an API key in non-test mode.
-    #[cfg(not(test))]
+    let environment = std::env::var("COMPLIANCE_ENV").map_err(|_| {
+        anyhow::anyhow!("COMPLIANCE_ENV=test is required for the bundled reference server")
+    })?;
+    if environment != "test" {
+        anyhow::bail!(
+            "the bundled compliance server is test-only; production requires an audited external compliance service"
+        );
+    }
+    if std::env::var("COMPLIANCE_API_KEY")
+        .unwrap_or_default()
+        .is_empty()
     {
-        if std::env::var("COMPLIANCE_API_KEY").unwrap_or_default().is_empty() {
-            anyhow::bail!(
-                "COMPLIANCE_API_KEY env var must be set before starting the compliance API server"
-            );
-        }
+        anyhow::bail!("COMPLIANCE_API_KEY must be set before starting the compliance API server");
+    }
+    let cors_origins = std::env::var("CORS_ALLOWED_ORIGINS").unwrap_or_default();
+    if cors_origins.trim().is_empty() {
+        anyhow::bail!("CORS_ALLOWED_ORIGINS must be explicitly configured");
     }
 
-    // TEE runtime guard: when REQUIRE_TEE=true, refuse to start with mock
-    // or no TEE platform.  This prevents accidental deployment without real
-    // hardware attestation.
-    let tee_platform = engine.attestation_generator().platform();
-    if std::env::var("REQUIRE_TEE").unwrap_or_default() == "true" {
-        match tee_platform {
-            TeePlatform::Mock => {
-                anyhow::bail!(
-                    "REQUIRE_TEE=true but the active TEE platform is Mock. \
-                     Enable a real TEE feature (nitro or sgx) or unset REQUIRE_TEE to allow mock attestation."
-                );
-            }
-            TeePlatform::None => {
-                anyhow::bail!(
-                    "REQUIRE_TEE=true but no TEE platform is available. \
-                     Enable a TEE feature flag (nitro or sgx) and ensure the hardware is present."
-                );
-            }
-            TeePlatform::Nitro | TeePlatform::Sgx => {
-                info!(%tee_platform, "TEE platform verified for REQUIRE_TEE=true");
-            }
-        }
-    } else {
-        if tee_platform == TeePlatform::Mock {
-            warn!(
-                "Running with Mock TEE attestation — set REQUIRE_TEE=true in production \
-                 to enforce real hardware attestation"
-            );
-        }
+    if !cfg!(feature = "mock-tee") {
+        anyhow::bail!("COMPLIANCE_ENV=test requires a binary built with --features mock-tee");
     }
+
+    engine
+        .sanctions_db()
+        .validate_ready()
+        .await
+        .map_err(|error| anyhow::anyhow!("verified sanctions data is unavailable: {error}"))?;
 
     let app = build_router(engine);
 
@@ -283,10 +279,7 @@ async fn screen_payment(
 
     let mut headers = HeaderMap::new();
     headers.insert("X-Request-Id", request_id.to_string().parse().unwrap());
-    headers.insert(
-        "X-RateLimit-Limit",
-        "1000".parse().unwrap(),
-    );
+    headers.insert("X-RateLimit-Limit", "1000".parse().unwrap());
 
     match state
         .engine
@@ -343,6 +336,13 @@ async fn screen_batch(
 
 /// GET /v1/health — Health check with sanctions list freshness.
 async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
+    if let Err(error) = state.engine.sanctions_db().validate_ready().await {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "unhealthy", "error": error.to_string()})),
+        )
+            .into_response();
+    }
     let freshness = state.engine.sanctions_db().list_freshness().await;
     let total_entries = state.engine.sanctions_db().total_entries().await;
 
@@ -351,6 +351,13 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         .map(|(list, ts)| (list.to_string(), ts.to_rfc3339()))
         .collect();
 
+    let Some(metadata) = state.engine.sanctions_db().metadata().await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "unhealthy", "error": "sanctions metadata unavailable"})),
+        ).into_response();
+    };
+
     let response = HealthResponse {
         status: "healthy".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -358,10 +365,13 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         sanctions_lists: SanctionsListHealth {
             total_entries,
             last_updated: lists,
+            source: metadata.source,
+            dataset_generated_at: metadata.dataset_generated_at,
+            dataset_digest: metadata.dataset_digest,
         },
     };
 
-    (StatusCode::OK, Json(response))
+    (StatusCode::OK, Json(response)).into_response()
 }
 
 /// GET /v1/metrics — Compliance pipeline metrics.
@@ -375,12 +385,23 @@ async fn update_sanctions(State(state): State<AppState>) -> impl IntoResponse {
     match state.engine.refresh_sanctions_lists().await {
         Ok(()) => {
             let total = state.engine.sanctions_db().total_entries().await;
+            let Some(metadata) = state.engine.sanctions_db().metadata().await else {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(
+                        serde_json::json!({"success": false, "error": "sanctions metadata unavailable"}),
+                    ),
+                );
+            };
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "success": true,
                     "total_entries": total,
-                    "updated_at": Utc::now().to_rfc3339()
+                    "updated_at": Utc::now().to_rfc3339(),
+                    "source": metadata.source,
+                    "dataset_generated_at": metadata.dataset_generated_at,
+                    "dataset_digest": metadata.dataset_digest
                 })),
             )
         }
@@ -407,12 +428,15 @@ async fn ml_predict(
     Json(payment): Json<Payment>,
 ) -> impl IntoResponse {
     let prediction = state.engine.ml_predict(&payment);
-    (StatusCode::OK, Json(serde_json::json!({
-        "success": true,
-        "risk_score": prediction.risk_score,
-        "confidence": prediction.confidence,
-        "model_version": prediction.model_version,
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "risk_score": prediction.risk_score,
+            "confidence": prediction.confidence,
+            "model_version": prediction.model_version,
+        })),
+    )
 }
 
 /// POST /v1/behavioral/score — Score a payment against behavioral profile.
@@ -421,10 +445,13 @@ async fn behavioral_score(
     Json(payment): Json<Payment>,
 ) -> impl IntoResponse {
     let score = state.engine.behavioral_score(&payment);
-    (StatusCode::OK, Json(serde_json::json!({
-        "success": true,
-        "behavioral_score": score,
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "behavioral_score": score,
+        })),
+    )
 }
 
 /// POST /v1/behavioral/profiles — Build behavioral profiles from payment history.
@@ -433,10 +460,13 @@ async fn build_profiles(
     Json(payments): Json<Vec<Payment>>,
 ) -> impl IntoResponse {
     state.engine.build_behavioral_profiles(&payments);
-    (StatusCode::OK, Json(serde_json::json!({
-        "success": true,
-        "profiles_built": payments.len(),
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "profiles_built": payments.len(),
+        })),
+    )
 }
 
 /// POST /v1/corridor/analyze — Analyze a payment corridor for risk.
@@ -445,19 +475,25 @@ async fn corridor_analyze(
     Json(payment): Json<Payment>,
 ) -> impl IntoResponse {
     let result = state.engine.analyze_corridor(&payment);
-    (StatusCode::OK, Json(serde_json::json!({
-        "success": true,
-        "corridor_analysis": result,
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "corridor_analysis": result,
+        })),
+    )
 }
 
 /// GET /v1/graph/analyze — Run network analysis on accumulated transactions.
 async fn graph_analyze(State(state): State<AppState>) -> impl IntoResponse {
     let analysis = state.engine.network_analysis();
-    (StatusCode::OK, Json(serde_json::json!({
-        "success": true,
-        "network_analysis": analysis,
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "network_analysis": analysis,
+        })),
+    )
 }
 
 /// POST /v1/graph/add — Add a transaction to the graph.
@@ -466,10 +502,13 @@ async fn graph_add_transaction(
     Json(payment): Json<Payment>,
 ) -> impl IntoResponse {
     state.engine.add_to_graph(&payment);
-    (StatusCode::OK, Json(serde_json::json!({
-        "success": true,
-        "message": "transaction added to graph",
-    })))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "success": true,
+            "message": "transaction added to graph",
+        })),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -488,6 +527,9 @@ struct HealthResponse {
 struct SanctionsListHealth {
     total_entries: usize,
     last_updated: std::collections::HashMap<String, String>,
+    source: String,
+    dataset_generated_at: chrono::DateTime<Utc>,
+    dataset_digest: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -934,7 +976,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["status"], "healthy");
         assert!(json["version"].is_string());
@@ -955,7 +999,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["total_screened"].is_number());
     }
@@ -1005,7 +1051,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert!(json["total_entries"].is_number());
@@ -1042,7 +1090,9 @@ mod tests {
             status
         );
         if status == StatusCode::GATEWAY_TIMEOUT {
-            let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+            let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(json["success"], false);
             assert!(json["error"].is_string());
@@ -1072,7 +1122,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert!(json["result"].is_object());
@@ -1086,13 +1138,11 @@ mod tests {
     async fn batch_endpoint_response_body_fields() {
         let app = test_app().await;
         let batch_req = BatchScreeningRequest {
-            payments: vec![
-                ScreeningRequest {
-                    payment: Payment::test_payment("a", "b", 1000, "USD"),
-                    travel_rule_data: None,
-                    timeout_ms: None,
-                },
-            ],
+            payments: vec![ScreeningRequest {
+                payment: Payment::test_payment("a", "b", 1000, "USD"),
+                travel_rule_data: None,
+                timeout_ms: None,
+            }],
         };
         let body = serde_json::to_string(&batch_req).unwrap();
 
@@ -1105,7 +1155,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert!(json["total"].is_number());
         assert!(json["results"].is_array());
@@ -1130,7 +1182,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert!(json["risk_score"].is_number());
@@ -1156,7 +1210,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
     }
@@ -1182,7 +1238,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["profiles_built"], 3);
@@ -1207,7 +1265,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert!(json["corridor_analysis"].is_object());
@@ -1228,7 +1288,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert!(json["network_analysis"].is_object());
@@ -1253,7 +1315,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["message"], "transaction added to graph");
@@ -1326,7 +1390,9 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
         let status = resp.status();
         if status == StatusCode::GATEWAY_TIMEOUT {
-            let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+            let body_bytes = axum::body::to_bytes(resp.into_body(), 1_000_000)
+                .await
+                .unwrap();
             let json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
             assert_eq!(json["success"], false);
             assert!(json["error"].is_string());
@@ -1362,7 +1428,9 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["success"], true);
         assert_eq!(json["result"]["status"], "Blocked");

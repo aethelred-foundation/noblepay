@@ -294,7 +294,7 @@ describe("RBAC Middleware", () => {
       expect(next).toHaveBeenCalled();
     });
 
-    it("should handle unknown userRole as lowest privilege", () => {
+    it("should deny an unknown userRole", () => {
       const middleware = requireRole("VIEWER");
       const req = createMockRequest({ userRole: "UNKNOWN_ROLE" as any });
       const res = createMockResponse();
@@ -302,10 +302,8 @@ describe("RBAC Middleware", () => {
 
       middleware(req, res, next);
 
-      // Unknown role not in hierarchy, so indexOf returns -1, which is < any valid index
-      // This means it would be considered highest privilege (-1 <= anything)
-      // Based on the implementation: userLevel = -1, requiredLevel >= 0, so -1 <= requiredLevel = true
-      expect(next).toHaveBeenCalled();
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(next).not.toHaveBeenCalled();
     });
   });
 
@@ -314,7 +312,12 @@ describe("RBAC Middleware", () => {
   describe("extractRole", () => {
     it("should extract valid role from JWT payload", () => {
       const req = createMockRequest({
-        jwtPayload: { sub: "user-1", businessId: "biz-1", tier: "STANDARD", role: "ADMIN" },
+        jwtPayload: {
+          sub: "user-1",
+          businessId: "biz-1",
+          tier: "STANDARD",
+          role: "ADMIN",
+        },
       });
       const res = createMockResponse();
       const next = createMockNext();
@@ -342,7 +345,12 @@ describe("RBAC Middleware", () => {
 
     it("should default to VIEWER for invalid role in JWT", () => {
       const req = createMockRequest({
-        jwtPayload: { sub: "user-1", businessId: "biz-1", tier: "STANDARD", role: "INVALID_ROLE" },
+        jwtPayload: {
+          sub: "user-1",
+          businessId: "biz-1",
+          tier: "STANDARD",
+          role: "INVALID_ROLE",
+        },
       });
       const res = createMockResponse();
       const next = createMockNext();
@@ -397,7 +405,12 @@ describe("RBAC Middleware", () => {
 
       for (const role of roles) {
         const req = createMockRequest({
-          jwtPayload: { sub: "user-1", businessId: "biz-1", tier: "STANDARD", role },
+          jwtPayload: {
+            sub: "user-1",
+            businessId: "biz-1",
+            tier: "STANDARD",
+            role,
+          },
         });
         const res = createMockResponse();
         const next = createMockNext();
@@ -412,27 +425,39 @@ describe("RBAC Middleware", () => {
 
   describe("requireOwnership", () => {
     it("should return true when businessId matches resource", () => {
-      const req = createMockRequest({ businessId: "biz-1", userRole: "VIEWER" });
+      const req = createMockRequest({
+        businessId: "biz-1",
+        userRole: "VIEWER",
+      });
       expect(requireOwnership(req, "biz-1")).toBe(true);
     });
 
     it("should return false when businessId does not match and not admin", () => {
-      const req = createMockRequest({ businessId: "biz-1", userRole: "VIEWER" });
+      const req = createMockRequest({
+        businessId: "biz-1",
+        userRole: "VIEWER",
+      });
       expect(requireOwnership(req, "biz-2")).toBe(false);
     });
 
-    it("should return true for ADMIN even if businessId does not match", () => {
+    it("should keep a business ADMIN inside its own tenant", () => {
       const req = createMockRequest({ businessId: "biz-1", userRole: "ADMIN" });
-      expect(requireOwnership(req, "biz-2")).toBe(true);
+      expect(requireOwnership(req, "biz-2")).toBe(false);
     });
 
     it("should return true for SUPER_ADMIN even if businessId does not match", () => {
-      const req = createMockRequest({ businessId: "biz-1", userRole: "SUPER_ADMIN" });
+      const req = createMockRequest({
+        businessId: "biz-1",
+        userRole: "SUPER_ADMIN",
+      });
       expect(requireOwnership(req, "biz-2")).toBe(true);
     });
 
     it("should return false when no businessId on request", () => {
-      const req = createMockRequest({ businessId: undefined, userRole: "VIEWER" });
+      const req = createMockRequest({
+        businessId: undefined,
+        userRole: "VIEWER",
+      });
       expect(requireOwnership(req, "biz-1")).toBe(false);
     });
   });

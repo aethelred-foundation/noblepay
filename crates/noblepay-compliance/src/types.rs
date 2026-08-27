@@ -24,7 +24,12 @@ pub struct Payment {
     pub sender: String,
     /// Beneficiary entity name or wallet address.
     pub recipient: String,
-    /// Payment amount in the smallest unit of the currency (e.g. cents, satoshis).
+    /// Payment amount in the smallest unit of the currency. The HTTP schema
+    /// serializes this as a canonical base-10 string so JavaScript callers do
+    /// not lose integer precision. This local reference engine intentionally
+    /// supports only the u64 subset; the production external API contract uses
+    /// the full uint256 decimal-string range.
+    #[serde(with = "decimal_u64_string")]
     pub amount: u64,
     /// ISO 4217 currency code or ticker symbol (e.g. "USD", "AED", "USDC").
     pub currency: String,
@@ -35,6 +40,34 @@ pub struct Payment {
     /// When the payment was initiated.
     #[serde(default = "Utc::now")]
     pub timestamp: DateTime<Utc>,
+}
+
+mod decimal_u64_string {
+    use serde::{de::Error as _, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&value.to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<u64, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        if raw.is_empty()
+            || !raw.bytes().all(|byte| byte.is_ascii_digit())
+            || (raw.len() > 1 && raw.starts_with('0'))
+        {
+            return Err(D::Error::custom(
+                "amount must be a canonical base-10 integer string",
+            ));
+        }
+        raw.parse::<u64>()
+            .map_err(|_| D::Error::custom("amount exceeds the reference engine's u64 range"))
+    }
 }
 
 impl Payment {
@@ -314,6 +347,8 @@ pub struct BatchScreeningResponse {
     pub passed: usize,
     pub flagged: usize,
     pub blocked: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -396,7 +431,7 @@ mod tests {
 
     #[test]
     fn risk_factor_labels_are_nonempty() {
-        let factors = vec![
+        let factors = [
             RiskFactor::HighValueTransaction,
             RiskFactor::FrequentTransactions,
             RiskFactor::HighRiskJurisdiction,
@@ -413,7 +448,10 @@ mod tests {
     #[test]
     fn sanctions_list_display() {
         assert_eq!(SanctionsList::Ofac.to_string(), "OFAC");
-        assert_eq!(SanctionsList::UaeCentralBank.to_string(), "UAE Central Bank");
+        assert_eq!(
+            SanctionsList::UaeCentralBank.to_string(),
+            "UAE Central Bank"
+        );
     }
 
     #[test]
@@ -429,7 +467,11 @@ mod tests {
 
     #[test]
     fn compliance_status_serialization_all_variants() {
-        for status in [ComplianceStatus::Passed, ComplianceStatus::Flagged, ComplianceStatus::Blocked] {
+        for status in [
+            ComplianceStatus::Passed,
+            ComplianceStatus::Flagged,
+            ComplianceStatus::Blocked,
+        ] {
             let json = serde_json::to_string(&status).unwrap();
             let back: ComplianceStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(status, back);
@@ -438,7 +480,13 @@ mod tests {
 
     #[test]
     fn entity_type_serialization_roundtrip() {
-        for et in [EntityType::Individual, EntityType::Organization, EntityType::Vessel, EntityType::Aircraft, EntityType::Unknown] {
+        for et in [
+            EntityType::Individual,
+            EntityType::Organization,
+            EntityType::Vessel,
+            EntityType::Aircraft,
+            EntityType::Unknown,
+        ] {
             let json = serde_json::to_string(&et).unwrap();
             let back: EntityType = serde_json::from_str(&json).unwrap();
             assert_eq!(et, back);
@@ -447,7 +495,7 @@ mod tests {
 
     #[test]
     fn risk_factor_label_uniqueness() {
-        let factors = vec![
+        let factors = [
             RiskFactor::HighValueTransaction,
             RiskFactor::FrequentTransactions,
             RiskFactor::HighRiskJurisdiction,
@@ -458,7 +506,11 @@ mod tests {
         ];
         let labels: Vec<&str> = factors.iter().map(|f| f.label()).collect();
         let unique: std::collections::HashSet<&str> = labels.iter().cloned().collect();
-        assert_eq!(labels.len(), unique.len(), "All risk factor labels should be unique");
+        assert_eq!(
+            labels.len(),
+            unique.len(),
+            "All risk factor labels should be unique"
+        );
     }
 
     #[test]
@@ -529,6 +581,20 @@ mod tests {
         assert_eq!(back.recipient, "bob");
         assert_eq!(back.amount, 5000);
         assert_eq!(back.currency, "USD");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["amount"],
+            "5000"
+        );
+    }
+
+    #[test]
+    fn payment_schema_rejects_json_numbers_and_noncanonical_amounts() {
+        let payment = Payment::test_payment("alice", "bob", 5000, "USD");
+        let mut value = serde_json::to_value(payment).unwrap();
+        value["amount"] = serde_json::json!(5000);
+        assert!(serde_json::from_value::<Payment>(value.clone()).is_err());
+        value["amount"] = serde_json::json!("05000");
+        assert!(serde_json::from_value::<Payment>(value).is_err());
     }
 
     #[test]
@@ -545,7 +611,12 @@ mod tests {
 
     #[test]
     fn sanctions_list_all_variants_serialization() {
-        for list in [SanctionsList::Ofac, SanctionsList::UaeCentralBank, SanctionsList::UnitedNations, SanctionsList::EuropeanUnion] {
+        for list in [
+            SanctionsList::Ofac,
+            SanctionsList::UaeCentralBank,
+            SanctionsList::UnitedNations,
+            SanctionsList::EuropeanUnion,
+        ] {
             let json = serde_json::to_string(&list).unwrap();
             let back: SanctionsList = serde_json::from_str(&json).unwrap();
             assert_eq!(list, back);

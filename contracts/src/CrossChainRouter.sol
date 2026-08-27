@@ -86,6 +86,7 @@ contract CrossChainRouter is AccessControl, Pausable, ReentrancyGuard {
         uint256 completedAt;
         uint256 deadline;                // Recovery deadline
         bytes relayProof;                // Cryptographic proof of delivery
+        uint256 protocolFee;             // Fee split snapshotted and escrowed at initiation
     }
 
     /// @notice Registered relay node.
@@ -323,11 +324,9 @@ contract CrossChainRouter is AccessControl, Pausable, ReentrancyGuard {
         // Lock funds (principal + fee)
         IERC20(_sourceToken).safeTransferFrom(msg.sender, address(this), totalRequired);
 
-        // Send protocol portion of fee to treasury
+        // Snapshot the fee split but escrow the full fee until successful delivery.
+        // Failed or never-relayed transfers must not pay a success fee.
         uint256 protocolFee = (fee * protocolFeeBP) / 10_000;
-        if (protocolFee > 0) {
-            IERC20(_sourceToken).safeTransfer(treasury, protocolFee);
-        }
 
         transferId = keccak256(
             abi.encodePacked(msg.sender, _destinationChainId, _amount, block.timestamp, transferNonce++)
@@ -346,7 +345,8 @@ contract CrossChainRouter is AccessControl, Pausable, ReentrancyGuard {
             initiatedAt: block.timestamp,
             completedAt: 0,
             deadline: block.timestamp + chain.recoveryTimeout,
-            relayProof: ""
+            relayProof: "",
+            protocolFee: protocolFee
         });
 
         senderTransfers[msg.sender].push(transferId);
@@ -406,8 +406,11 @@ contract CrossChainRouter is AccessControl, Pausable, ReentrancyGuard {
         t.status = TransferStatus.COMPLETED;
         t.completedAt = block.timestamp;
 
-        // Pay relay fee (minus protocol portion already taken)
-        uint256 relayFee = t.fee - (t.fee * protocolFeeBP / 10_000);
+        // Release escrowed fees only after successful delivery.
+        uint256 relayFee = t.fee - t.protocolFee;
+        if (t.protocolFee > 0) {
+            IERC20(t.sourceToken).safeTransfer(treasury, t.protocolFee);
+        }
         if (relayFee > 0 && t.assignedRelay != address(0)) {
             IERC20(t.sourceToken).safeTransfer(t.assignedRelay, relayFee);
         }
@@ -478,13 +481,8 @@ contract CrossChainRouter is AccessControl, Pausable, ReentrancyGuard {
 
         t.status = TransferStatus.RECOVERED;
 
-        // Refund principal; also refund fee if the transfer was never relayed
-        uint256 refundAmount = t.amount;
-        if (originalStatus == TransferStatus.INITIATED) {
-            // If never relayed, refund fee too (minus protocol portion already sent)
-            uint256 protocolFee = (t.fee * protocolFeeBP) / 10_000;
-            refundAmount += t.fee - protocolFee;
-        }
+        // No delivery was confirmed, so return all escrowed principal and fees.
+        uint256 refundAmount = t.amount + t.fee;
 
         IERC20(t.sourceToken).safeTransfer(t.sender, refundAmount);
 

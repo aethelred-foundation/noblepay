@@ -29,6 +29,60 @@ import {
   Menu,
 } from "lucide-react";
 import { useApp } from "@/contexts/AppContext";
+import { WalletButton } from "@/components/WalletButton";
+
+function useDialogFocus(open: boolean, onClose: () => void) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const previousFocus = document.activeElement as HTMLElement | null;
+    const dialog = dialogRef.current;
+    const selector =
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    const focusable = () =>
+      Array.from(dialog?.querySelectorAll<HTMLElement>(selector) ?? []);
+
+    document.body.style.overflow = "hidden";
+    queueMicrotask(() => (focusable()[0] ?? dialog)?.focus());
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+        return;
+      }
+
+      if (event.key !== "Tab") return;
+      const items = focusable();
+      if (items.length === 0) {
+        event.preventDefault();
+        dialog?.focus();
+        return;
+      }
+
+      const first = items[0];
+      const last = items[items.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = "";
+      previousFocus?.focus();
+    };
+  }, [open, onClose]);
+
+  return dialogRef;
+}
 
 // ============================================================================
 // LiveDot
@@ -115,14 +169,8 @@ export function Modal({
   children,
   maxWidth = "max-w-lg",
 }: ModalProps) {
-  useEffect(() => {
-    if (open) {
-      document.body.style.overflow = "hidden";
-      return () => {
-        document.body.style.overflow = "";
-      };
-    }
-  }, [open]);
+  const dialogRef = useDialogFocus(open, onClose);
+  const titleId = React.useId();
 
   if (!open) return null;
 
@@ -134,11 +182,18 @@ export function Modal({
         onClick={onClose}
       />
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={`relative ${maxWidth} w-full bg-slate-900 border border-slate-700/50 rounded-2xl shadow-2xl`}
         style={{ animation: "modal-content-in 0.2s ease-out" }}
       >
         <div className="flex items-center justify-between px-6 py-4 border-b border-slate-700/50">
-          <h3 className="text-lg font-semibold text-white">{title}</h3>
+          <h3 id={titleId} className="text-lg font-semibold text-white">
+            {title}
+          </h3>
           <button
             onClick={onClose}
             className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
@@ -172,14 +227,8 @@ export function Drawer({
   children,
   width = "max-w-lg",
 }: DrawerProps) {
-  useEffect(() => {
-    if (open) {
-      document.body.style.overflow = "hidden";
-      return () => {
-        document.body.style.overflow = "";
-      };
-    }
-  }, [open]);
+  const dialogRef = useDialogFocus(open, onClose);
+  const titleId = React.useId();
 
   if (!open) return null;
 
@@ -191,11 +240,18 @@ export function Drawer({
         onClick={onClose}
       />
       <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
         className={`absolute right-0 top-0 h-full ${width} w-full bg-slate-900 border-l border-slate-700/50 shadow-2xl overflow-y-auto`}
         style={{ animation: "drawer-in 0.3s ease-out" }}
       >
         <div className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 border-b border-slate-700/50 bg-slate-900">
-          <h3 className="text-lg font-semibold text-white">{title}</h3>
+          <h3 id={titleId} className="text-lg font-semibold text-white">
+            {title}
+          </h3>
           <button
             onClick={onClose}
             className="p-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-white transition-colors"
@@ -400,50 +456,49 @@ export function SearchOverlay() {
 // TopNav
 // ============================================================================
 
-// Primary destinations stay visible; everything else lives under "More"
-// (mirrors Shiora's nav — 16 flat links overflowed the bar on smaller
-// viewports and buried the core payment flows).
-const PRIMARY_NAV_LINKS = [
+const NAV_LINKS = [
   { href: "/", label: "Dashboard" },
   { href: "/payments", label: "Payments" },
   { href: "/compliance", label: "Compliance" },
   { href: "/businesses", label: "Businesses" },
   { href: "/analytics", label: "Analytics" },
   { href: "/audit", label: "Audit" },
-];
-
-const MORE_NAV_LINKS = [
-  { href: "/treasury", label: "Treasury" },
-  { href: "/liquidity", label: "Liquidity" },
-  { href: "/streaming", label: "Streaming" },
-  { href: "/ai-compliance", label: "AI Compliance" },
   { href: "/risk-monitor", label: "Risk Monitor" },
-  { href: "/invoice-financing", label: "Invoice Financing" },
-  { href: "/fx-hedging", label: "FX Hedging" },
   { href: "/payment-channels", label: "Payment Channels" },
   { href: "/regulatory-reporting", label: "Regulatory" },
-  { href: "/cross-chain", label: "Cross-Chain" },
+  { href: "/settings", label: "Settings" },
 ];
+
+const PRIMARY_NAV_LINKS = NAV_LINKS.slice(0, 6);
+const OPERATIONS_NAV_LINKS = NAV_LINKS.slice(6);
 
 export function TopNav({ activePage }: { activePage?: string }) {
   const router = useRouter();
-  const { wallet, connectWallet, disconnectWallet } = useApp();
   const currentPath = activePage || router.pathname;
-  const [moreOpen, setMoreOpen] = useState(false);
-  const moreRef = useRef<HTMLDivElement>(null);
+  const [mobileOpen, setMobileOpen] = useState(false);
+  const [operationsOpen, setOperationsOpen] = useState(false);
+  const operationsRef = useRef<HTMLDivElement>(null);
+
+  const isActive = useCallback(
+    (href: string, label: string) =>
+      currentPath === href || currentPath === label.toLowerCase(),
+    [currentPath],
+  );
 
   useEffect(() => {
-    if (!moreOpen) return;
-    const onPointerDown = (e: MouseEvent) => {
-      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
-        setMoreOpen(false);
+    setMobileOpen(false);
+    setOperationsOpen(false);
+  }, [router.asPath]);
+
+  useEffect(() => {
+    const onPointerDown = (event: MouseEvent) => {
+      if (!operationsRef.current?.contains(event.target as Node)) {
+        setOperationsOpen(false);
       }
     };
     document.addEventListener("mousedown", onPointerDown);
     return () => document.removeEventListener("mousedown", onPointerDown);
-  }, [moreOpen]);
-
-  const moreActive = MORE_NAV_LINKS.some((link) => currentPath === link.href);
+  }, []);
 
   return (
     <nav className="sticky top-0 z-50 border-b border-slate-800 bg-slate-950/80 backdrop-blur-xl">
@@ -456,17 +511,15 @@ export function TopNav({ activePage }: { activePage?: string }) {
             <Shield className="h-6 w-6 text-red-500" />
             NoblePay
           </Link>
-          <div className="hidden md:flex items-center gap-1">
+          <div className="hidden lg:flex items-center gap-1">
             {PRIMARY_NAV_LINKS.map((link) => {
-              const isActive =
-                currentPath === link.href ||
-                currentPath === link.label.toLowerCase();
+              const active = isActive(link.href, link.label);
               return (
                 <Link
                   key={link.href}
                   href={link.href}
                   className={`px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                    isActive
+                    active
                       ? "bg-slate-800 text-white"
                       : "text-slate-400 hover:text-white hover:bg-slate-800/50"
                   }`}
@@ -475,69 +528,83 @@ export function TopNav({ activePage }: { activePage?: string }) {
                 </Link>
               );
             })}
-            <div className="relative" ref={moreRef}>
+            <div ref={operationsRef} className="relative">
               <button
-                onClick={() => setMoreOpen((v) => !v)}
-                aria-expanded={moreOpen}
+                type="button"
+                onClick={() => setOperationsOpen((value) => !value)}
                 aria-haspopup="menu"
+                aria-expanded={operationsOpen}
                 className={`inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-                  moreActive || moreOpen
+                  OPERATIONS_NAV_LINKS.some((link) =>
+                    isActive(link.href, link.label),
+                  )
                     ? "bg-slate-800 text-white"
                     : "text-slate-400 hover:text-white hover:bg-slate-800/50"
                 }`}
               >
-                More
-                <ChevronDown
-                  className={`h-4 w-4 transition-transform ${moreOpen ? "rotate-180" : ""}`}
-                />
+                Operations
+                <ChevronDown className="h-4 w-4" aria-hidden="true" />
               </button>
-              {moreOpen && (
+              {operationsOpen && (
                 <div
                   role="menu"
-                  className="absolute left-0 top-full mt-2 w-56 rounded-xl border border-slate-700/60 bg-slate-900 py-2 shadow-2xl"
+                  className="absolute left-0 top-full mt-2 grid w-[34rem] grid-cols-2 gap-1 rounded-xl border border-slate-700 bg-slate-900 p-2 shadow-2xl"
                 >
-                  {MORE_NAV_LINKS.map((link) => {
-                    const isActive = currentPath === link.href;
-                    return (
-                      <Link
-                        key={link.href}
-                        href={link.href}
-                        role="menuitem"
-                        onClick={() => setMoreOpen(false)}
-                        className={`block px-4 py-2 text-sm transition-colors ${
-                          isActive
-                            ? "bg-slate-800 text-white"
-                            : "text-slate-300 hover:bg-slate-800/60 hover:text-white"
-                        }`}
-                      >
-                        {link.label}
-                      </Link>
-                    );
-                  })}
+                  {OPERATIONS_NAV_LINKS.map((link) => (
+                    <Link
+                      key={link.href}
+                      href={link.href}
+                      role="menuitem"
+                      className={`rounded-lg px-3 py-2 text-sm transition-colors ${
+                        isActive(link.href, link.label)
+                          ? "bg-slate-800 text-white"
+                          : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                      }`}
+                    >
+                      {link.label}
+                    </Link>
+                  ))}
                 </div>
               )}
             </div>
           </div>
         </div>
         <div className="flex items-center gap-3">
-          {wallet.connected ? (
-            <button
-              onClick={disconnectWallet}
-              className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-300 hover:border-slate-500 transition-colors"
-            >
-              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              {wallet.address.slice(0, 8)}...{wallet.address.slice(-4)}
-            </button>
-          ) : (
-            <button
-              onClick={connectWallet}
-              className="inline-flex items-center gap-2 rounded-lg bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-700 transition-colors"
-            >
-              Connect Wallet
-            </button>
-          )}
+          <WalletButton />
+          <button
+            type="button"
+            onClick={() => setMobileOpen((value) => !value)}
+            aria-label="Toggle navigation"
+            aria-expanded={mobileOpen}
+            className="inline-flex rounded-lg border border-slate-700 p-2 text-slate-300 hover:bg-slate-800 lg:hidden"
+          >
+            {mobileOpen ? (
+              <X className="h-5 w-5" />
+            ) : (
+              <Menu className="h-5 w-5" />
+            )}
+          </button>
         </div>
       </div>
+      {mobileOpen && (
+        <div className="max-h-[calc(100vh-4rem)] overflow-y-auto border-t border-slate-800 px-4 py-3 lg:hidden">
+          <div className="mx-auto grid max-w-7xl gap-1 sm:grid-cols-2">
+            {NAV_LINKS.map((link) => (
+              <Link
+                key={link.href}
+                href={link.href}
+                className={`rounded-lg px-3 py-2 text-sm font-medium transition-colors ${
+                  isActive(link.href, link.label)
+                    ? "bg-slate-800 text-white"
+                    : "text-slate-300 hover:bg-slate-800 hover:text-white"
+                }`}
+              >
+                {link.label}
+              </Link>
+            ))}
+          </div>
+        </div>
+      )}
     </nav>
   );
 }

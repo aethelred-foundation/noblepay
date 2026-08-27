@@ -13,18 +13,44 @@ import (
 
 // fileData is the on-disk JSON structure.
 type fileData struct {
-	Payments map[string]*models.Payment            `json:"payments"`
-	Order    []string                              `json:"order"`
-	Events   map[string][]*models.BlockchainEvent  `json:"events"`
+	Payments         map[string]*models.Payment           `json:"payments"`
+	Order            []string                             `json:"order"`
+	Events           map[string][]*models.BlockchainEvent `json:"events"`
+	IndexerBlock     *uint64                              `json:"indexer_block,omitempty"`
+	IndexerBlockHash string                               `json:"indexer_block_hash,omitempty"`
+}
+
+func (s *FileStore) LoadIndexerCheckpoint(_ context.Context) (IndexerCheckpoint, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.data.IndexerBlock == nil {
+		return IndexerCheckpoint{}, false, nil
+	}
+	return IndexerCheckpoint{Height: *s.data.IndexerBlock, BlockHash: s.data.IndexerBlockHash}, true, nil
+}
+
+func (s *FileStore) SaveIndexerCheckpoint(_ context.Context, checkpoint IndexerCheckpoint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	next := cloneFileData(s.data)
+	value := checkpoint.Height
+	next.IndexerBlock = &value
+	next.IndexerBlockHash = checkpoint.BlockHash
+	if err := s.persist(next); err != nil {
+		return err
+	}
+	s.data = next
+	return nil
 }
 
 // FileStore is a file-backed durable implementation of PaymentStore and EventStore.
 // It writes the full state to a JSON file using atomic rename (write-ahead)
 // before returning success from any mutating operation.
 type FileStore struct {
-	mu   sync.RWMutex
-	path string
-	data fileData
+	mu            sync.RWMutex
+	path          string
+	data          fileData
+	flushOverride func(fileData) error
 }
 
 // NewFileStore creates a new file-backed store. If the file already exists
@@ -62,8 +88,8 @@ func NewFileStore(path string) (*FileStore, error) {
 
 // flush writes the current state to disk atomically: write to a temp file
 // in the same directory, then rename over the target path.
-func (s *FileStore) flush() error {
-	raw, err := json.MarshalIndent(s.data, "", "  ")
+func (s *FileStore) flush(data fileData) error {
+	raw, err := json.MarshalIndent(data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("file store: marshal: %w", err)
 	}
@@ -94,20 +120,34 @@ func (s *FileStore) flush() error {
 		os.Remove(tmpName)
 		return fmt.Errorf("file store: rename: %w", err)
 	}
+	directory, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("file store: open parent directory: %w", err)
+	}
+	defer directory.Close()
+	if err := directory.Sync(); err != nil {
+		return fmt.Errorf("file store: sync parent directory: %w", err)
+	}
 	return nil
+}
+
+func (s *FileStore) persist(data fileData) error {
+	if s.flushOverride != nil {
+		return s.flushOverride(data)
+	}
+	return s.flush(data)
 }
 
 func (s *FileStore) Create(_ context.Context, payment *models.Payment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.Payments[payment.ID] = payment
-	s.data.Order = append(s.data.Order, payment.ID)
-	if err := s.flush(); err != nil {
-		// Roll back in-memory state on flush failure.
-		delete(s.data.Payments, payment.ID)
-		s.data.Order = s.data.Order[:len(s.data.Order)-1]
+	next := cloneFileData(s.data)
+	next.Payments[payment.ID] = clonePayment(payment)
+	next.Order = append(next.Order, payment.ID)
+	if err := s.persist(next); err != nil {
 		return err
 	}
+	s.data = next
 	return nil
 }
 
@@ -118,7 +158,7 @@ func (s *FileStore) GetByID(_ context.Context, id string) (*models.Payment, erro
 	if !ok {
 		return nil, models.ErrPaymentNotFound
 	}
-	return p, nil
+	return clonePayment(p), nil
 }
 
 func (s *FileStore) List(_ context.Context, limit, offset int) ([]*models.Payment, error) {
@@ -136,7 +176,7 @@ func (s *FileStore) List(_ context.Context, limit, offset int) ([]*models.Paymen
 
 	result := make([]*models.Payment, 0, end-offset)
 	for _, id := range s.data.Order[offset:end] {
-		result = append(result, s.data.Payments[id])
+		result = append(result, clonePayment(s.data.Payments[id]))
 	}
 	return result, nil
 }
@@ -144,33 +184,136 @@ func (s *FileStore) List(_ context.Context, limit, offset int) ([]*models.Paymen
 func (s *FileStore) Update(_ context.Context, payment *models.Payment) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	prev, ok := s.data.Payments[payment.ID]
+	_, ok := s.data.Payments[payment.ID]
 	if !ok {
 		return models.ErrPaymentNotFound
 	}
-	s.data.Payments[payment.ID] = payment
-	if err := s.flush(); err != nil {
-		s.data.Payments[payment.ID] = prev
+	next := cloneFileData(s.data)
+	next.Payments[payment.ID] = clonePayment(payment)
+	if err := s.persist(next); err != nil {
 		return err
 	}
+	s.data = next
 	return nil
 }
 
 func (s *FileStore) SaveEvent(_ context.Context, event *models.BlockchainEvent) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.data.Events[event.PaymentID] = append(s.data.Events[event.PaymentID], event)
-	if err := s.flush(); err != nil {
-		// Roll back.
-		evts := s.data.Events[event.PaymentID]
-		s.data.Events[event.PaymentID] = evts[:len(evts)-1]
+	for _, existing := range s.data.Events[event.PaymentID] {
+		if sameEvent(existing, event) {
+			return nil
+		}
+	}
+	next := cloneFileData(s.data)
+	next.Events[event.PaymentID] = append(next.Events[event.PaymentID], cloneEvent(event))
+	if err := s.persist(next); err != nil {
 		return err
 	}
+	s.data = next
+	return nil
+}
+
+// ApplyChainEvent atomically appends a canonical log and updates the durable
+// payment read model. A crash can therefore never expose a lifecycle event
+// without its corresponding payment state (or the inverse).
+func (s *FileStore) ApplyChainEvent(_ context.Context, event *models.BlockchainEvent) error {
+	if event == nil {
+		return fmt.Errorf("chain projection: nil event")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for _, paymentEvents := range s.data.Events {
+		for _, existingEvent := range paymentEvents {
+			if sameCanonicalLog(existingEvent, event) {
+				if equivalentCanonicalEvent(existingEvent, event) {
+					return nil
+				}
+				return fmt.Errorf("chain projection: canonical log identity collision")
+			}
+		}
+	}
+
+	projected, created, err := projectPayment(s.data.Payments[event.PaymentID], event)
+	if err != nil {
+		return err
+	}
+	next := cloneFileData(s.data)
+	next.Payments[event.PaymentID] = clonePayment(projected)
+	if created {
+		next.Order = append(next.Order, event.PaymentID)
+	}
+	next.Events[event.PaymentID] = append(next.Events[event.PaymentID], cloneEvent(event))
+	if err := s.persist(next); err != nil {
+		return err
+	}
+	s.data = next
+	return nil
+}
+
+// ApplyConfirmedChainRange persists every projection in a confirmed block
+// range and the corresponding checkpoint in one atomic file replacement. The
+// live in-memory state is swapped only after that durable write succeeds.
+func (s *FileStore) ApplyConfirmedChainRange(ctx context.Context, confirmedRange ConfirmedChainRange) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := cloneFileData(s.data)
+	var existingCheckpoint *IndexerCheckpoint
+	if s.data.IndexerBlock != nil {
+		existingCheckpoint = &IndexerCheckpoint{
+			Height:    *s.data.IndexerBlock,
+			BlockHash: s.data.IndexerBlockHash,
+		}
+	}
+	if err := projectConfirmedChainRange(
+		next.Payments,
+		&next.Order,
+		next.Events,
+		existingCheckpoint,
+		confirmedRange,
+	); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	checkpointHeight := confirmedRange.Checkpoint.Height
+	next.IndexerBlock = &checkpointHeight
+	next.IndexerBlockHash = confirmedRange.Checkpoint.BlockHash
+	if err := s.persist(next); err != nil {
+		return err
+	}
+	s.data = next
 	return nil
 }
 
 func (s *FileStore) GetEventsByPayment(_ context.Context, paymentID string) ([]*models.BlockchainEvent, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.data.Events[paymentID], nil
+	events := s.data.Events[paymentID]
+	result := make([]*models.BlockchainEvent, len(events))
+	for i, event := range events {
+		result[i] = cloneEvent(event)
+	}
+	return result, nil
+}
+
+func cloneFileData(data fileData) fileData {
+	copy := fileData{
+		Payments:         clonePayments(data.Payments),
+		Order:            append([]string(nil), data.Order...),
+		Events:           cloneEvents(data.Events),
+		IndexerBlockHash: data.IndexerBlockHash,
+	}
+	if data.IndexerBlock != nil {
+		height := *data.IndexerBlock
+		copy.IndexerBlock = &height
+	}
+	return copy
 }

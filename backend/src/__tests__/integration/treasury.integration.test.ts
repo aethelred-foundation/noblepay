@@ -1,3 +1,10 @@
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 1,
+  }),
+}));
+
 /**
  * Treasury Route Integration Tests
  *
@@ -23,8 +30,6 @@ jest.mock("../../lib/logger", () => ({
   logger: mockLogger,
   generateCorrelationId: jest.fn().mockReturnValue("int-test-corr-id"),
   createRequestLogger: jest.fn().mockReturnValue(mockLogger),
-  maskIdentifier: jest.fn((value?: string | null) => value ?? undefined),
-  maskTransactionHash: jest.fn((value?: string | null) => value ?? undefined),
 }));
 
 jest.mock("../../lib/metrics", () => ({
@@ -36,7 +41,6 @@ jest.mock("../../lib/metrics", () => ({
   activeBusinesses: { set: jest.fn() },
   httpRequestDuration: { observe: jest.fn() },
   httpRequestTotal: { inc: jest.fn() },
-  teeNodesActive: { set: jest.fn() },
   teeAttestationFailures: { inc: jest.fn() },
   register: { metrics: jest.fn() },
 }));
@@ -76,7 +80,27 @@ const mockPrisma: any = {
 
 jest.mock("@prisma/client", () => ({
   PrismaClient: jest.fn(() => mockPrisma),
-  BusinessTier: { STARTER: "STARTER", STANDARD: "STANDARD", ENTERPRISE: "ENTERPRISE", INSTITUTIONAL: "INSTITUTIONAL" },
+  BusinessTier: {
+    STARTER: "STARTER",
+    STANDARD: "STANDARD",
+    ENTERPRISE: "ENTERPRISE",
+    INSTITUTIONAL: "INSTITUTIONAL",
+  },
+}));
+
+jest.mock("../../lib/business-registry-authorization", () => ({
+  getCurrentBusinessRegistryAuthorization: jest.fn(async (address: string) => ({
+    wallet: address,
+    status: "VERIFIED",
+    tier: "STANDARD",
+    active: true,
+    isAdmin: false,
+    registeredAt: 1n,
+    lastVerified: 1n,
+    expiresAt: 2n,
+    blockNumber: 100,
+    blockHash: `0x${"ab".repeat(32)}`,
+  })),
 }));
 
 // ─── Mock only services, NOT auth/rbac ──────────────────────────────────────
@@ -110,6 +134,7 @@ jest.mock("../../services/audit", () => ({
 import express from "express";
 import request from "supertest";
 import jwt from "jsonwebtoken";
+import { getAddress } from "ethers";
 import { generateJWT } from "../../middleware/auth";
 import treasuryRouter from "../../routes/treasury";
 
@@ -140,12 +165,23 @@ function makeExpiredJWT(businessId: string, role: string): string {
   );
 }
 
-function makeJWT(
-  businessId: string,
-  role: string,
-  userId?: string,
-): string {
-  return generateJWT(businessId, "STANDARD" as any, role, userId);
+function makeJWT(businessId: string, role: string, userId?: string): string {
+  void userId;
+  return generateJWT(
+    businessId,
+    "STANDARD" as any,
+    role,
+    walletForBusiness(businessId),
+  );
+}
+
+function walletForBusiness(businessId: string): string {
+  return getAddress(
+    `0x${Buffer.from(businessId)
+      .toString("hex")
+      .slice(0, 40)
+      .padEnd(40, "0")}`,
+  );
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -160,6 +196,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockPrisma.business.findUnique.mockImplementation(
+      ({ where }: { where: { id: string } }) => ({
+        id: where.id,
+        address: walletForBusiness(where.id),
+      }),
+    );
     // Default service stubs so routes don't blow up when auth passes
     mockTreasuryService.getOverview.mockResolvedValue({
       totalAUM: "38700000",
@@ -207,7 +249,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
     it("should return 401 when JWT is signed with wrong secret", async () => {
       const badToken = jwt.sign(
-        { sub: "user:biz-1:bad", businessId: "biz-1", tier: "STANDARD", role: "ADMIN" },
+        {
+          sub: "user:biz-1:bad",
+          businessId: "biz-1",
+          tier: "STANDARD",
+          role: "ADMIN",
+        },
         "wrong-secret-key",
         { expiresIn: "1h" },
       );
@@ -250,7 +297,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
       const res = await request(app)
         .post("/v1/treasury/proposals")
         .set("Authorization", `Bearer ${token}`)
-        .send({ title: "Test", description: "Nope", type: "TRANSFER", amount: "100" });
+        .send({
+          title: "Test",
+          description: "Nope",
+          type: "TRANSFER",
+          amount: "100",
+        });
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe("FORBIDDEN");
@@ -272,6 +324,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-1/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(403);
@@ -338,6 +396,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-tenant-a/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${tokenTenantB}`);
 
       expect(res.status).toBe(403);
@@ -380,6 +444,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-pending/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(409);
@@ -399,6 +469,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-underapproved/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(409);
@@ -421,7 +497,10 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-1/approve")
-        .set("Authorization", "Bearer npk_0000000000000000000000000000000000000000000000000000000000000000");
+        .set(
+          "Authorization",
+          "Bearer npk_0000000000000000000000000000000000000000000000000000000000000000",
+        );
 
       expect(res.status).toBe(401);
       expect(res.body.error).toBe("UNAUTHORIZED");
@@ -449,8 +528,9 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
         .send({
           title: "Q2 Budget",
           description: "Allocate Q2 operational budget",
-          type: "BUDGET_ALLOCATION",
+          type: "POLICY_CHANGE",
           amount: "5000",
+          currency: "USDC",
           category: "OPERATIONS",
         });
 
@@ -462,8 +542,8 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
       // Verify the service was called with the correct businessId from JWT
       expect(mockTreasuryService.createProposal).toHaveBeenCalledWith(
         expect.objectContaining({ title: "Q2 Budget" }),
-        "biz-happy",  // businessId from JWT passed as proposer
-        "biz-happy",  // businessId from JWT
+        walletForBusiness("biz-happy"),
+        "biz-happy", // businessId from JWT
       );
     });
 
@@ -478,14 +558,22 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
       const res = await request(app)
         .post("/v1/treasury/proposals")
         .set("Authorization", `Bearer ${token}`)
-        .send({ title: "Transfer", description: "Move funds", type: "TRANSFER", amount: "1000" });
+        .send({
+          title: "Transfer",
+          description: "Move funds",
+          type: "TRANSFER",
+          amount: "1000",
+          currency: "USDC",
+          category: "OPERATIONS",
+          recipient: "0x2222222222222222222222222222222222222222",
+        });
 
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
     });
 
     it("ADMIN can approve a proposal and signerId flows through", async () => {
-      const signerId = "admin-approver-1";
+      const signerId = walletForBusiness("biz-happy");
       const token = makeJWT("biz-happy", "ADMIN", signerId);
 
       mockTreasuryService.approveProposal.mockResolvedValue({
@@ -505,13 +593,13 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
       // Verify signerId from JWT sub was passed to the service
       expect(mockTreasuryService.approveProposal).toHaveBeenCalledWith(
         "prop-happy-1",
-        signerId,       // signerId derived from JWT sub
-        "biz-happy",    // businessId from JWT
+        signerId, // signerId derived from JWT sub
+        "biz-happy", // businessId from JWT
       );
     });
 
     it("second ADMIN approval moves proposal to APPROVED", async () => {
-      const signerId = "admin-approver-2";
+      const signerId = walletForBusiness("biz-happy");
       const token = makeJWT("biz-happy", "ADMIN", signerId);
 
       mockTreasuryService.approveProposal.mockResolvedValue({
@@ -539,6 +627,12 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       const res = await request(app)
         .post("/v1/treasury/proposals/prop-happy-1/execute")
+        .send({
+      txHash:
+        "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+      onChainProposalId:
+        "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+    })
         .set("Authorization", `Bearer ${token}`);
 
       expect(res.status).toBe(200);
@@ -548,8 +642,16 @@ describe("Treasury Integration Tests (real auth/rbac)", () => {
 
       expect(mockTreasuryService.executeProposal).toHaveBeenCalledWith(
         "prop-happy-1",
-        "admin-executor-1",
+        walletForBusiness("biz-happy"),
         "biz-happy",
+        // The reported settlement, forwarded verbatim for verification.
+        {
+          txHash:
+            "0xc62faafeb160571853128e25efc65388ca483c22504742b7b455dfcc8ade5faa",
+          onChainProposalId:
+            "0xb0e5549ef29f19213987c37c736b4955892f71e833ef1379f5306e02a77ebe6e",
+        },
+        expect.objectContaining({ minimumConfirmations: expect.any(Number) }),
       );
     });
   });

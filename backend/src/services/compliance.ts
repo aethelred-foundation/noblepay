@@ -1,31 +1,62 @@
-import { PrismaClient, ComplianceStatus, PaymentStatus, Prisma } from "@prisma/client";
-import { v4 as uuidv4 } from "uuid";
-import crypto from "crypto";
+import {
+  PrismaClient,
+  ComplianceStatus,
+  PaymentStatus,
+  Prisma,
+  Payment,
+  ComplianceSubmissionIntent,
+} from "@prisma/client";
 import { logger } from "../lib/logger";
-import { screeningDuration, compliancePassRate, flaggedPayments } from "../lib/metrics";
+import {
+  screeningDuration,
+  compliancePassRate,
+  flaggedPayments,
+} from "../lib/metrics";
 import { AuditService } from "./audit";
+import {
+  configuredSanctionsMaxAgeMs,
+  decimalToSmallestUnits,
+  loadNoblePayChainConfiguration,
+  parseExternalComplianceUrl,
+  tokenForCurrency,
+} from "../lib/production-config";
+import {
+  ComplianceSubmissionVerifier,
+  ComplianceVerificationError,
+  EthersComplianceSubmissionVerifier,
+  VerifiedComplianceSubmission,
+} from "./compliance-chain";
+import { readBoundedJsonResponse } from "../lib/bounded-response";
+import { AuthorizedTravelRulePayload, TravelRuleService } from "./travel-rule";
 
-const COMPLIANCE_SERVICE_URL = process.env.COMPLIANCE_SERVICE_URL || null;
+function complianceServiceUrl(): string | null {
+  if (!process.env.COMPLIANCE_API_URL) return null;
+  try {
+    return parseExternalComplianceUrl(process.env.COMPLIANCE_API_URL).origin;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Map Rust compliance engine status values (Passed/Flagged/Blocked) to
  * Prisma ComplianceStatus enum values (PENDING/PASSED/FAILED/UNDER_REVIEW/ESCALATED).
  * Also accepts already-mapped Prisma values for idempotency.
  */
-function mapComplianceStatus(rustStatus: string): ComplianceStatus {
+function mapComplianceStatus(rustStatus: string): ComplianceStatus | null {
   const mapping: Record<string, ComplianceStatus> = {
     // Rust enum variants -> Prisma ComplianceStatus
-    'Passed': 'PASSED' as ComplianceStatus,
-    'Flagged': 'UNDER_REVIEW' as ComplianceStatus,
-    'Blocked': 'FAILED' as ComplianceStatus,
+    Passed: "PASSED" as ComplianceStatus,
+    Flagged: "UNDER_REVIEW" as ComplianceStatus,
+    Blocked: "FAILED" as ComplianceStatus,
     // Already-mapped Prisma values (idempotent passthrough)
-    'PENDING': 'PENDING' as ComplianceStatus,
-    'PASSED': 'PASSED' as ComplianceStatus,
-    'FAILED': 'FAILED' as ComplianceStatus,
-    'UNDER_REVIEW': 'UNDER_REVIEW' as ComplianceStatus,
-    'ESCALATED': 'ESCALATED' as ComplianceStatus,
+    PENDING: "PENDING" as ComplianceStatus,
+    PASSED: "PASSED" as ComplianceStatus,
+    FAILED: "FAILED" as ComplianceStatus,
+    UNDER_REVIEW: "UNDER_REVIEW" as ComplianceStatus,
+    ESCALATED: "ESCALATED" as ComplianceStatus,
   };
-  return mapping[rustStatus] || ('FAILED' as ComplianceStatus);
+  return mapping[rustStatus] || null;
 }
 
 export interface ScreeningRequest {
@@ -43,6 +74,9 @@ export interface ScreeningResult {
   flagReason: string | null;
   screenedBy: string;
   screeningDuration: number;
+  submissionTxHash: string;
+  submissionBlockNumber: string;
+  confirmations: number;
 }
 
 export interface ComplianceMetrics {
@@ -57,30 +91,148 @@ export interface ComplianceMetrics {
 }
 
 export interface SanctionsStatus {
-  lastUpdated: Date | null;
+  lastUpdated: Date;
   listsLoaded: string[];
   totalEntries: number;
-  status: "fresh" | "stale" | "updating";
+  status: "fresh";
+  source: string;
+  datasetGeneratedAt: Date;
+  datasetDigest: string;
 }
 
-// Simulated sanctions last update
-let sanctionsLastUpdated: Date | null = null;
-let sanctionsUpdating = false;
+interface VerifiedScreeningEvidence {
+  requestId: string;
+  sanctionsClear: boolean;
+  amlRiskScore: number;
+  travelRuleCompliant: boolean;
+  status: ComplianceStatus;
+  flagReason: string | null;
+  investigationHash: string;
+  attestation: string;
+  screeningDuration: number;
+  verified: VerifiedComplianceSubmission;
+  travelRuleRequired: boolean;
+  travelRuleRecordId: string | null;
+  travelRulePayloadCommitment: string | null;
+}
+
+const REQUIRED_SANCTIONS_LISTS = [
+  "OFAC",
+  "UAE Central Bank",
+  "UN",
+  "EU",
+] as const;
+
+/** Validate the exact health metadata emitted by the Rust compliance service. */
+export function validateSanctionsMetadata(
+  payload: Record<string, unknown>,
+  now = Date.now(),
+  maxAgeMs = configuredSanctionsMaxAgeMs(),
+): SanctionsStatus {
+  const totalEntries = payload.total_entries;
+  const lastUpdatedValues = payload.last_updated;
+  const source = payload.source;
+  const generatedAtValue = payload.dataset_generated_at;
+  const datasetDigest = payload.dataset_digest;
+  if (
+    typeof totalEntries !== "number" ||
+    !Number.isSafeInteger(totalEntries) ||
+    totalEntries <= 0 ||
+    !lastUpdatedValues ||
+    typeof lastUpdatedValues !== "object" ||
+    Array.isArray(lastUpdatedValues) ||
+    typeof source !== "string" ||
+    !source.trim() ||
+    /(?:mock|test|fixture)/i.test(source) ||
+    typeof generatedAtValue !== "string" ||
+    typeof datasetDigest !== "string" ||
+    !/^(?:sha256:)?[a-fA-F0-9]{64}$/.test(datasetDigest)
+  ) {
+    throw new ComplianceError(
+      "SANCTIONS_DATASET_INVALID",
+      "Sanctions service returned incomplete or non-production dataset metadata",
+      503,
+    );
+  }
+
+  const timestamps = lastUpdatedValues as Record<string, unknown>;
+  const parsedListDates = REQUIRED_SANCTIONS_LISTS.map((list) => {
+    const raw = timestamps[list];
+    if (typeof raw !== "string") {
+      throw new ComplianceError(
+        "SANCTIONS_DATASET_INVALID",
+        `Sanctions service is missing ${list} freshness metadata`,
+        503,
+      );
+    }
+    const parsed = new Date(raw);
+    if (
+      Number.isNaN(parsed.getTime()) ||
+      parsed.getTime() > now + 5 * 60 * 1000 ||
+      now - parsed.getTime() > maxAgeMs
+    ) {
+      throw new ComplianceError(
+        "SANCTIONS_DATASET_STALE",
+        `${list} sanctions data is stale`,
+        503,
+      );
+    }
+
+    return parsed;
+  });
+  const datasetGeneratedAt = new Date(generatedAtValue);
+  if (
+    Number.isNaN(datasetGeneratedAt.getTime()) ||
+    datasetGeneratedAt.getTime() > now + 5 * 60 * 1000 ||
+    now - datasetGeneratedAt.getTime() > maxAgeMs
+  ) {
+    throw new ComplianceError(
+      "SANCTIONS_DATASET_STALE",
+      "Sanctions dataset generation timestamp is stale",
+      503,
+    );
+  }
+
+  return {
+    lastUpdated: new Date(
+      Math.min(...parsedListDates.map((value) => value.getTime())),
+    ),
+    listsLoaded: [...REQUIRED_SANCTIONS_LISTS],
+    totalEntries,
+    status: "fresh",
+    source: source.trim(),
+    datasetGeneratedAt,
+    datasetDigest: datasetDigest.toLowerCase(),
+  };
+}
 
 export class ComplianceService {
+  private readonly submissionVerifier: ComplianceSubmissionVerifier;
+  private readonly travelRuleService: TravelRuleService;
+
   constructor(
     private prisma: PrismaClient,
     private auditService: AuditService,
-  ) {}
+    submissionVerifier?: ComplianceSubmissionVerifier,
+    travelRuleService?: TravelRuleService,
+  ) {
+    this.submissionVerifier =
+      submissionVerifier || new EthersComplianceSubmissionVerifier();
+    this.travelRuleService =
+      travelRuleService || new TravelRuleService(this.prisma);
+  }
 
   /**
    * Submit a payment for compliance screening via TEE compliance engine.
    */
-  async submitForScreening(request: ScreeningRequest): Promise<ScreeningResult> {
+  async submitForScreening(
+    request: ScreeningRequest,
+    businessId = "__unauthenticated__",
+  ): Promise<ScreeningResult> {
     const startTime = Date.now();
 
-    const payment = await this.prisma.payment.findUnique({
-      where: { id: request.paymentId },
+    const payment = await this.prisma.payment.findFirst({
+      where: { id: request.paymentId, businessId },
     });
 
     if (!payment) {
@@ -88,6 +240,42 @@ export class ComplianceService {
     }
 
     if (payment.status !== "PENDING") {
+      const [existing, completedIntent] = await Promise.all([
+        this.prisma.complianceScreening.findFirst({
+          where: {
+            paymentId: payment.paymentId,
+            payment: { businessId },
+            submissionTxHash: { not: null },
+          },
+          orderBy: { createdAt: "desc" },
+        }),
+        this.prisma.complianceSubmissionIntent.findUnique({
+          where: { paymentId: payment.id },
+        }),
+      ]);
+      if (
+        existing?.submissionTxHash &&
+        existing.submissionBlockNumber !== null
+      ) {
+        return {
+          id: existing.id,
+          paymentId: payment.paymentId,
+          sanctionsClear: existing.sanctionsClear,
+          amlRiskScore: existing.amlRiskScore,
+          travelRuleCompliant: existing.travelRuleCompliant,
+          status: existing.status,
+          flagReason: existing.flagReason,
+          screenedBy: existing.screenedBy,
+          screeningDuration: existing.screeningDuration,
+          submissionTxHash: existing.submissionTxHash,
+          submissionBlockNumber: existing.submissionBlockNumber.toString(),
+          confirmations:
+            completedIntent?.submissionTxHash?.toLowerCase() ===
+            existing.submissionTxHash.toLowerCase()
+              ? (completedIntent.confirmations ?? 0)
+              : 0,
+        };
+      }
       throw new ComplianceError(
         "INVALID_STATE",
         `Payment is in ${payment.status} state, expected PENDING`,
@@ -95,33 +283,55 @@ export class ComplianceService {
       );
     }
 
-    // Update payment status to SCREENING
-    await this.prisma.payment.update({
-      where: { id: payment.id },
-      data: { status: "SCREENING" },
+    // Configuration validation is local and may fail before an intent is
+    // needed. The durable intent is still guaranteed to exist before the
+    // first request crosses into the external operator.
+    if (!complianceServiceUrl() || !process.env.COMPLIANCE_API_KEY) {
+      throw new ComplianceError(
+        "COMPLIANCE_SUBMISSION_NOT_CONFIGURED",
+        "The audited compliance submission service is not configured",
+        501,
+      );
+    }
+
+    // Persist the deterministic request before crossing the external trust
+    // boundary. A retry always reuses the payment DB UUID, allowing the
+    // operator to replay its original transaction instead of submitting again.
+    const intent = await this.prisma.complianceSubmissionIntent.upsert({
+      where: { paymentId: payment.id },
+      create: { paymentId: payment.id, requestId: payment.id },
+      update: {},
     });
+    if (intent.requestId !== payment.id) {
+      throw new ComplianceError(
+        "COMPLIANCE_INTENT_CORRUPT",
+        "Compliance request identity does not match the payment",
+        503,
+      );
+    }
 
-    // Simulate TEE compliance engine screening
-    const teeNodeAddress = await this.getActiveTEENode();
-    const screeningResult = await this.performTEEScreening(payment, teeNodeAddress);
-    const elapsed = Date.now() - startTime;
+    let screeningResult: VerifiedScreeningEvidence;
+    if (intent.state === "PENDING") {
+      const submitted = await this.requestVerifiedComplianceSubmission(
+        payment,
+        intent.requestId,
+      );
+      screeningResult = await this.persistVerifiedComplianceEvidence(payment, {
+        ...submitted,
+        screeningDuration: Date.now() - startTime,
+      });
+    } else {
+      screeningResult = await this.recoverVerifiedComplianceEvidence(
+        payment,
+        intent,
+      );
+    }
+    screeningResult = await this.revalidateComplianceEvidence(
+      payment,
+      screeningResult,
+    );
+    const elapsed = screeningResult.screeningDuration;
 
-    // Store screening result
-    const screening = await this.prisma.complianceScreening.create({
-      data: {
-        paymentId: payment.paymentId,
-        sanctionsClear: screeningResult.sanctionsClear,
-        amlRiskScore: screeningResult.amlRiskScore,
-        travelRuleCompliant: screeningResult.travelRuleCompliant,
-        status: screeningResult.status,
-        flagReason: screeningResult.flagReason,
-        investigationHash: screeningResult.investigationHash,
-        screenedBy: teeNodeAddress,
-        screeningDuration: elapsed,
-      },
-    });
-
-    // Determine new payment status based on screening result
     let newStatus: PaymentStatus;
     if (screeningResult.status === "PASSED") {
       newStatus = "APPROVED";
@@ -131,52 +341,133 @@ export class ComplianceService {
       newStatus = "FLAGGED";
     }
 
-    // Update payment
-    await this.prisma.payment.update({
-      where: { id: payment.id },
-      data: {
-        status: newStatus,
-        riskScore: screeningResult.amlRiskScore,
-        teeAttestation: COMPLIANCE_SERVICE_URL
-          ? screeningResult.investigationHash || `0x${crypto.createHash("sha256").update(`${payment.paymentId}:${teeNodeAddress}:${Date.now()}`).digest("hex")}`
-          : `0x${crypto.createHash("sha256").update(`${payment.paymentId}:${teeNodeAddress}:${Date.now()}`).digest("hex")}`,
-        screenedAt: new Date(),
+    const screening = await this.prisma.$transaction(
+      async (transaction) => {
+        const current = await transaction.payment.findFirst({
+          where: { id: payment.id, businessId, status: "PENDING" },
+        });
+        if (!current) {
+          const replay = await transaction.complianceScreening.findUnique({
+            where: { submissionTxHash: screeningResult.verified.txHash },
+          });
+          if (replay) {
+            await transaction.complianceSubmissionIntent.updateMany({
+              where: {
+                paymentId: payment.id,
+                submissionTxHash: screeningResult.verified.txHash,
+              },
+              data: { state: "COMPLETED", completedAt: new Date() },
+            });
+            return replay;
+          }
+          throw new ComplianceError(
+            "PAYMENT_STATE_CHANGED",
+            "Payment state changed during screening",
+            409,
+          );
+        }
+
+        const created = await transaction.complianceScreening.create({
+          data: {
+            paymentId: payment.paymentId,
+            sanctionsClear: screeningResult.sanctionsClear,
+            amlRiskScore: screeningResult.amlRiskScore,
+            travelRuleCompliant: screeningResult.travelRuleCompliant,
+            status: screeningResult.status,
+            flagReason: screeningResult.flagReason,
+            investigationHash: screeningResult.investigationHash,
+            attestation: screeningResult.attestation,
+            engineRequestId: screeningResult.requestId,
+            submissionTxHash: screeningResult.verified.txHash,
+            submissionBlockNumber: screeningResult.verified.blockNumber,
+            screenedBy: screeningResult.verified.signer,
+            screeningDuration: elapsed,
+          },
+        });
+        await transaction.payment.update({
+          where: { id: payment.id },
+          data: {
+            status: newStatus,
+            riskScore: screeningResult.amlRiskScore,
+            teeAttestation: screeningResult.attestation,
+            screenedAt: new Date(),
+          },
+        });
+        await transaction.complianceSubmissionIntent.update({
+          where: { paymentId: payment.id },
+          data: { state: "COMPLETED", completedAt: new Date() },
+        });
+        if (
+          screeningResult.travelRuleRequired &&
+          screeningResult.travelRuleRecordId &&
+          screeningResult.travelRulePayloadCommitment
+        ) {
+          const shared = await transaction.travelRuleRecord.updateMany({
+            where: {
+              id: screeningResult.travelRuleRecordId,
+              paymentId: payment.paymentId,
+              payloadCommitment: screeningResult.travelRulePayloadCommitment,
+              shared: false,
+            },
+            data: {
+              shared: true,
+              sharedWith: [complianceServiceUrl()!],
+              sharedAt: new Date(),
+              submissionTxHash: screeningResult.verified.txHash.toLowerCase(),
+              submissionBlockNumber: screeningResult.verified.blockNumber,
+            },
+          });
+          if (shared.count !== 1) {
+            throw new ComplianceError(
+              "TRAVEL_RULE_SHARE_STATE_CHANGED",
+              "Travel Rule sharing state changed during compliance commit",
+              409,
+            );
+          }
+        }
+
+        const eventType =
+          screeningResult.status === "PASSED"
+            ? "COMPLIANCE_PASSED"
+            : screeningResult.status === "FAILED"
+              ? "COMPLIANCE_FAILED"
+              : "COMPLIANCE_ESCALATED";
+        await this.auditService.createAuditEntryInTransaction(transaction, {
+          businessId,
+          eventType,
+          actor: screeningResult.verified.signer,
+          description: `Verified on-chain compliance ${screeningResult.status} for payment ${payment.paymentId}`,
+          severity: screeningResult.status === "PASSED" ? "INFO" : "HIGH",
+          blockNumber: screeningResult.verified.blockNumber,
+          txHash: screeningResult.verified.txHash,
+          metadata: {
+            paymentId: payment.paymentId,
+            amlRiskScore: screeningResult.amlRiskScore,
+            sanctionsClear: screeningResult.sanctionsClear,
+            travelRuleCompliant: screeningResult.travelRuleCompliant,
+            engineRequestId: screeningResult.requestId,
+            confirmations: screeningResult.verified.confirmations,
+          },
+        });
+        return created;
       },
-    });
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
 
     // Record metrics
-    const resultLabel = screeningResult.status === "PASSED" ? "passed" : "failed";
+    const resultLabel =
+      screeningResult.status === "PASSED" ? "passed" : "failed";
     screeningDuration.observe({ result: resultLabel }, elapsed / 1000);
 
     // Update pass rate gauge
     await this.updatePassRateMetric();
 
-    // Audit entry
-    const eventType =
-      screeningResult.status === "PASSED"
-        ? "COMPLIANCE_PASSED"
-        : screeningResult.status === "FAILED"
-          ? "COMPLIANCE_FAILED"
-          : "COMPLIANCE_ESCALATED";
-
-    await this.auditService.createAuditEntry({
-      eventType: eventType as "COMPLIANCE_PASSED" | "COMPLIANCE_FAILED" | "COMPLIANCE_ESCALATED",
-      actor: teeNodeAddress,
-      description: `Compliance screening ${screeningResult.status} for payment ${payment.paymentId} (risk score: ${screeningResult.amlRiskScore})`,
-      severity: screeningResult.status === "PASSED" ? "INFO" : "HIGH",
-      metadata: {
-        paymentId: payment.paymentId,
-        amlRiskScore: screeningResult.amlRiskScore,
-        sanctionsClear: screeningResult.sanctionsClear,
-        screeningDuration: elapsed,
-      },
-    });
-
-    logger.info("Compliance screening complete", {
+    logger.info("Verified on-chain compliance screening complete", {
       paymentId: payment.paymentId,
       status: screeningResult.status,
       riskScore: screeningResult.amlRiskScore,
       duration: elapsed,
+      txHash: screeningResult.verified.txHash,
     });
 
     return {
@@ -187,22 +478,32 @@ export class ComplianceService {
       travelRuleCompliant: screeningResult.travelRuleCompliant,
       status: screeningResult.status,
       flagReason: screeningResult.flagReason,
-      screenedBy: teeNodeAddress,
+      screenedBy: screeningResult.verified.signer,
       screeningDuration: elapsed,
+      submissionTxHash: screeningResult.verified.txHash,
+      submissionBlockNumber: screeningResult.verified.blockNumber.toString(),
+      confirmations: screeningResult.verified.confirmations,
     };
   }
 
   /**
    * Get screening result for a payment.
    */
-  async getScreeningResult(paymentId: string) {
+  async getScreeningResult(
+    paymentId: string,
+    businessId = "__unauthenticated__",
+  ) {
     const screenings = await this.prisma.complianceScreening.findMany({
-      where: { paymentId },
+      where: { paymentId, payment: { businessId } },
       orderBy: { createdAt: "desc" },
     });
 
     if (screenings.length === 0) {
-      throw new ComplianceError("SCREENING_NOT_FOUND", "No screening found for this payment", 404);
+      throw new ComplianceError(
+        "SCREENING_NOT_FOUND",
+        "No screening found for this payment",
+        404,
+      );
     }
 
     return screenings;
@@ -211,17 +512,41 @@ export class ComplianceService {
   /**
    * Get compliance metrics.
    */
-  async getComplianceMetrics(): Promise<ComplianceMetrics> {
-    const [total, passed, failed, avgRisk, avgDuration, flaggedCount, underReview] =
-      await Promise.all([
-        this.prisma.complianceScreening.count(),
-        this.prisma.complianceScreening.count({ where: { status: "PASSED" } }),
-        this.prisma.complianceScreening.count({ where: { status: "FAILED" } }),
-        this.prisma.complianceScreening.aggregate({ _avg: { amlRiskScore: true } }),
-        this.prisma.complianceScreening.aggregate({ _avg: { screeningDuration: true } }),
-        this.prisma.payment.count({ where: { status: "FLAGGED" } }),
-        this.prisma.complianceScreening.count({ where: { status: "UNDER_REVIEW" } }),
-      ]);
+  async getComplianceMetrics(
+    businessId = "__unauthenticated__",
+  ): Promise<ComplianceMetrics> {
+    const screeningScope: Prisma.ComplianceScreeningWhereInput = {
+      payment: { businessId },
+    };
+    const [
+      total,
+      passed,
+      failed,
+      avgRisk,
+      avgDuration,
+      flaggedCount,
+      underReview,
+    ] = await Promise.all([
+      this.prisma.complianceScreening.count({ where: screeningScope }),
+      this.prisma.complianceScreening.count({
+        where: { ...screeningScope, status: "PASSED" },
+      }),
+      this.prisma.complianceScreening.count({
+        where: { ...screeningScope, status: "FAILED" },
+      }),
+      this.prisma.complianceScreening.aggregate({
+        where: screeningScope,
+        _avg: { amlRiskScore: true },
+      }),
+      this.prisma.complianceScreening.aggregate({
+        where: screeningScope,
+        _avg: { screeningDuration: true },
+      }),
+      this.prisma.payment.count({ where: { businessId, status: "FLAGGED" } }),
+      this.prisma.complianceScreening.count({
+        where: { ...screeningScope, status: "UNDER_REVIEW" },
+      }),
+    ]);
 
     const passRate = total > 0 ? passed / total : 0;
 
@@ -240,67 +565,149 @@ export class ComplianceService {
   /**
    * Trigger a sanctions list refresh.
    */
-  async updateSanctionsList(): Promise<{ status: string; message: string }> {
-    if (sanctionsUpdating) {
-      return { status: "in_progress", message: "Sanctions list update already in progress" };
+  async updateSanctionsList(actor = "__unauthenticated__"): Promise<{
+    status: "updated";
+    totalEntries: number;
+    updatedAt: Date;
+    source: string;
+    datasetGeneratedAt: Date;
+    datasetDigest: string;
+  }> {
+    const serviceUrl = complianceServiceUrl();
+    if (!serviceUrl || !process.env.COMPLIANCE_API_KEY) {
+      throw new ComplianceError(
+        "SANCTIONS_SERVICE_UNAVAILABLE",
+        "Sanctions service is not configured",
+        503,
+      );
     }
 
-    sanctionsUpdating = true;
+    try {
+      const response = await fetch(`${serviceUrl}/v1/sanctions/update`, {
+        method: "POST",
+        headers: { "X-API-Key": process.env.COMPLIANCE_API_KEY },
+        signal: AbortSignal.timeout(30_000),
+      });
+      const payload =
+        await readBoundedJsonResponse<Record<string, unknown>>(response);
+      if (!response.ok || payload.success !== true) {
+        throw new Error(
+          typeof payload.error === "string"
+            ? payload.error
+            : `HTTP ${response.status}`,
+        );
+      }
+    } catch (error) {
+      logger.error("Sanctions list update failed closed", {
+        error: (error as Error).message,
+      });
+      throw new ComplianceError(
+        "SANCTIONS_SERVICE_UNAVAILABLE",
+        "Sanctions list update could not be verified",
+        503,
+      );
+    }
 
-    // Simulate async sanctions list update.
-    // .unref() prevents this timer from keeping Node alive (avoids open-handle leaks in tests).
-    const timer = setTimeout(() => {
-      sanctionsLastUpdated = new Date();
-      sanctionsUpdating = false;
-      logger.info("Sanctions list updated");
-    }, 2000);
-    timer.unref();
+    // A successful refresh acknowledgement alone is insufficient. Re-read
+    // health and verify freshness for every required source before reporting
+    // the update as usable.
+    const parsed = await this.getSanctionsStatus();
 
     await this.auditService.createAuditEntry({
       eventType: "SANCTIONS_UPDATED",
-      actor: "system",
-      description: "Sanctions list refresh triggered",
+      actor,
+      description: `Sanctions dataset updated from ${parsed.source}`,
       severity: "INFO",
+      metadata: {
+        totalEntries: parsed.totalEntries,
+        updatedAt: parsed.lastUpdated.toISOString(),
+        source: parsed.source,
+        datasetGeneratedAt: parsed.datasetGeneratedAt.toISOString(),
+        datasetDigest: parsed.datasetDigest,
+      },
     });
 
-    return { status: "started", message: "Sanctions list update initiated" };
+    return {
+      status: "updated",
+      totalEntries: parsed.totalEntries,
+      updatedAt: parsed.lastUpdated,
+      source: parsed.source,
+      datasetGeneratedAt: parsed.datasetGeneratedAt,
+      datasetDigest: parsed.datasetDigest,
+    };
   }
 
   /**
    * Get sanctions list freshness status.
    */
-  getSanctionsStatus(): SanctionsStatus {
-    const lists = ["OFAC-SDN", "EU-CONSOLIDATED", "UN-SANCTIONS", "UK-HMT"];
-    const staleThreshold = 24 * 60 * 60 * 1000; // 24 hours
-
-    let status: "fresh" | "stale" | "updating" = "stale";
-    if (sanctionsUpdating) {
-      status = "updating";
-    } else if (sanctionsLastUpdated && Date.now() - sanctionsLastUpdated.getTime() < staleThreshold) {
-      status = "fresh";
+  async getSanctionsStatus(): Promise<SanctionsStatus> {
+    const serviceUrl = complianceServiceUrl();
+    if (!serviceUrl) {
+      throw new ComplianceError(
+        "SANCTIONS_SERVICE_UNAVAILABLE",
+        "Sanctions service is not configured",
+        503,
+      );
     }
 
-    return {
-      lastUpdated: sanctionsLastUpdated,
-      listsLoaded: lists,
-      totalEntries: 12847, // Simulated
-      status,
-    };
+    let payload: Record<string, unknown>;
+    try {
+      const response = await fetch(`${serviceUrl}/v1/health`, {
+        signal: AbortSignal.timeout(5_000),
+      });
+      payload = await readBoundedJsonResponse<Record<string, unknown>>(
+        response,
+        256 * 1024,
+      );
+      if (!response.ok || payload.status !== "healthy")
+        throw new Error(`HTTP ${response.status}`);
+    } catch (error) {
+      logger.error("Sanctions health check failed closed", {
+        error: (error as Error).message,
+      });
+      throw new ComplianceError(
+        "SANCTIONS_SERVICE_UNAVAILABLE",
+        "Sanctions dataset health could not be verified",
+        503,
+      );
+    }
+
+    const metadata = payload.sanctions_lists;
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+      throw new ComplianceError(
+        "SANCTIONS_DATASET_INVALID",
+        "Sanctions service returned incomplete dataset metadata",
+        503,
+      );
+    }
+    return validateSanctionsMetadata(metadata as Record<string, unknown>);
   }
 
   /**
    * Get flagged payments awaiting review.
    */
-  async getFlaggedPayments(page: number = 1, limit: number = 20) {
+  async getFlaggedPayments(
+    businessIdOrPage: string | number = "__unauthenticated__",
+    pageOrLimit: number = 1,
+    explicitLimit: number = 20,
+  ) {
+    const businessId =
+      typeof businessIdOrPage === "string"
+        ? businessIdOrPage
+        : "__unauthenticated__";
+    const page =
+      typeof businessIdOrPage === "number" ? businessIdOrPage : pageOrLimit;
+    const limit =
+      typeof businessIdOrPage === "number" ? pageOrLimit : explicitLimit;
     const [data, total] = await Promise.all([
       this.prisma.payment.findMany({
-        where: { status: "FLAGGED" },
+        where: { businessId, status: "FLAGGED" },
         include: { screenings: true },
         orderBy: { initiatedAt: "desc" },
         skip: (page - 1) * limit,
         take: limit,
       }),
-      this.prisma.payment.count({ where: { status: "FLAGGED" } }),
+      this.prisma.payment.count({ where: { businessId, status: "FLAGGED" } }),
     ]);
 
     flaggedPayments.set(total);
@@ -316,12 +723,13 @@ export class ComplianceService {
    */
   async reviewFlaggedPayment(
     paymentId: string,
-    decision: "approve" | "reject" | "escalate",
+    decision: "escalate",
     reason: string,
     reviewerAddress: string,
+    businessId = "__unauthenticated__",
   ) {
-    const payment = await this.prisma.payment.findUnique({
-      where: { id: paymentId },
+    const payment = await this.prisma.payment.findFirst({
+      where: { id: paymentId, businessId },
     });
 
     if (!payment) {
@@ -336,65 +744,42 @@ export class ComplianceService {
       );
     }
 
-    let newPaymentStatus: PaymentStatus;
-    let complianceStatus: ComplianceStatus;
-
-    switch (decision) {
-      case "approve":
-        newPaymentStatus = "APPROVED";
-        complianceStatus = "PASSED";
-        break;
-      case "reject":
-        newPaymentStatus = "REJECTED";
-        complianceStatus = "FAILED";
-        break;
-      case "escalate":
-        newPaymentStatus = "FLAGGED";
-        complianceStatus = "ESCALATED";
-        break;
-    }
-
-    // Update payment status
-    await this.prisma.payment.update({
-      where: { id: payment.id },
-      data: { status: newPaymentStatus },
-    });
-
-    // Update latest screening
     const latestScreening = await this.prisma.complianceScreening.findFirst({
-      where: { paymentId: payment.paymentId },
+      where: { paymentId: payment.paymentId, payment: { businessId } },
       orderBy: { createdAt: "desc" },
     });
-
-    if (latestScreening) {
-      await this.prisma.complianceScreening.update({
-        where: { id: latestScreening.id },
-        data: {
-          status: complianceStatus,
-          flagReason: reason,
-          investigationHash: `0x${crypto.createHash("sha256").update(`${paymentId}:${decision}:${reason}:${Date.now()}`).digest("hex")}`,
-        },
-      });
+    if (!latestScreening) {
+      throw new ComplianceError(
+        "SCREENING_NOT_FOUND",
+        "Verified screening record was not found",
+        404,
+      );
     }
 
-    await this.auditService.createAuditEntry({
-      eventType: decision === "approve" ? "COMPLIANCE_PASSED" : decision === "reject" ? "COMPLIANCE_FAILED" : "COMPLIANCE_ESCALATED",
-      actor: reviewerAddress,
-      description: `Flagged payment ${payment.paymentId} reviewed: ${decision} — ${reason}`,
-      severity: decision === "escalate" ? "HIGH" : "MEDIUM",
-      metadata: { paymentId: payment.paymentId, decision, reason },
-    });
+    await this.prisma.$transaction(
+      async (transaction) => {
+        await transaction.complianceScreening.update({
+          where: { id: latestScreening.id },
+          data: { status: "ESCALATED", flagReason: reason },
+        });
+        await this.auditService.createAuditEntryInTransaction(transaction, {
+          businessId,
+          eventType: "COMPLIANCE_ESCALATED",
+          actor: reviewerAddress,
+          description: `Flagged payment ${payment.paymentId} escalated for human/on-chain resolution — ${reason}`,
+          severity: "HIGH",
+          metadata: { paymentId: payment.paymentId, decision, reason },
+        });
+      },
+      { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+    );
 
-    logger.info("Flagged payment reviewed", {
-      paymentId: payment.paymentId,
-      decision,
-      reviewer: reviewerAddress,
-    });
+    logger.info("Flagged payment reviewed");
 
     return {
       paymentId: payment.paymentId,
       decision,
-      newStatus: newPaymentStatus,
+      newStatus: "FLAGGED" as PaymentStatus,
       reviewedBy: reviewerAddress,
       reviewedAt: new Date(),
     };
@@ -402,189 +787,495 @@ export class ComplianceService {
 
   // ─── Private Helpers ────────────────────────────────────────────────────────
 
-  private async getActiveTEENode(): Promise<string> {
-    const node = await this.prisma.tEENode.findFirst({
-      where: { status: "ACTIVE", attestationValid: true },
-      orderBy: { lastHeartbeat: "desc" },
-    });
-
-    if (!node && !this.isTestMode()) {
-      if (COMPLIANCE_SERVICE_URL) {
-        return "compliance-service";
-      }
+  private async requestVerifiedComplianceSubmission(
+    payment: Payment,
+    requestId: string,
+  ): Promise<{
+    requestId: string;
+    sanctionsClear: boolean;
+    amlRiskScore: number;
+    travelRuleCompliant: boolean;
+    status: ComplianceStatus;
+    flagReason: string | null;
+    investigationHash: string;
+    attestation: string;
+    verified: VerifiedComplianceSubmission;
+    travelRuleRequired: boolean;
+    travelRuleRecordId: string | null;
+    travelRulePayloadCommitment: string | null;
+  }> {
+    const serviceUrl = complianceServiceUrl();
+    const apiKey = process.env.COMPLIANCE_API_KEY;
+    if (!serviceUrl || !apiKey) {
       throw new ComplianceError(
-        "NO_TEE_NODE",
-        "No active TEE node available and no compliance service configured",
+        "COMPLIANCE_SUBMISSION_NOT_CONFIGURED",
+        "The audited compliance submission service is not configured",
+        501,
+      );
+    }
+
+    let config;
+    let smallestUnitAmount: string;
+    try {
+      config = loadNoblePayChainConfiguration();
+      const token = tokenForCurrency(payment.currency, config.tokens);
+      smallestUnitAmount = decimalToSmallestUnits(
+        payment.amount.toString(),
+        token.decimals,
+      );
+    } catch (error) {
+      throw new ComplianceError(
+        "COMPLIANCE_SUBMISSION_MISCONFIGURED",
+        (error as Error).message,
         503,
       );
     }
 
-    return node?.address || "0x0000000000000000000000000000000000000001";
-  }
-
-  private isTestMode(): boolean {
-    return process.env.NODE_ENV === "test";
-  }
-
-  private async performTEEScreening(
-    payment: { sender: string; recipient: string; amount: Prisma.Decimal; currency: string },
-    _teeNode: string,
-  ): Promise<{
-    sanctionsClear: boolean;
-    amlRiskScore: number;
-    travelRuleCompliant: boolean;
-    status: ComplianceStatus;
-    flagReason: string | null;
-    investigationHash: string | null;
-  }> {
-    // If COMPLIANCE_SERVICE_URL is configured, call the real compliance engine
-    if (COMPLIANCE_SERVICE_URL) {
-      return this.callComplianceService(payment);
+    let travelRule:
+      AuthorizedTravelRulePayload | { required: false; data: null };
+    try {
+      travelRule = await this.travelRuleService.loadAuthorizedPayload(payment);
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        "statusCode" in error
+      ) {
+        throw error;
+      }
+      throw new ComplianceError(
+        "TRAVEL_RULE_UNAVAILABLE",
+        "Travel Rule authorization could not be verified",
+        503,
+      );
     }
 
-    // In test mode, use deterministic mock screening
-    if (this.isTestMode()) {
-      return this.mockTEEScreening(payment);
+    if (travelRule.required) {
+      await this.travelRuleService.recordOutboundAttempt({
+        paymentRecordId: payment.id,
+        businessId: payment.businessId,
+        recordId: travelRule.recordId,
+        payloadCommitment: travelRule.payloadCommitment,
+        requestId,
+        destination: serviceUrl,
+      });
     }
 
-    // In non-test mode without compliance service: fail closed (reject)
-    logger.error("Compliance service unavailable: COMPLIANCE_SERVICE_URL not configured. Rejecting payment (fail-closed).");
+    let envelope: Record<string, unknown>;
+    try {
+      const response = await fetch(`${serviceUrl}/v1/screen`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-API-Key": apiKey,
+          "X-Request-Id": requestId,
+          "Idempotency-Key": requestId,
+        },
+        body: JSON.stringify({
+          request_id: requestId,
+          payment: {
+            id: payment.paymentId,
+            sender: payment.sender,
+            recipient: payment.recipient,
+            amount: smallestUnitAmount,
+            currency: payment.currency,
+            purpose_hash: payment.purposeHash,
+            metadata: {},
+            timestamp: payment.initiatedAt.toISOString(),
+          },
+          chain_id: config.chainId.toString(10),
+          contract_address: config.contractAddress,
+          travel_rule_data: travelRule.data,
+          travel_rule_required: travelRule.required,
+          travel_rule_payload_commitment: travelRule.required
+            ? travelRule.payloadCommitment
+            : null,
+          timeout_ms: 30_000,
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      envelope =
+        await readBoundedJsonResponse<Record<string, unknown>>(response);
+      if (!response.ok || envelope.success !== true) {
+        throw new Error(
+          typeof envelope.error === "string"
+            ? envelope.error
+            : `HTTP ${response.status}`,
+        );
+      }
+    } catch (error) {
+      logger.error("Compliance submission service failed closed", {
+        // The remote operator has seen the cleartext Travel Rule payload and
+        // may echo it in an error string. Never copy an untrusted response or
+        // transport message into application logs.
+        failureType:
+          error instanceof Error && error.name
+            ? error.name
+            : "UnknownComplianceSubmissionFailure",
+        paymentId: payment.paymentId,
+      });
+      throw new ComplianceError(
+        "COMPLIANCE_SUBMISSION_UNAVAILABLE",
+        "The compliance result could not be submitted and verified on-chain",
+        503,
+      );
+    }
+
+    const result = envelope.result;
+    if (!result || typeof result !== "object" || Array.isArray(result)) {
+      throw new ComplianceError(
+        "INVALID_COMPLIANCE_RESPONSE",
+        "Compliance response is missing its result",
+        503,
+      );
+    }
+    const values = result as Record<string, unknown>;
+    const sanctionsClear = values.sanctions_clear;
+    const amlRiskScore = values.aml_risk_score;
+    const travelRuleCompliant = values.travel_rule_compliant;
+    const resultStatus = values.status;
+    const attestation = values.attestation;
+    const investigationHash = values.investigation_hash;
+    const submissionTxHash = envelope.submission_tx_hash;
+    const responsePaymentId = envelope.payment_id ?? values.payment_id;
+    const responseRequestId = envelope.request_id;
+    const responseChainId = envelope.chain_id;
+    const responseContract = envelope.contract_address;
+
+    if (
+      responseRequestId !== requestId ||
+      typeof responsePaymentId !== "string" ||
+      responsePaymentId.toLowerCase() !== payment.paymentId.toLowerCase() ||
+      String(responseChainId) !== config.chainId.toString(10) ||
+      typeof responseContract !== "string" ||
+      responseContract.toLowerCase() !== config.contractAddress.toLowerCase() ||
+      typeof submissionTxHash !== "string" ||
+      !/^0x[a-fA-F0-9]{64}$/.test(submissionTxHash) ||
+      typeof sanctionsClear !== "boolean" ||
+      !Number.isInteger(amlRiskScore) ||
+      (amlRiskScore as number) < 0 ||
+      (amlRiskScore as number) > 100 ||
+      typeof travelRuleCompliant !== "boolean" ||
+      typeof resultStatus !== "string" ||
+      typeof attestation !== "string" ||
+      !/^(?:0x)?(?:[a-fA-F0-9]{2})+$/.test(attestation) ||
+      typeof investigationHash !== "string" ||
+      !/^0x[a-fA-F0-9]{64}$/.test(investigationHash)
+    ) {
+      throw new ComplianceError(
+        "INVALID_COMPLIANCE_RESPONSE",
+        "Compliance response identifiers or evidence are invalid",
+        503,
+      );
+    }
+
+    const mappedStatus = mapComplianceStatus(resultStatus);
+    const expectedStatus: ComplianceStatus = !sanctionsClear
+      ? "FAILED"
+      : (amlRiskScore as number) > 70 || !travelRuleCompliant
+        ? "UNDER_REVIEW"
+        : "PASSED";
+    if (!mappedStatus || mappedStatus !== expectedStatus) {
+      throw new ComplianceError(
+        "COMPLIANCE_DISPOSITION_MISMATCH",
+        "Compliance service disposition does not match NoblePay contract rules",
+        422,
+      );
+    }
+
+    let verified: VerifiedComplianceSubmission;
+    try {
+      verified = await this.submissionVerifier.verify({
+        txHash: submissionTxHash,
+        paymentId: payment.paymentId,
+        sanctionsClear,
+        amlRiskScore: amlRiskScore as number,
+        travelRuleCompliant,
+        investigationHash,
+        attestation,
+      });
+    } catch (error) {
+      if (error instanceof ComplianceVerificationError) {
+        throw new ComplianceError(error.code, error.message, error.statusCode);
+      }
+      throw new ComplianceError(
+        "COMPLIANCE_VERIFICATION_UNAVAILABLE",
+        "On-chain verification failed",
+        503,
+      );
+    }
+    if (verified.disposition !== expectedStatus) {
+      throw new ComplianceError(
+        "COMPLIANCE_DISPOSITION_MISMATCH",
+        "Verified chain disposition is inconsistent",
+        422,
+      );
+    }
+
+    const riskFactors = Array.isArray(values.risk_factors)
+      ? values.risk_factors
+          .slice(0, 20)
+          .map((factor) =>
+            typeof factor === "string" ? factor : JSON.stringify(factor),
+          )
+      : [];
     return {
-      sanctionsClear: false,
-      amlRiskScore: 100,
-      travelRuleCompliant: false,
-      status: "FAILED",
-      flagReason: "Compliance service unavailable — payment rejected (fail-closed)",
-      investigationHash: `0x${crypto.createHash("sha256").update(`fail-closed:${payment.sender}:${Date.now()}`).digest("hex")}`,
+      requestId,
+      sanctionsClear,
+      amlRiskScore: amlRiskScore as number,
+      travelRuleCompliant,
+      status: expectedStatus,
+      flagReason:
+        riskFactors.length > 0 ? riskFactors.join("; ").slice(0, 2000) : null,
+      investigationHash: investigationHash.toLowerCase(),
+      attestation: attestation.startsWith("0x")
+        ? attestation.toLowerCase()
+        : `0x${attestation.toLowerCase()}`,
+      verified,
+      travelRuleRequired: travelRule.required,
+      travelRuleRecordId: travelRule.required ? travelRule.recordId : null,
+      travelRulePayloadCommitment: travelRule.required
+        ? travelRule.payloadCommitment
+        : null,
     };
   }
 
   /**
-   * Call the real compliance engine for screening/attestation.
-   * On failure, REJECT the payment (fail closed) — never randomly approve.
+   * Save independently verified chain evidence before the transaction that
+   * creates the final screening and advances the payment. If another worker
+   * won the race, recover and validate that worker's durable evidence.
    */
-  private async callComplianceService(
-    payment: { sender: string; recipient: string; amount: Prisma.Decimal; currency: string },
-  ): Promise<{
-    sanctionsClear: boolean;
-    amlRiskScore: number;
-    travelRuleCompliant: boolean;
-    status: ComplianceStatus;
-    flagReason: string | null;
-    investigationHash: string | null;
-  }> {
+  private async persistVerifiedComplianceEvidence(
+    payment: Payment,
+    evidence: VerifiedScreeningEvidence,
+  ): Promise<VerifiedScreeningEvidence> {
+    evidence = await this.revalidateComplianceEvidence(payment, evidence);
+    let persisted;
     try {
-      const response = await fetch(`${COMPLIANCE_SERVICE_URL}/v1/screen`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-API-Key": process.env.COMPLIANCE_API_KEY || "",
+      persisted = await this.prisma.complianceSubmissionIntent.updateMany({
+        where: {
+          paymentId: payment.id,
+          requestId: evidence.requestId,
+          state: "PENDING",
         },
-        body: JSON.stringify({
-          payment: {
-            id: uuidv4(),
-            sender: payment.sender,
-            recipient: payment.recipient,
-            amount: parseFloat(payment.amount.toString()),
-            currency: payment.currency,
-          },
-          travel_rule_data: null,
-          timeout_ms: 30000,
-        }),
-        signal: AbortSignal.timeout(30000),
+        data: {
+          state: "VERIFIED",
+          sanctionsClear: evidence.sanctionsClear,
+          amlRiskScore: evidence.amlRiskScore,
+          travelRuleCompliant: evidence.travelRuleCompliant,
+          disposition: evidence.status,
+          flagReason: evidence.flagReason,
+          investigationHash: evidence.investigationHash,
+          attestation: evidence.attestation,
+          submissionTxHash: evidence.verified.txHash,
+          submissionBlockNumber: evidence.verified.blockNumber,
+          screenedBy: evidence.verified.signer,
+          confirmations: evidence.verified.confirmations,
+          screeningDuration: evidence.screeningDuration,
+          travelRuleRecordId: evidence.travelRuleRecordId,
+          travelRulePayloadCommitment: evidence.travelRulePayloadCommitment,
+          verifiedAt: new Date(),
+        },
       });
-
-      if (!response.ok) {
-        throw new Error(`Compliance service returned ${response.status}`);
-      }
-
-      const envelope = await response.json() as any;
-
-      // The Rust API returns { success, result: ComplianceResult, error, request_id }
-      if (!envelope.success || !envelope.result) {
-        throw new Error(envelope.error || "Compliance service returned unsuccessful response");
-      }
-
-      const result = envelope.result;
-
-      return {
-        sanctionsClear: result.sanctions_clear ?? false,
-        amlRiskScore: result.aml_risk_score ?? 100,
-        travelRuleCompliant: result.travel_rule_compliant ?? false,
-        status: mapComplianceStatus(result.status || "FAILED"),
-        flagReason: result.risk_factors?.length > 0
-          ? result.risk_factors.map((f: any) => f.description || f.factor).join("; ")
-          : null,
-        investigationHash: result.attestation || null,
-      };
     } catch (error) {
-      // Fail closed: if compliance service is unavailable, REJECT the payment
-      logger.error("Compliance service call failed — rejecting payment (fail-closed)", {
+      logger.error("Verified compliance evidence could not be persisted", {
         error: (error as Error).message,
-        sender: payment.sender,
+        paymentId: payment.paymentId,
+        requestId: evidence.requestId,
+        txHash: evidence.verified.txHash,
       });
-
-      return {
-        sanctionsClear: false,
-        amlRiskScore: 100,
-        travelRuleCompliant: false,
-        status: "FAILED",
-        flagReason: `Compliance service unavailable: ${(error as Error).message} — payment rejected (fail-closed)`,
-        investigationHash: `0x${crypto.createHash("sha256").update(`fail-closed:${payment.sender}:${Date.now()}`).digest("hex")}`,
-      };
+      throw new ComplianceError(
+        "COMPLIANCE_EVIDENCE_PERSIST_FAILED",
+        "Verified compliance evidence could not be saved; retry with the same request identity",
+        503,
+      );
     }
+
+    if (persisted.count === 1) return evidence;
+
+    const durable = await this.prisma.complianceSubmissionIntent.findUnique({
+      where: { paymentId: payment.id },
+    });
+    if (!durable) {
+      throw new ComplianceError(
+        "COMPLIANCE_INTENT_MISSING",
+        "Compliance submission intent disappeared during verification",
+        503,
+      );
+    }
+    return this.recoverVerifiedComplianceEvidence(payment, durable);
   }
 
   /**
-   * Mock screening for test mode ONLY. Clearly marked as test-only mock.
-   * Uses deterministic logic based on payment data, NOT Math.random().
+   * Repeat the complete chain verification immediately before a durable state
+   * transition. The verifier performs a final chain-id, immutable-anchor,
+   * receipt, transaction and receipt-block check after its pinned role/event
+   * reads. Comparing that result with the previously accepted evidence keeps
+   * a late reorg from advancing the intent, payment, or Travel Rule record.
    */
-  private mockTEEScreening(
-    payment: { sender: string; recipient: string; amount: Prisma.Decimal; currency: string },
-  ): {
-    sanctionsClear: boolean;
-    amlRiskScore: number;
-    travelRuleCompliant: boolean;
-    status: ComplianceStatus;
-    flagReason: string | null;
-    investigationHash: string | null;
-  } {
-    // Deterministic risk score based on a hash of payment data (not random)
-    const hash = crypto.createHash("sha256")
-      .update(`${payment.sender}:${payment.recipient}:${payment.amount.toString()}`)
-      .digest();
-    const riskScore = hash[0] % 100; // deterministic 0-99 based on payment data
-    const amount = parseFloat(payment.amount.toString());
-    const sanctionsClear = riskScore < 85;
-    const travelRuleCompliant = amount < 1000 || riskScore < 70;
-
-    let status: ComplianceStatus;
-    let flagReason: string | null = null;
-
-    if (!sanctionsClear) {
-      status = "FAILED";
-      flagReason = "Sanctions match detected";
-    } else if (riskScore > 70) {
-      status = "UNDER_REVIEW";
-      flagReason = `High risk score: ${riskScore}`;
-    } else if (!travelRuleCompliant) {
-      status = "UNDER_REVIEW";
-      flagReason = "Travel rule compliance verification required";
-    } else {
-      status = "PASSED";
+  private async revalidateComplianceEvidence(
+    payment: Payment,
+    evidence: VerifiedScreeningEvidence,
+  ): Promise<VerifiedScreeningEvidence> {
+    let verified: VerifiedComplianceSubmission;
+    try {
+      verified = await this.submissionVerifier.verify({
+        txHash: evidence.verified.txHash,
+        paymentId: payment.paymentId,
+        sanctionsClear: evidence.sanctionsClear,
+        amlRiskScore: evidence.amlRiskScore,
+        travelRuleCompliant: evidence.travelRuleCompliant,
+        investigationHash: evidence.investigationHash,
+        attestation: evidence.attestation,
+      });
+    } catch (error) {
+      if (error instanceof ComplianceVerificationError) {
+        throw new ComplianceError(error.code, error.message, error.statusCode);
+      }
+      throw new ComplianceError(
+        "COMPLIANCE_VERIFICATION_UNAVAILABLE",
+        "On-chain compliance evidence could not be revalidated",
+        503,
+      );
     }
 
-    const investigationHash = flagReason
-      ? `0x${crypto.createHash("sha256").update(`${payment.sender}:${riskScore}:${Date.now()}`).digest("hex")}`
-      : null;
+    if (
+      verified.txHash.toLowerCase() !==
+        evidence.verified.txHash.toLowerCase() ||
+      verified.blockNumber !== evidence.verified.blockNumber ||
+      verified.signer.toLowerCase() !==
+        evidence.verified.signer.toLowerCase() ||
+      verified.disposition !== evidence.verified.disposition
+    ) {
+      throw new ComplianceError(
+        "COMPLIANCE_EVIDENCE_CHANGED",
+        "Compliance evidence changed before the durable state transition",
+        409,
+      );
+    }
+
+    return { ...evidence, verified };
+  }
+
+  /** Re-verify persisted evidence so a retry can safely finish local state. */
+  private async recoverVerifiedComplianceEvidence(
+    payment: Payment,
+    intent: ComplianceSubmissionIntent,
+  ): Promise<VerifiedScreeningEvidence> {
+    if (
+      intent.state === "PENDING" ||
+      intent.requestId !== payment.id ||
+      typeof intent.sanctionsClear !== "boolean" ||
+      intent.amlRiskScore === null ||
+      !Number.isInteger(intent.amlRiskScore) ||
+      typeof intent.travelRuleCompliant !== "boolean" ||
+      !intent.disposition ||
+      !intent.investigationHash ||
+      !intent.attestation ||
+      !intent.submissionTxHash ||
+      intent.submissionBlockNumber === null ||
+      !intent.screenedBy ||
+      intent.confirmations === null ||
+      !Number.isInteger(intent.confirmations) ||
+      intent.confirmations < 0 ||
+      intent.screeningDuration === null ||
+      !Number.isInteger(intent.screeningDuration) ||
+      intent.screeningDuration < 0
+    ) {
+      throw new ComplianceError(
+        "COMPLIANCE_EVIDENCE_CORRUPT",
+        "Persisted compliance evidence is incomplete",
+        503,
+      );
+    }
+
+    let travelRule:
+      AuthorizedTravelRulePayload | { required: false; data: null };
+    try {
+      travelRule = await this.travelRuleService.loadAuthorizedPayload(payment);
+    } catch (error) {
+      if (
+        error &&
+        typeof error === "object" &&
+        "code" in error &&
+        "statusCode" in error
+      ) {
+        throw error;
+      }
+      throw new ComplianceError(
+        "TRAVEL_RULE_UNAVAILABLE",
+        "Travel Rule authorization could not be revalidated",
+        503,
+      );
+    }
+    if (
+      (travelRule.required &&
+        (intent.travelRuleRecordId !== travelRule.recordId ||
+          intent.travelRulePayloadCommitment?.toLowerCase() !==
+            travelRule.payloadCommitment)) ||
+      (!travelRule.required &&
+        (intent.travelRuleRecordId !== null ||
+          intent.travelRulePayloadCommitment !== null))
+    ) {
+      throw new ComplianceError(
+        "COMPLIANCE_EVIDENCE_CORRUPT",
+        "Persisted compliance evidence has inconsistent Travel Rule authorization",
+        503,
+      );
+    }
+
+    let verified: VerifiedComplianceSubmission;
+    try {
+      verified = await this.submissionVerifier.verify({
+        txHash: intent.submissionTxHash,
+        paymentId: payment.paymentId,
+        sanctionsClear: intent.sanctionsClear,
+        amlRiskScore: intent.amlRiskScore,
+        travelRuleCompliant: intent.travelRuleCompliant,
+        investigationHash: intent.investigationHash,
+        attestation: intent.attestation,
+      });
+    } catch (error) {
+      if (error instanceof ComplianceVerificationError) {
+        throw new ComplianceError(error.code, error.message, error.statusCode);
+      }
+      throw new ComplianceError(
+        "COMPLIANCE_VERIFICATION_UNAVAILABLE",
+        "On-chain verification failed",
+        503,
+      );
+    }
+
+    if (
+      verified.txHash.toLowerCase() !== intent.submissionTxHash.toLowerCase() ||
+      verified.blockNumber !== intent.submissionBlockNumber ||
+      verified.signer.toLowerCase() !== intent.screenedBy.toLowerCase() ||
+      verified.disposition !== intent.disposition
+    ) {
+      throw new ComplianceError(
+        "COMPLIANCE_EVIDENCE_CHANGED",
+        "Persisted compliance evidence no longer matches the finalized chain",
+        409,
+      );
+    }
 
     return {
-      sanctionsClear,
-      amlRiskScore: riskScore,
-      travelRuleCompliant,
-      status,
-      flagReason,
-      investigationHash,
+      requestId: intent.requestId,
+      sanctionsClear: intent.sanctionsClear,
+      amlRiskScore: intent.amlRiskScore,
+      travelRuleCompliant: intent.travelRuleCompliant,
+      status: intent.disposition,
+      flagReason: intent.flagReason,
+      investigationHash: intent.investigationHash,
+      attestation: intent.attestation,
+      screeningDuration: intent.screeningDuration,
+      verified,
+      travelRuleRequired: travelRule.required,
+      travelRuleRecordId: travelRule.required ? travelRule.recordId : null,
+      travelRulePayloadCommitment: travelRule.required
+        ? travelRule.payloadCommitment
+        : null,
     };
   }
 

@@ -41,6 +41,10 @@ jest.mock("next/link", () => {
   };
 });
 
+jest.mock("@/config/wagmi", () => ({
+  activeChain: { id: 7332, name: "Aethelred Testnet" },
+}));
+
 // Mock AppContext
 const mockAppContext = {
   wallet: {
@@ -496,32 +500,27 @@ describe("TopNav", () => {
     expect(screen.getByText("NoblePay")).toBeInTheDocument();
   });
 
-  it("renders the primary navigation links with the rest under More", () => {
+  it("renders navigation links", () => {
     render(<TopNav />);
     expect(screen.getByText("Dashboard")).toBeInTheDocument();
     expect(screen.getByText("Payments")).toBeInTheDocument();
     expect(screen.getByText("Compliance")).toBeInTheDocument();
     expect(screen.getByText("Businesses")).toBeInTheDocument();
-    // Secondary destinations are condensed into the More dropdown.
+    fireEvent.click(screen.getByText("Operations"));
+    expect(screen.getByText("Payment Channels")).toBeInTheDocument();
     expect(screen.queryByText("Treasury")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /more/i }));
-    expect(screen.getByText("Treasury")).toBeInTheDocument();
-    expect(screen.getByText("Cross-Chain")).toBeInTheDocument();
-    // Selecting an item closes the menu.
-    fireEvent.click(screen.getByText("Treasury"));
-    expect(screen.queryByText("Cross-Chain")).not.toBeInTheDocument();
   });
 
   it("renders Connect Wallet button when disconnected", () => {
     mockAppContext.wallet.connected = false;
     render(<TopNav />);
-    expect(screen.getByText("Connect Wallet")).toBeInTheDocument();
+    expect(screen.getByText("CONNECT WALLET")).toBeInTheDocument();
   });
 
   it("calls connectWallet when Connect Wallet is clicked", () => {
     mockAppContext.wallet.connected = false;
     render(<TopNav />);
-    fireEvent.click(screen.getByText("Connect Wallet"));
+    fireEvent.click(screen.getByText("CONNECT WALLET"));
     expect(mockAppContext.connectWallet).toHaveBeenCalled();
   });
 
@@ -531,17 +530,18 @@ describe("TopNav", () => {
       "0x1234567890abcdef1234567890abcdef12345678";
     render(<TopNav />);
     // The button should show truncated address
-    expect(screen.getByText(/0x123456/)).toBeInTheDocument();
+    expect(screen.getByText("0x1234...5678")).toBeInTheDocument();
     mockAppContext.wallet.connected = false;
     mockAppContext.wallet.address = "";
   });
 
-  it("calls disconnectWallet when address button is clicked", () => {
+  it("offers disconnect after opening the connected-wallet menu", () => {
     mockAppContext.wallet.connected = true;
     mockAppContext.wallet.address =
       "0x1234567890abcdef1234567890abcdef12345678";
     render(<TopNav />);
-    fireEvent.click(screen.getByText(/0x123456/));
+    fireEvent.click(screen.getByText("0x1234...5678"));
+    fireEvent.click(screen.getByText("Disconnect Wallet"));
     expect(mockAppContext.disconnectWallet).toHaveBeenCalled();
     mockAppContext.wallet.connected = false;
     mockAppContext.wallet.address = "";

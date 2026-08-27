@@ -42,7 +42,7 @@ func setupRouter(t *testing.T) *chi.Mux {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
 
-	complianceProxy := services.NewComplianceProxy("http://localhost:19999", logger)
+	complianceProxy := approvedComplianceProxy(t, logger)
 	paymentSvc := services.NewPaymentService(memStore, complianceProxy, logger)
 	indexer := services.NewBlockchainIndexer(memStore, logger)
 	settlementSvc := services.NewSettlementService(memStore, memStore, logger)
@@ -176,11 +176,8 @@ func TestIntegrationWebhookSettlement(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
 
-	// Use a mock compliance server that approves everything.
-	mockCompliance := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(models.ComplianceResult{Approved: true, Score: 100})
-	}))
-	defer mockCompliance.Close()
+	// Use a schema-accurate mock Rust compliance server.
+	mockCompliance := approvedComplianceServer(t)
 
 	complianceProxy := services.NewComplianceProxy(mockCompliance.URL, logger)
 	paymentSvc := services.NewPaymentService(memStore, complianceProxy, logger)
@@ -213,7 +210,7 @@ func TestIntegrationWebhookSettlement(t *testing.T) {
 	// Send webhook event for settlement.
 	webhookBody, _ := json.Marshal(models.WebhookEvent{
 		WebhookID: "wh-settle-001",
-		Type:      "transfer_complete",
+		Type:      services.PaymentSettledTopic,
 		PaymentID: payment.ID,
 		TxHash:    "0xsettled123",
 	})
@@ -224,14 +221,14 @@ func TestIntegrationWebhookSettlement(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// Verify payment is now completed.
+	// Verify payment now reflects the exact on-chain settled state.
 	resp, _ = client.Get(ts.URL + "/api/v1/payments/" + payment.ID)
 	var updated models.Payment
 	json.NewDecoder(resp.Body).Decode(&updated)
 	resp.Body.Close()
 
-	if updated.Status != models.PaymentStatusCompleted {
-		t.Errorf("expected completed after settlement, got %q", updated.Status)
+	if updated.Status != models.PaymentStatusSettled {
+		t.Errorf("expected settled after settlement, got %q", updated.Status)
 	}
 	if updated.TxHash != "0xsettled123" {
 		t.Errorf("expected tx_hash '0xsettled123', got %q", updated.TxHash)

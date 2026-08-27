@@ -5,21 +5,19 @@
  * for the NoblePay dApp frontend.
  */
 
-import { http, createConfig, createStorage } from 'wagmi';
-import { injected, walletConnect, coinbaseWallet } from 'wagmi/connectors';
-import {
-  aethelredMainnet,
-  aethelredTestnet,
-  aethelredDevnet,
-  activeChain,
-} from './chains';
+import { http, createConfig, createStorage } from "wagmi";
+import { injected, walletConnect, coinbaseWallet } from "wagmi/connectors";
+import type { EIP1193Provider } from "viem";
+import { activeChain } from "./chains";
+import { PUBLIC_SITE_URL } from "./site";
+import { AETHELRED_CONNECTOR_ID } from "./wallet-picker";
 
 // ---------------------------------------------------------------------------
 // WalletConnect Project ID
 // ---------------------------------------------------------------------------
 
 const WALLETCONNECT_PROJECT_ID =
-  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || '';
+  process.env.NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID || "";
 
 // ---------------------------------------------------------------------------
 // Connectors
@@ -28,24 +26,39 @@ const WALLETCONNECT_PROJECT_ID =
 const connectors = [
   injected({
     shimDisconnect: true,
+    target: {
+      id: AETHELRED_CONNECTOR_ID,
+      name: "Aethelred Wallet",
+      provider: () => {
+        if (typeof window === "undefined") return undefined;
+        return (
+          window as Window & {
+            aethelred?: EIP1193Provider;
+          }
+        ).aethelred;
+      },
+    },
+  }),
+  injected({
+    shimDisconnect: true,
   }),
   ...(WALLETCONNECT_PROJECT_ID
     ? [
         walletConnect({
           projectId: WALLETCONNECT_PROJECT_ID,
           metadata: {
-            name: 'NoblePay by Aethelred',
-            description: 'Compliant cross-border payments',
-            url: 'https://noblepay.aethelred.network',
-            icons: ['https://noblepay.aethelred.network/icon.png'],
+            name: "NoblePay by Aethelred",
+            description: "Compliant cross-border payments",
+            url: PUBLIC_SITE_URL,
+            icons: [`${PUBLIC_SITE_URL}/icon.png`],
           },
           showQrModal: true,
         }),
       ]
     : []),
   coinbaseWallet({
-    appName: 'NoblePay by Aethelred',
-    appLogoUrl: 'https://noblepay.aethelred.network/icon.png',
+    appName: "NoblePay by Aethelred",
+    appLogoUrl: `${PUBLIC_SITE_URL}/icon.png`,
   }),
 ];
 
@@ -53,45 +66,29 @@ const connectors = [
 // Transports
 // ---------------------------------------------------------------------------
 
-// Testnet and devnet share the confirmed EVM chain id (7332), so one 7332
-// transport covers both; mainnet is the distinct id.
 const transports = {
-  [aethelredMainnet.id]: http(),
-  [aethelredTestnet.id]: http(), // 7332 — also serves aethelredDevnet
+  [activeChain.id]: http(activeChain.rpcUrls.default.http[0]),
 };
-
-// wagmi rejects duplicate chain ids in its chains tuple. Dedupe by id, keeping
-// `activeChain` first so the surviving 7332 object carries the RPC for the
-// environment we're actually running (hosted testnet vs local devnet).
-const uniqueChains = [
-  aethelredMainnet,
-  activeChain,
-  aethelredTestnet,
-  aethelredDevnet,
-].filter((c, i, arr) => arr.findIndex((x) => x.id === c.id) === i);
 
 // ---------------------------------------------------------------------------
 // Wagmi Config
 // ---------------------------------------------------------------------------
 
 export const wagmiConfig = createConfig({
-  chains: uniqueChains as unknown as readonly [
-    typeof aethelredMainnet,
-    ...(typeof aethelredMainnet)[],
-  ],
+  chains: [activeChain],
   connectors,
   transports,
   // Use noopStorage on server to avoid hydration mismatches
   storage: createStorage({
     storage:
-      typeof window !== 'undefined'
+      typeof window !== "undefined"
         ? window.localStorage
         : {
             getItem: () => null,
             setItem: () => {},
             removeItem: () => {},
           },
-    key: 'noblepay-wallet',
+    key: "noblepay-wallet",
   }),
   // Disable auto-connect on SSR
   ssr: true,

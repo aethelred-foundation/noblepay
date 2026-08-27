@@ -60,11 +60,17 @@ func verifyTimestamp(tsHeader string) error {
 	if err != nil {
 		return fmt.Errorf("invalid timestamp format")
 	}
-	// Reject obviously invalid timestamps (before 2020 or after 2100)
-	// to avoid time.Duration overflow on extreme values.
-	if ts < 1577836800 || ts > 4102444800 {
-		return fmt.Errorf("timestamp outside valid range")
+
+	// Reject timestamps that are clearly unreasonable (before year 2000 or after year 2100)
+	// to avoid overflow issues with duration arithmetic on extreme values.
+	const (
+		minReasonableTS int64 = 946684800  // 2000-01-01 00:00:00 UTC
+		maxReasonableTS int64 = 4102444800 // 2100-01-01 00:00:00 UTC
+	)
+	if ts < minReasonableTS || ts > maxReasonableTS {
+		return fmt.Errorf("timestamp outside tolerance window")
 	}
+
 	webhookTime := time.Unix(ts, 0)
 	diff := time.Since(webhookTime)
 	if diff < 0 {
@@ -93,10 +99,19 @@ func (wh *WebhookHandler) isDuplicate(webhookID string) bool {
 				delete(wh.processedIDs, id)
 			}
 		}
+		if len(wh.processedIDs) >= maxProcessedWebhookIDs {
+			return true
+		}
 	}
 
 	wh.processedIDs[webhookID] = time.Now()
 	return false
+}
+
+func (wh *WebhookHandler) forgetWebhookID(webhookID string) {
+	wh.mu.Lock()
+	delete(wh.processedIDs, webhookID)
+	wh.mu.Unlock()
 }
 
 // HandleEvent handles POST /api/v1/webhooks/events
@@ -152,24 +167,39 @@ func (wh *WebhookHandler) HandleEvent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Convert webhook event to blockchain event and index it.
+	// Treat webhook fields only as a receipt selector. In production the
+	// indexer replaces every field below with ABI-decoded canonical receipt and
+	// block data before anything reaches durable storage.
 	blockEvent := &models.BlockchainEvent{
 		TxHash:    evt.TxHash,
 		EventType: evt.Type,
 		PaymentID: evt.PaymentID,
-		Timestamp: time.Now().UTC(),
 	}
 
-	if err := wh.indexer.IndexEvent(r.Context(), blockEvent); err != nil {
+	if err := wh.indexer.VerifyAndIndexEvent(r.Context(), blockEvent); err != nil {
+		wh.forgetWebhookID(evt.WebhookID)
 		wh.logger.Error("failed to index webhook event", zap.Error(err))
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to process event"})
 		return
 	}
+	if wh.indexer.WebhookNotificationOnly() {
+		// A verified webhook is only an acceleration signal. It never mutates the
+		// payment projection because doing so would bypass the atomic confirmed
+		// range + checkpoint transaction and its reorg checks.
+		wh.logger.Info("verified chain webhook accepted as notification",
+			zap.String("payment_id", blockEvent.PaymentID),
+			zap.String("tx_hash", blockEvent.TxHash))
+		writeJSON(w, http.StatusAccepted, map[string]string{
+			"status":     "verified_notification",
+			"projection": "confirmed_range_indexer",
+		})
+		return
+	}
 
-	// Trigger settlement reconciliation if there is a payment ID.
-	if evt.PaymentID != "" {
-		if _, err := wh.settlement.Reconcile(r.Context(), evt.PaymentID); err != nil {
-			wh.logger.Warn("settlement reconciliation failed", zap.Error(err), zap.String("payment_id", evt.PaymentID))
+	// The disabled test indexer retains an isolated direct-projection path.
+	if blockEvent.PaymentID != "" {
+		if _, err := wh.settlement.Reconcile(r.Context(), blockEvent.PaymentID); err != nil {
+			wh.logger.Warn("settlement reconciliation failed", zap.Error(err), zap.String("payment_id", blockEvent.PaymentID))
 		}
 	}
 

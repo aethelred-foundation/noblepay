@@ -58,6 +58,28 @@ func TestFileStore_CreateAndGetByID(t *testing.T) {
 	}
 }
 
+func TestFileStoreDoesNotLeakMutablePointers(t *testing.T) {
+	s, err := NewFileStore(tmpStorePath(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	original := makePayment("isolated")
+	if err := s.Create(ctx, original); err != nil {
+		t.Fatal(err)
+	}
+	original.Amount = "999"
+	fetched, _ := s.GetByID(ctx, original.ID)
+	if fetched.Amount != "1000" {
+		t.Fatalf("caller mutated durable state through Create pointer: %q", fetched.Amount)
+	}
+	fetched.Amount = "888"
+	again, _ := s.GetByID(ctx, original.ID)
+	if again.Amount != "1000" {
+		t.Fatalf("caller mutated durable state through Get pointer: %q", again.Amount)
+	}
+}
+
 func TestFileStore_GetByID_NotFound(t *testing.T) {
 	path := tmpStorePath(t)
 	s, err := NewFileStore(path)

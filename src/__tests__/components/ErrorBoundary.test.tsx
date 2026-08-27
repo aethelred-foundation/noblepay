@@ -4,6 +4,11 @@ import {
   ErrorBoundary,
   SectionErrorBoundary,
 } from "@/components/ErrorBoundary";
+import * as Sentry from "@sentry/react";
+
+jest.mock("@sentry/react", () => ({
+  captureException: jest.fn(),
+}));
 
 // Mock lucide-react icons
 jest.mock("lucide-react", () => ({
@@ -173,22 +178,17 @@ describe("ErrorBoundary", () => {
     });
   });
 
-  it("calls Sentry.captureException when Sentry is available", () => {
-    const captureException = jest.fn();
-    (window as any).Sentry = { captureException };
-
+  it("reports render failures to Sentry", () => {
     render(
       <ErrorBoundary>
         <ThrowingComponent shouldThrow={true} />
       </ErrorBoundary>,
     );
 
-    expect(captureException).toHaveBeenCalledWith(
+    expect(Sentry.captureException).toHaveBeenCalledWith(
       expect.any(Error),
       expect.objectContaining({ extra: expect.any(Object) }),
     );
-
-    delete (window as any).Sentry;
   });
 
   it("reloads page when Reload Page is clicked", () => {

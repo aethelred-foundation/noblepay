@@ -8,7 +8,16 @@ import (
 type PaymentStatus string
 
 const (
-	PaymentStatusPending    PaymentStatus = "pending"
+	PaymentStatusPending  PaymentStatus = "pending"
+	PaymentStatusPassed   PaymentStatus = "passed"
+	PaymentStatusFlagged  PaymentStatus = "flagged"
+	PaymentStatusBlocked  PaymentStatus = "blocked"
+	PaymentStatusSettled  PaymentStatus = "settled"
+	PaymentStatusRefunded PaymentStatus = "refunded"
+
+	// The following values belong to the isolated legacy, off-chain mutation
+	// service. Production routes never create these states; the on-chain
+	// projection above is the source of truth exposed by the gateway.
 	PaymentStatusProcessing PaymentStatus = "processing"
 	PaymentStatusCompleted  PaymentStatus = "completed"
 	PaymentStatusFailed     PaymentStatus = "failed"
@@ -17,17 +26,25 @@ const (
 
 // Payment represents a cross-border payment transaction.
 type Payment struct {
-	ID              string        `json:"id"`
-	SenderAddress   string        `json:"sender_address"`
-	ReceiverAddress string        `json:"receiver_address"`
-	Amount          string        `json:"amount"`
-	Currency        string        `json:"currency"`
-	Status          PaymentStatus `json:"status"`
-	TxHash          string        `json:"tx_hash,omitempty"`
-	Memo            string        `json:"memo,omitempty"`
-	ComplianceCheck bool          `json:"compliance_check"`
-	CreatedAt       time.Time     `json:"created_at"`
-	UpdatedAt       time.Time     `json:"updated_at"`
+	ID               string        `json:"id"`
+	SenderAddress    string        `json:"sender_address"`
+	ReceiverAddress  string        `json:"receiver_address"`
+	Amount           string        `json:"amount"`
+	Currency         string        `json:"currency"`
+	CurrencyCode     string        `json:"currency_code,omitempty"`
+	TokenAddress     string        `json:"token_address,omitempty"`
+	Status           PaymentStatus `json:"status"`
+	TxHash           string        `json:"tx_hash,omitempty"`
+	InitiationTxHash string        `json:"initiation_tx_hash,omitempty"`
+	SettlementTxHash string        `json:"settlement_tx_hash,omitempty"`
+	RefundTxHash     string        `json:"refund_tx_hash,omitempty"`
+	FeeCollected     string        `json:"fee_collected,omitempty"`
+	InitiationBlock  uint64        `json:"initiation_block,omitempty"`
+	LastEventBlock   uint64        `json:"last_event_block,omitempty"`
+	Memo             string        `json:"memo,omitempty"`
+	ComplianceCheck  bool          `json:"compliance_check"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
 }
 
 // SubmitPaymentRequest is the request body for creating a payment.
@@ -76,20 +93,34 @@ type ComplianceResult struct {
 
 // BlockchainEvent represents an on-chain event captured by the indexer.
 type BlockchainEvent struct {
-	BlockHeight uint64    `json:"block_height"`
-	TxHash      string    `json:"tx_hash"`
-	EventType   string    `json:"event_type"`
-	PaymentID   string    `json:"payment_id,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
+	BlockHeight       uint64        `json:"block_height"`
+	BlockHash         string        `json:"block_hash,omitempty"`
+	LogIndex          uint64        `json:"log_index"`
+	TxHash            string        `json:"tx_hash"`
+	EventType         string        `json:"event_type"`
+	EventName         string        `json:"event_name,omitempty"`
+	PaymentID         string        `json:"payment_id,omitempty"`
+	RawData           string        `json:"raw_data,omitempty"`
+	Timestamp         time.Time     `json:"timestamp"`
+	ProjectedStatus   PaymentStatus `json:"projected_status,omitempty"`
+	SenderAddress     string        `json:"sender_address,omitempty"`
+	ReceiverAddress   string        `json:"receiver_address,omitempty"`
+	Amount            string        `json:"amount,omitempty"`
+	TokenAddress      string        `json:"token_address,omitempty"`
+	Currency          string        `json:"currency,omitempty"`
+	CurrencyCode      string        `json:"currency_code,omitempty"`
+	FeeCollected      string        `json:"fee_collected,omitempty"`
+	RiskScore         *uint8        `json:"risk_score,omitempty"`
+	InvestigationHash string        `json:"investigation_hash,omitempty"`
 }
 
 // SettlementRecord tracks reconciliation of payments.
 type SettlementRecord struct {
-	PaymentID  string    `json:"payment_id"`
-	Settled    bool      `json:"settled"`
-	SettledAt  time.Time `json:"settled_at,omitempty"`
-	OnChainTx  string    `json:"on_chain_tx,omitempty"`
-	Discrepancy string   `json:"discrepancy,omitempty"`
+	PaymentID   string    `json:"payment_id"`
+	Settled     bool      `json:"settled"`
+	SettledAt   time.Time `json:"settled_at,omitempty"`
+	OnChainTx   string    `json:"on_chain_tx,omitempty"`
+	Discrepancy string    `json:"discrepancy,omitempty"`
 }
 
 // HealthResponse is returned by health/readiness endpoints.

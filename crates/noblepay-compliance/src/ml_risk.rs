@@ -1,8 +1,9 @@
-//! Machine Learning Risk Scoring Engine
+//! Deterministic risk-scoring reference implementation.
 //!
-//! A pure-Rust implementation of a decision tree ensemble (simplified random forest)
-//! for transaction risk scoring inside TEE environments. The engine extracts features
-//! from payment data and produces calibrated risk scores with per-feature explanations.
+//! The hand-authored policy mappings and tree fixture in this module are test
+//! data, not a trained or regulator-approved production model. Production uses
+//! an independently audited external compliance service and must not treat
+//! these currency, jurisdiction, or reporting-threshold heuristics as facts.
 //!
 //! ## Design Principles
 //!
@@ -13,14 +14,8 @@
 //! - **Explainable**: Every score includes feature-level contribution breakdowns for
 //!   regulatory audit trails.
 
-use std::collections::HashMap;
-use std::sync::Arc;
-
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use serde::{Deserialize, Serialize};
-
-const MAX_RISK_FOREST_TREE_CAPACITY: usize = 64;
-use tracing::{info, warn};
 
 use crate::types::Payment;
 
@@ -65,10 +60,7 @@ pub struct FeatureVector {
 
 impl FeatureVector {
     /// Extract features from a payment and optional historical context.
-    pub fn from_payment(
-        payment: &Payment,
-        history: Option<&EntityHistory>,
-    ) -> Self {
+    pub fn from_payment(payment: &Payment, history: Option<&EntityHistory>) -> Self {
         let amount = payment.amount as f64;
         let amount_log = (amount + 1.0).ln();
 
@@ -86,7 +78,11 @@ impl FeatureVector {
         let weekday = timestamp.weekday().num_days_from_monday() as f64;
 
         let structuring = Self::structuring_score(amount);
-        let round = if amount % 1000.0 == 0.0 && amount >= 5000.0 { 1.0 } else { 0.0 };
+        let round = if amount % 1000.0 == 0.0 && amount >= 5000.0 {
+            1.0
+        } else {
+            0.0
+        };
 
         Self {
             amount_log,
@@ -110,11 +106,21 @@ impl FeatureVector {
     /// Convert to a flat array for tree evaluation.
     pub fn to_array(&self) -> [f64; 15] {
         [
-            self.amount_log, self.amount_deviation, self.velocity_24h,
-            self.velocity_7d, self.counterparty_diversity, self.jurisdiction_risk,
-            self.time_of_day, self.day_of_week, self.is_new_counterparty,
-            self.account_age, self.frequency_deviation, self.structuring_indicator,
-            self.round_amount, self.cross_border, self.currency_risk,
+            self.amount_log,
+            self.amount_deviation,
+            self.velocity_24h,
+            self.velocity_7d,
+            self.counterparty_diversity,
+            self.jurisdiction_risk,
+            self.time_of_day,
+            self.day_of_week,
+            self.is_new_counterparty,
+            self.account_age,
+            self.frequency_deviation,
+            self.structuring_indicator,
+            self.round_amount,
+            self.cross_border,
+            self.currency_risk,
         ]
     }
 
@@ -178,17 +184,19 @@ pub enum TreeNode {
         right: Box<TreeNode>,
     },
     /// Leaf node with a risk score.
-    Leaf {
-        score: f64,
-        samples: u32,
-    },
+    Leaf { score: f64, samples: u32 },
 }
 
 impl TreeNode {
     /// Evaluate this tree on a feature vector.
     pub fn predict(&self, features: &[f64; 15]) -> f64 {
         match self {
-            TreeNode::Split { feature_index, threshold, left, right } => {
+            TreeNode::Split {
+                feature_index,
+                threshold,
+                left,
+                right,
+            } => {
                 if features[*feature_index] <= *threshold {
                     left.predict(features)
                 } else {
@@ -213,18 +221,35 @@ pub struct RiskForest {
     pub trained_at: DateTime<Utc>,
 }
 
+/// Upper bound for work and response allocation during one prediction.
+const MAX_PREDICTION_TREES: usize = 1_024;
+
 impl RiskForest {
-    /// Create a new forest with pre-trained trees.
+    /// Create the deterministic local/test forest fixture.
+    #[cfg(any(test, feature = "mock-tee"))]
     pub fn default_model() -> Self {
         let feature_names: Vec<String> = vec![
-            "amount_log", "amount_deviation", "velocity_24h", "velocity_7d",
-            "counterparty_diversity", "jurisdiction_risk", "time_of_day",
-            "day_of_week", "is_new_counterparty", "account_age",
-            "frequency_deviation", "structuring_indicator", "round_amount",
-            "cross_border", "currency_risk",
-        ].into_iter().map(String::from).collect();
+            "amount_log",
+            "amount_deviation",
+            "velocity_24h",
+            "velocity_7d",
+            "counterparty_diversity",
+            "jurisdiction_risk",
+            "time_of_day",
+            "day_of_week",
+            "is_new_counterparty",
+            "account_age",
+            "frequency_deviation",
+            "structuring_indicator",
+            "round_amount",
+            "cross_border",
+            "currency_risk",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
 
-        // Pre-trained decision trees (simplified for TEE deployment)
+        // Hand-authored fixture trees for deterministic integration tests.
         let trees = vec![
             Self::build_tree_1(),
             Self::build_tree_2(),
@@ -236,34 +261,37 @@ impl RiskForest {
         Self {
             trees,
             feature_names,
-            version: "4.0.3".to_string(),
-            trained_at: Utc::now(),
+            version: "test-fixture-v1".to_string(),
+            trained_at: DateTime::from_timestamp(0, 0).expect("Unix epoch is valid"),
         }
     }
 
     /// Predict risk score (0.0–1.0) with feature importances.
     pub fn predict(&self, features: &FeatureVector) -> MLPrediction {
         let arr = features.to_array();
-        let mut scores: Vec<f64> = Vec::new();
+        let mut scores: Vec<f64> = Vec::with_capacity(MAX_PREDICTION_TREES);
 
-        for tree in &self.trees {
+        for tree in self.trees.iter().take(MAX_PREDICTION_TREES) {
             scores.push(tree.predict(&arr));
         }
 
-        let avg_score = scores.iter().sum::<f64>() / scores.len() as f64;
+        let avg_score = if scores.is_empty() {
+            0.0
+        } else {
+            scores.iter().sum::<f64>() / scores.len() as f64
+        };
         let calibrated = Self::calibrate(avg_score);
 
         // Calculate feature importances via perturbation
         let importances = self.feature_importances(features, calibrated);
 
         // Confidence based on tree agreement
-        let variance = scores.iter()
-            .map(|s| (s - avg_score).powi(2))
-            .sum::<f64>() / scores.len() as f64;
-        let confidence = (1.0 - variance.sqrt()).max(0.0).min(1.0);
+        let variance =
+            scores.iter().map(|s| (s - avg_score).powi(2)).sum::<f64>() / scores.len() as f64;
+        let confidence = (1.0 - variance.sqrt()).clamp(0.0, 1.0);
 
         MLPrediction {
-            risk_score: (calibrated * 100.0).min(100.0).max(0.0) as u8,
+            risk_score: (calibrated * 100.0).clamp(0.0, 100.0) as u8,
             confidence,
             feature_importances: importances,
             model_version: self.version.clone(),
@@ -294,10 +322,17 @@ impl RiskForest {
             let mut perturbed = arr;
             perturbed[i] = 0.0; // Zero out feature
 
-            let perturbed_scores: Vec<f64> = self.trees.iter()
-                .map(|t| t.predict(&perturbed))
-                .collect();
-            let perturbed_avg = perturbed_scores.iter().sum::<f64>() / perturbed_scores.len() as f64;
+            let mut perturbed_total = 0.0;
+            let mut perturbed_count = 0usize;
+            for tree in self.trees.iter().take(MAX_PREDICTION_TREES) {
+                perturbed_total += tree.predict(&perturbed);
+                perturbed_count += 1;
+            }
+            let perturbed_avg = if perturbed_count == 0 {
+                0.0
+            } else {
+                perturbed_total / perturbed_count as f64
+            };
             let perturbed_calibrated = Self::calibrate(perturbed_avg);
 
             let impact = (base_score - perturbed_calibrated).abs();
@@ -310,15 +345,21 @@ impl RiskForest {
                     "increases_risk"
                 } else {
                     "decreases_risk"
-                }.to_string(),
+                }
+                .to_string(),
             });
         }
 
-        importances.sort_by(|a, b| b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal));
+        importances.sort_by(|a, b| {
+            b.importance
+                .partial_cmp(&a.importance)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         importances
     }
 
-    // Pre-trained trees (simplified representations)
+    // Local/test fixture trees.
+    #[cfg(any(test, feature = "mock-tee"))]
     fn build_tree_1() -> TreeNode {
         TreeNode::Split {
             feature_index: 0, // amount_log
@@ -326,23 +367,39 @@ impl RiskForest {
             left: Box::new(TreeNode::Split {
                 feature_index: 5, // jurisdiction_risk
                 threshold: 0.3,
-                left: Box::new(TreeNode::Leaf { score: 0.1, samples: 5000 }),
-                right: Box::new(TreeNode::Leaf { score: 0.35, samples: 1200 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.1,
+                    samples: 5000,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.35,
+                    samples: 1200,
+                }),
             }),
             right: Box::new(TreeNode::Split {
                 feature_index: 8, // is_new_counterparty
                 threshold: 0.5,
-                left: Box::new(TreeNode::Leaf { score: 0.3, samples: 2000 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.3,
+                    samples: 2000,
+                }),
                 right: Box::new(TreeNode::Split {
                     feature_index: 11, // structuring
                     threshold: 0.5,
-                    left: Box::new(TreeNode::Leaf { score: 0.5, samples: 800 }),
-                    right: Box::new(TreeNode::Leaf { score: 0.85, samples: 200 }),
+                    left: Box::new(TreeNode::Leaf {
+                        score: 0.5,
+                        samples: 800,
+                    }),
+                    right: Box::new(TreeNode::Leaf {
+                        score: 0.85,
+                        samples: 200,
+                    }),
                 }),
             }),
         }
     }
 
+    #[cfg(any(test, feature = "mock-tee"))]
     fn build_tree_2() -> TreeNode {
         TreeNode::Split {
             feature_index: 2, // velocity_24h
@@ -350,18 +407,31 @@ impl RiskForest {
             left: Box::new(TreeNode::Split {
                 feature_index: 14, // currency_risk
                 threshold: 0.2,
-                left: Box::new(TreeNode::Leaf { score: 0.08, samples: 4000 }),
-                right: Box::new(TreeNode::Leaf { score: 0.25, samples: 1500 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.08,
+                    samples: 4000,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.25,
+                    samples: 1500,
+                }),
             }),
             right: Box::new(TreeNode::Split {
                 feature_index: 10, // frequency_deviation
                 threshold: 2.0,
-                left: Box::new(TreeNode::Leaf { score: 0.4, samples: 1000 }),
-                right: Box::new(TreeNode::Leaf { score: 0.75, samples: 500 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.4,
+                    samples: 1000,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.75,
+                    samples: 500,
+                }),
             }),
         }
     }
 
+    #[cfg(any(test, feature = "mock-tee"))]
     fn build_tree_3() -> TreeNode {
         TreeNode::Split {
             feature_index: 13, // cross_border
@@ -369,18 +439,31 @@ impl RiskForest {
             left: Box::new(TreeNode::Split {
                 feature_index: 1, // amount_deviation
                 threshold: 2.0,
-                left: Box::new(TreeNode::Leaf { score: 0.12, samples: 3500 }),
-                right: Box::new(TreeNode::Leaf { score: 0.45, samples: 800 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.12,
+                    samples: 3500,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.45,
+                    samples: 800,
+                }),
             }),
             right: Box::new(TreeNode::Split {
                 feature_index: 5, // jurisdiction_risk
                 threshold: 0.5,
-                left: Box::new(TreeNode::Leaf { score: 0.3, samples: 1500 }),
-                right: Box::new(TreeNode::Leaf { score: 0.7, samples: 700 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.3,
+                    samples: 1500,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.7,
+                    samples: 700,
+                }),
             }),
         }
     }
 
+    #[cfg(any(test, feature = "mock-tee"))]
     fn build_tree_4() -> TreeNode {
         TreeNode::Split {
             feature_index: 9, // account_age
@@ -388,18 +471,31 @@ impl RiskForest {
             left: Box::new(TreeNode::Split {
                 feature_index: 0, // amount_log
                 threshold: 8.5,
-                left: Box::new(TreeNode::Leaf { score: 0.35, samples: 600 }),
-                right: Box::new(TreeNode::Leaf { score: 0.7, samples: 300 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.35,
+                    samples: 600,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.7,
+                    samples: 300,
+                }),
             }),
             right: Box::new(TreeNode::Split {
                 feature_index: 4, // counterparty_diversity
                 threshold: 0.8,
-                left: Box::new(TreeNode::Leaf { score: 0.15, samples: 4500 }),
-                right: Box::new(TreeNode::Leaf { score: 0.55, samples: 400 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.15,
+                    samples: 4500,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.55,
+                    samples: 400,
+                }),
             }),
         }
     }
 
+    #[cfg(any(test, feature = "mock-tee"))]
     fn build_tree_5() -> TreeNode {
         TreeNode::Split {
             feature_index: 6, // time_of_day
@@ -407,14 +503,26 @@ impl RiskForest {
             left: Box::new(TreeNode::Split {
                 feature_index: 12, // round_amount
                 threshold: 0.5,
-                left: Box::new(TreeNode::Leaf { score: 0.2, samples: 800 }),
-                right: Box::new(TreeNode::Leaf { score: 0.55, samples: 200 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.2,
+                    samples: 800,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.55,
+                    samples: 200,
+                }),
             }),
             right: Box::new(TreeNode::Split {
                 feature_index: 3, // velocity_7d
                 threshold: 20.0,
-                left: Box::new(TreeNode::Leaf { score: 0.12, samples: 5000 }),
-                right: Box::new(TreeNode::Leaf { score: 0.6, samples: 600 }),
+                left: Box::new(TreeNode::Leaf {
+                    score: 0.12,
+                    samples: 5000,
+                }),
+                right: Box::new(TreeNode::Leaf {
+                    score: 0.6,
+                    samples: 600,
+                }),
             }),
         }
     }
@@ -473,7 +581,11 @@ mod tests {
         let payment = Payment::test_payment("alice", "bob", 1000, "USD");
         let features = FeatureVector::from_payment(&payment, None);
         let prediction = forest.predict(&features);
-        assert!(prediction.risk_score < 50, "Low-value USD payment should score < 50, got {}", prediction.risk_score);
+        assert!(
+            prediction.risk_score < 50,
+            "Low-value USD payment should score < 50, got {}",
+            prediction.risk_score
+        );
     }
 
     #[test]
@@ -492,7 +604,10 @@ mod tests {
         };
         let features = FeatureVector::from_payment(&payment, Some(&history));
         let prediction = forest.predict(&features);
-        assert!(prediction.risk_score > 30, "High-value cross-border payment should score > 30");
+        assert!(
+            prediction.risk_score > 30,
+            "High-value cross-border payment should score > 30"
+        );
     }
 
     #[test]
@@ -733,7 +848,10 @@ mod tests {
 
     #[test]
     fn tree_leaf_returns_score() {
-        let leaf = TreeNode::Leaf { score: 0.42, samples: 100 };
+        let leaf = TreeNode::Leaf {
+            score: 0.42,
+            samples: 100,
+        };
         let features = [0.0; 15];
         assert!((leaf.predict(&features) - 0.42).abs() < f64::EPSILON);
     }
@@ -743,8 +861,14 @@ mod tests {
         let tree = TreeNode::Split {
             feature_index: 0,
             threshold: 5.0,
-            left: Box::new(TreeNode::Leaf { score: 0.1, samples: 10 }),
-            right: Box::new(TreeNode::Leaf { score: 0.9, samples: 10 }),
+            left: Box::new(TreeNode::Leaf {
+                score: 0.1,
+                samples: 10,
+            }),
+            right: Box::new(TreeNode::Leaf {
+                score: 0.9,
+                samples: 10,
+            }),
         };
         let mut features = [0.0; 15];
         features[0] = 3.0; // below threshold
@@ -756,8 +880,14 @@ mod tests {
         let tree = TreeNode::Split {
             feature_index: 0,
             threshold: 5.0,
-            left: Box::new(TreeNode::Leaf { score: 0.1, samples: 10 }),
-            right: Box::new(TreeNode::Leaf { score: 0.9, samples: 10 }),
+            left: Box::new(TreeNode::Leaf {
+                score: 0.1,
+                samples: 10,
+            }),
+            right: Box::new(TreeNode::Leaf {
+                score: 0.9,
+                samples: 10,
+            }),
         };
         let mut features = [0.0; 15];
         features[0] = 7.0; // above threshold
@@ -774,7 +904,7 @@ mod tests {
         let payment = Payment::test_payment("a", "b", 1000, "USD");
         let fv = FeatureVector::from_payment(&payment, None);
         let prediction = forest.predict(&fv);
-        assert_eq!(prediction.model_version, "4.0.3");
+        assert_eq!(prediction.model_version, "test-fixture-v1");
     }
 
     #[test]
@@ -796,5 +926,23 @@ mod tests {
         let fv = FeatureVector::from_payment(&payment, None);
         let prediction = forest.predict(&fv);
         assert_eq!(prediction.tree_scores.len(), 5);
+    }
+
+    #[test]
+    fn prediction_bounds_untrusted_forest_work_and_output() {
+        let mut forest = RiskForest::default_model();
+        forest.trees = vec![
+            TreeNode::Leaf {
+                score: 0.5,
+                samples: 1,
+            };
+            MAX_PREDICTION_TREES + 1
+        ];
+        let payment = Payment::test_payment("a", "b", 1000, "USD");
+        let fv = FeatureVector::from_payment(&payment, None);
+
+        let prediction = forest.predict(&fv);
+
+        assert_eq!(prediction.tree_scores.len(), MAX_PREDICTION_TREES);
     }
 }

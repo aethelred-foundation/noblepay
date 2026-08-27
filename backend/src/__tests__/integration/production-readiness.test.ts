@@ -20,8 +20,6 @@ jest.mock("../../lib/logger", () => ({
   logger: mockLogger,
   generateCorrelationId: jest.fn().mockReturnValue("prod-test-corr-id"),
   createRequestLogger: jest.fn().mockReturnValue(mockLogger),
-  maskIdentifier: jest.fn((value?: string | null) => value ?? undefined),
-  maskTransactionHash: jest.fn((value?: string | null) => value ?? undefined),
 }));
 
 jest.mock("../../lib/metrics", () => ({
@@ -33,7 +31,6 @@ jest.mock("../../lib/metrics", () => ({
   activeBusinesses: { set: jest.fn() },
   httpRequestDuration: { observe: jest.fn() },
   httpRequestTotal: { inc: jest.fn() },
-  teeNodesActive: { set: jest.fn() },
   teeAttestationFailures: { inc: jest.fn() },
   register: {
     metrics: jest.fn().mockResolvedValue(""),
@@ -77,6 +74,7 @@ const mockPrisma = {
 };
 
 jest.mock("@prisma/client", () => ({
+  ...jest.requireActual("@prisma/client"),
   PrismaClient: jest.fn().mockImplementation(() => mockPrisma),
   BusinessTier: {
     STARTER: "STARTER",
@@ -143,13 +141,22 @@ jest.mock("../../routes/reporting", () => {
 });
 
 import request from "supertest";
-import app, { validateProductionEnv } from "../../index";
+import app, {
+  setReadinessDependenciesForTest,
+  validateProductionEnv,
+} from "../../index";
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 describe("Production Readiness", () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    setReadinessDependenciesForTest({
+      database: jest.fn().mockResolvedValue(undefined),
+      compliance: jest.fn().mockResolvedValue(undefined),
+      rpc: jest.fn().mockResolvedValue(undefined),
+      contracts: jest.fn().mockResolvedValue(undefined),
+    });
   });
 
   // ─── Health Endpoint ────────────────────────────────────────────────────
@@ -172,29 +179,35 @@ describe("Production Readiness", () => {
 
   describe("GET /readyz", () => {
     it("returns 200 when database is available", async () => {
-      mockPrisma.$queryRaw.mockResolvedValueOnce([{ "1": 1 }]);
-
       const res = await request(app).get("/readyz");
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
         status: "ready",
         service: "noblepay-api",
-        database: "connected",
+        checks: {
+          database: "ready",
+          compliance: "ready",
+          rpc: "ready",
+          contracts: "ready",
+        },
       });
     });
 
     it("returns 503 when database is unreachable", async () => {
-      mockPrisma.$queryRaw.mockRejectedValueOnce(
-        new Error("Connection refused"),
-      );
+      setReadinessDependenciesForTest({
+        database: jest.fn().mockRejectedValue(new Error("Connection refused")),
+        compliance: jest.fn().mockResolvedValue(undefined),
+        rpc: jest.fn().mockResolvedValue(undefined),
+        contracts: jest.fn().mockResolvedValue(undefined),
+      });
 
       const res = await request(app).get("/readyz");
 
       expect(res.status).toBe(503);
       expect(res.body).toMatchObject({
         status: "not_ready",
-        database: "disconnected",
+        checks: expect.objectContaining({ database: "unavailable" }),
       });
     });
   });
@@ -221,6 +234,28 @@ describe("Production Readiness", () => {
   describe("validateProductionEnv", () => {
     let originalExit: typeof process.exit;
     const savedEnv: Record<string, string | undefined> = {};
+    const productionKeys = [
+      "JWT_SECRET",
+      "API_KEY_HASH_SECRET",
+      "COMPLIANCE_API_KEY",
+      "DATABASE_URL",
+      "AETHELRED_RPC_URL",
+      "NOBLEPAY_CHAIN_ID",
+      "AETHELRED_NETWORK_ANCHOR_BLOCK",
+      "AETHELRED_NETWORK_ANCHOR_HASH",
+      "NOBLEPAY_CONTRACT_ADDRESS",
+      "BUSINESS_REGISTRY_CONTRACT_ADDRESS",
+      "BUSINESS_VERIFIER_ADDRESS",
+      "NOBLEPAY_MIN_CONFIRMATIONS",
+      "NOBLEPAY_TOKEN_CONFIG",
+      "COMPLIANCE_API_URL",
+      "COMPLIANCE_MAX_DATASET_AGE_HOURS",
+      "TRAVEL_RULE_THRESHOLD_USD",
+      "TRAVEL_RULE_ACTIVE_KEY_ID",
+      "TRAVEL_RULE_ENCRYPTION_KEYS",
+      "PUBLIC_ORIGIN",
+      "CORS_ORIGIN",
+    ];
 
     beforeEach(() => {
       originalExit = process.exit;
@@ -230,28 +265,15 @@ describe("Production Readiness", () => {
       }) as never;
 
       // Save env vars
-      savedEnv.JWT_SECRET = process.env.JWT_SECRET;
-      savedEnv.DATABASE_URL = process.env.DATABASE_URL;
-      savedEnv.CORS_ORIGIN = process.env.CORS_ORIGIN;
+      for (const key of productionKeys) savedEnv[key] = process.env[key];
     });
 
     afterEach(() => {
       process.exit = originalExit;
       // Restore env vars
-      if (savedEnv.JWT_SECRET !== undefined) {
-        process.env.JWT_SECRET = savedEnv.JWT_SECRET;
-      } else {
-        delete process.env.JWT_SECRET;
-      }
-      if (savedEnv.DATABASE_URL !== undefined) {
-        process.env.DATABASE_URL = savedEnv.DATABASE_URL;
-      } else {
-        delete process.env.DATABASE_URL;
-      }
-      if (savedEnv.CORS_ORIGIN !== undefined) {
-        process.env.CORS_ORIGIN = savedEnv.CORS_ORIGIN;
-      } else {
-        delete process.env.CORS_ORIGIN;
+      for (const key of productionKeys) {
+        if (savedEnv[key] === undefined) delete process.env[key];
+        else process.env[key] = savedEnv[key];
       }
     });
 
@@ -292,8 +314,36 @@ describe("Production Readiness", () => {
     });
 
     it("passes when all production env vars are properly set", () => {
-      process.env.JWT_SECRET = "prod-secret-long-enough";
+      process.env.JWT_SECRET = "j".repeat(32);
+      process.env.API_KEY_HASH_SECRET = "a".repeat(32);
+      process.env.COMPLIANCE_API_KEY = "c".repeat(32);
       process.env.DATABASE_URL = "postgresql://localhost/noblepay";
+      process.env.AETHELRED_RPC_URL = "https://rpc.aethelred.network";
+      process.env.NOBLEPAY_CHAIN_ID = "7332";
+      process.env.AETHELRED_NETWORK_ANCHOR_BLOCK = "1";
+      process.env.AETHELRED_NETWORK_ANCHOR_HASH = `0x${"ab".repeat(32)}`;
+      process.env.NOBLEPAY_CONTRACT_ADDRESS =
+        "0x1111111111111111111111111111111111111111";
+      process.env.BUSINESS_REGISTRY_CONTRACT_ADDRESS =
+        "0x2222222222222222222222222222222222222222";
+      process.env.BUSINESS_VERIFIER_ADDRESS =
+        "0x4444444444444444444444444444444444444444";
+      process.env.NOBLEPAY_MIN_CONFIRMATIONS = "2";
+      process.env.NOBLEPAY_TOKEN_CONFIG = JSON.stringify({
+        "0x3333333333333333333333333333333333333333": {
+          currency: "USDC",
+          currencyCode: "USD",
+          decimals: 6,
+        },
+      });
+      process.env.COMPLIANCE_API_URL = "https://compliance.aethelred.network";
+      process.env.COMPLIANCE_MAX_DATASET_AGE_HOURS = "24";
+      process.env.TRAVEL_RULE_THRESHOLD_USD = "1000.00";
+      process.env.TRAVEL_RULE_ACTIVE_KEY_ID = "test-key";
+      process.env.TRAVEL_RULE_ENCRYPTION_KEYS = JSON.stringify({
+        "test-key": Buffer.alloc(32, 5).toString("base64"),
+      });
+      process.env.PUBLIC_ORIGIN = "https://noblepay.example.com";
       process.env.CORS_ORIGIN = "https://noblepay.example.com";
 
       // Should NOT throw or call process.exit

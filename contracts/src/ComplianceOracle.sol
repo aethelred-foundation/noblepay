@@ -8,13 +8,16 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 /**
  * @title ComplianceOracle
  * @author Aethelred Team
- * @notice TEE-backed compliance oracle for the NoblePay cross-border payment system.
- *         Manages TEE node registration, attestation verification, sanctions list
- *         tracking, and risk threshold configuration.
+ * @notice Registry and audit log for compliance results accepted from authorized
+ *         off-chain operators. Manages operator registration, attestation-record
+ *         integrity, sanctions-list metadata, and risk-threshold configuration.
  *
- * @dev TEE nodes run compliance screening inside Intel SGX / AWS Nitro enclaves.
- *      This contract verifies their attestations on-chain and stores only hashed
- *      compliance decisions — no PII is ever written to the blockchain.
+ * @dev This contract does not verify an SGX/Nitro certificate, hardware signature,
+ *      PCR value, or enclave measurement. `TEE_MANAGER_ROLE` is the governance trust
+ *      boundary: `verifyAttestation` checks that the submitted bytes match a supplied
+ *      content hash and records the manager's acceptance. Hardware-backed verification,
+ *      when required, must be performed by an independently audited off-chain service
+ *      before its operator is authorized. Only hashed decisions are stored on-chain.
  *
  * ┌───────────────────────────────────────────────────────────────────┐
  * │                     COMPLIANCE ORACLE                            │
@@ -22,8 +25,8 @@ import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
  * │  ┌────────────────┐  ┌────────────────┐  ┌────────────────┐    │
  * │  │  TEE Registry   │  │  Attestation   │  │  Risk Config   │    │
  * │  │  ────────────── │  │  ──────────── │  │  ──────────── │    │
- * │  │  • register     │  │  • verify     │  │  • thresholds  │    │
- * │  │  • deregister   │  │  • validate   │  │  • multi-sig   │    │
+ * │  │  • register     │  │  • record     │  │  • thresholds  │    │
+ * │  │  • deregister   │  │  • hash check │  │  • multi-sig   │    │
  * │  │  • heartbeat    │  │  • revoke     │  │  • update      │    │
  * │  │  • slashing     │  │  • history    │  │  • sanctions   │    │
  * │  └────────────────┘  └────────────────┘  └────────────────┘    │
@@ -151,7 +154,9 @@ contract ComplianceOracle is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Screening results keyed by result hash.
     mapping(bytes32 => ScreeningResult) public screeningResults;
 
-    /// @notice Verified attestation hashes (attestation hash => verified flag).
+    /// @notice Attestation hashes accepted by an authorized manager.
+    /// @dev The legacy public name is retained for ABI compatibility; `true` does not
+    ///      itself prove a hardware signature or enclave measurement was verified on-chain.
     mapping(bytes32 => bool) public verifiedAttestations;
 
     /// @notice Pending threshold change proposals.
@@ -167,6 +172,9 @@ contract ComplianceOracle is AccessControl, Pausable, ReentrancyGuard {
         bool exists;
     }
     mapping(bytes32 => ProposedThresholds) public proposedThresholds;
+
+    /// @notice Monotonic nonce preventing same-block proposal ID collisions.
+    uint256 public thresholdProposalNonce;
 
     // ──────────────────────────────────────────────────────────────
     // Events
@@ -334,15 +342,17 @@ contract ComplianceOracle is AccessControl, Pausable, ReentrancyGuard {
     }
 
     // ──────────────────────────────────────────────────────────────
-    // Attestation Verification
+    // Attestation Acceptance Recording
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * @notice Verifies a TEE attestation and records it on-chain.
+     * @notice Records an authorized manager's acceptance of off-chain attestation bytes.
+     * @dev Validates content-hash integrity only. It does not cryptographically verify
+     *      an enclave certificate, hardware signature, quote, PCR, or measurement.
      * @param _teeNode         Address of the TEE node.
      * @param _attestationData Raw attestation data from the enclave.
      * @param _expectedHash    Expected hash of the attestation content.
-     * @return attestationHash Hash of the verified attestation.
+     * @return attestationHash Identifier for the accepted attestation record.
      */
     function verifyAttestation(
         address _teeNode,
@@ -353,10 +363,10 @@ contract ComplianceOracle is AccessControl, Pausable, ReentrancyGuard {
         if (node.registeredAt == 0) revert NodeNotFound();
         if (node.status != TEENodeStatus.ACTIVE) revert NodeNotActive();
 
-        // Compute attestation hash and verify integrity
+        // Compute a unique audit-record identifier.
         attestationHash = keccak256(abi.encodePacked(_teeNode, _attestationData, block.timestamp));
 
-        // Verify the attestation content matches the expected hash
+        // Check content integrity; hardware authenticity is an off-chain responsibility.
         bytes32 contentHash = keccak256(_attestationData);
         if (contentHash != _expectedHash) revert InvalidAttestation();
 
@@ -404,7 +414,16 @@ contract ComplianceOracle is AccessControl, Pausable, ReentrancyGuard {
     ) external onlyRole(THRESHOLD_MANAGER_ROLE) returns (bytes32 proposalId) {
         if (_lowMax >= _mediumMax || _mediumMax > 100) revert InvalidThresholds();
 
-        proposalId = keccak256(abi.encodePacked(_lowMax, _mediumMax, block.timestamp));
+        proposalId = keccak256(
+            abi.encode(
+                address(this),
+                block.chainid,
+                msg.sender,
+                _lowMax,
+                _mediumMax,
+                thresholdProposalNonce++
+            )
+        );
 
         thresholdChangeApprovals[proposalId] = 1;
         thresholdChangeVotes[proposalId][msg.sender] = true;
@@ -521,7 +540,9 @@ contract ComplianceOracle is AccessControl, Pausable, ReentrancyGuard {
         return sanctionsLists[_source].version;
     }
 
-    /// @notice Checks whether an attestation has been verified.
+    /// @notice Checks whether an authorized manager accepted an attestation record.
+    /// @dev The function name is retained for ABI compatibility and is not evidence of
+    ///      on-chain hardware-signature or enclave-measurement verification.
     function isAttestationVerified(bytes32 _attestationHash) external view returns (bool) {
         return verifiedAttestations[_attestationHash];
     }
@@ -565,6 +586,10 @@ contract ComplianceOracle is AccessControl, Pausable, ReentrancyGuard {
         });
 
         emit RiskThresholdUpdated(lowMax, mediumMax, msg.sender);
+
+        // Finalize the proposal so additional managers cannot replay application.
+        delete proposedThresholds[_proposalId];
+        delete thresholdChangeApprovals[_proposalId];
     }
 
     /// @dev Removes a TEE node from the active list using swap-and-pop.

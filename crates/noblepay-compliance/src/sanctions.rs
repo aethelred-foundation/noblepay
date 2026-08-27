@@ -9,15 +9,18 @@
 //! individual lists without blocking concurrent reads.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha3::{Digest, Sha3_256};
 use tracing::{info, warn};
 
-use crate::types::{
-    EntityType, SanctionsCheckResult, SanctionsEntry, SanctionsList, SanctionsMatchDetail,
-};
+#[cfg(any(test, feature = "mock-tee"))]
+use crate::types::EntityType;
+use crate::types::{SanctionsCheckResult, SanctionsEntry, SanctionsList, SanctionsMatchDetail};
 use crate::ComplianceError;
 
 /// Minimum similarity threshold (0.0–1.0) for a fuzzy match to be considered a hit.
@@ -30,6 +33,36 @@ pub struct SanctionsDatabase {
     lists: Arc<RwLock<HashMap<SanctionsList, Vec<SanctionsEntry>>>>,
     /// Timestamp of the last successful update per list.
     last_updated: Arc<RwLock<HashMap<SanctionsList, DateTime<Utc>>>>,
+    metadata: Arc<RwLock<Option<SanctionsMetadata>>>,
+    source_config: Arc<RwLock<Option<SanctionsSourceConfig>>>,
+}
+
+impl Default for SanctionsDatabase {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Metadata for the exact external dataset currently serving screening calls.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SanctionsMetadata {
+    pub source: String,
+    pub dataset_generated_at: DateTime<Utc>,
+    pub dataset_digest: String,
+}
+
+#[derive(Debug, Clone)]
+struct SanctionsSourceConfig {
+    dataset_path: PathBuf,
+    digest_path: PathBuf,
+    max_age_hours: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct SanctionsDataset {
+    source: String,
+    generated_at: DateTime<Utc>,
+    entries: Vec<SanctionsEntry>,
 }
 
 impl SanctionsDatabase {
@@ -38,20 +71,193 @@ impl SanctionsDatabase {
         Self {
             lists: Arc::new(RwLock::new(HashMap::new())),
             last_updated: Arc::new(RwLock::new(HashMap::new())),
+            metadata: Arc::new(RwLock::new(None)),
+            source_config: Arc::new(RwLock::new(None)),
         }
     }
 
-    /// Initialize with built-in placeholder entries for all four lists.
-    ///
-    /// In production these would be fetched from upstream feeds; the built-in
-    /// entries exist so that the engine is functional immediately after startup.
+    /// Initialize deterministic fixtures. This function is absent from normal
+    /// production builds and cannot be selected by runtime configuration.
+    #[cfg(any(test, feature = "mock-tee"))]
     pub async fn with_default_lists() -> Self {
         let db = Self::new();
         db.load_ofac_list().await;
         db.load_uae_list().await;
         db.load_un_list().await;
         db.load_eu_list().await;
+        *db.metadata.write().await = Some(SanctionsMetadata {
+            source: "test-fixture".into(),
+            dataset_generated_at: Utc::now(),
+            dataset_digest: "test-only".into(),
+        });
         db
+    }
+
+    /// Load the pinned external sanctions dataset configured for production.
+    pub async fn from_environment() -> Result<Self, ComplianceError> {
+        let dataset_path = required_env_path("SANCTIONS_DATASET_PATH")?;
+        let digest_path = required_env_path("SANCTIONS_DIGEST_PATH")?;
+        let max_age_hours = std::env::var("SANCTIONS_MAX_AGE_HOURS")
+            .map_err(|_| {
+                ComplianceError::SanctionsError("SANCTIONS_MAX_AGE_HOURS is required".into())
+            })?
+            .parse::<i64>()
+            .map_err(|_| {
+                ComplianceError::SanctionsError("SANCTIONS_MAX_AGE_HOURS must be an integer".into())
+            })?;
+        if max_age_hours <= 0 {
+            return Err(ComplianceError::SanctionsError(
+                "SANCTIONS_MAX_AGE_HOURS must be positive".into(),
+            ));
+        }
+
+        let db = Self::new();
+        *db.source_config.write().await = Some(SanctionsSourceConfig {
+            dataset_path,
+            digest_path,
+            max_age_hours,
+        });
+        db.refresh_configured().await?;
+        Ok(db)
+    }
+
+    /// Atomically reload the configured dataset after integrity, freshness, and
+    /// four-list coverage validation. Failure leaves the previous snapshot live.
+    pub async fn refresh_configured(&self) -> Result<(), ComplianceError> {
+        let config = self.source_config.read().await.clone().ok_or_else(|| {
+            ComplianceError::SanctionsError("no production sanctions source configured".into())
+        })?;
+        let raw = tokio::fs::read(&config.dataset_path)
+            .await
+            .map_err(|error| {
+                ComplianceError::SanctionsError(format!(
+                    "read sanctions dataset {}: {error}",
+                    config.dataset_path.display()
+                ))
+            })?;
+        let expected_digest = tokio::fs::read_to_string(&config.digest_path)
+            .await
+            .map_err(|error| {
+                ComplianceError::SanctionsError(format!(
+                    "read sanctions digest {}: {error}",
+                    config.digest_path.display()
+                ))
+            })?
+            .trim()
+            .to_lowercase();
+        if expected_digest.len() != 64
+            || !expected_digest
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(ComplianceError::SanctionsError(
+                "sanctions digest must be a 64-character SHA3-256 hex value".into(),
+            ));
+        }
+        let actual_digest = hex::encode(Sha3_256::digest(&raw));
+        if actual_digest != expected_digest {
+            return Err(ComplianceError::SanctionsError(
+                "sanctions dataset digest mismatch".into(),
+            ));
+        }
+
+        let dataset: SanctionsDataset = serde_json::from_slice(&raw).map_err(|error| {
+            ComplianceError::SanctionsError(format!("parse sanctions dataset: {error}"))
+        })?;
+        if dataset.source.trim().is_empty() || dataset.entries.is_empty() {
+            return Err(ComplianceError::SanctionsError(
+                "sanctions dataset source and entries must be non-empty".into(),
+            ));
+        }
+        let now = Utc::now();
+        if dataset.generated_at > now + chrono::Duration::minutes(5) {
+            return Err(ComplianceError::SanctionsError(
+                "sanctions dataset timestamp is in the future".into(),
+            ));
+        }
+        if dataset.generated_at < now - chrono::Duration::hours(config.max_age_hours) {
+            return Err(ComplianceError::SanctionsError(
+                "sanctions dataset is stale".into(),
+            ));
+        }
+
+        let mut grouped: HashMap<SanctionsList, Vec<SanctionsEntry>> = HashMap::new();
+        for entry in dataset.entries {
+            if entry.entity_name.trim().is_empty() {
+                return Err(ComplianceError::SanctionsError(
+                    "sanctions entry has an empty entity_name".into(),
+                ));
+            }
+            grouped.entry(entry.list_source).or_default().push(entry);
+        }
+        for required in [
+            SanctionsList::Ofac,
+            SanctionsList::UaeCentralBank,
+            SanctionsList::UnitedNations,
+            SanctionsList::EuropeanUnion,
+        ] {
+            if grouped.get(&required).is_none_or(Vec::is_empty) {
+                return Err(ComplianceError::SanctionsError(format!(
+                    "sanctions dataset is missing required list {required}"
+                )));
+            }
+        }
+
+        let timestamps = grouped
+            .keys()
+            .map(|list| (*list, dataset.generated_at))
+            .collect::<HashMap<_, _>>();
+        let metadata = SanctionsMetadata {
+            source: dataset.source,
+            dataset_generated_at: dataset.generated_at,
+            dataset_digest: actual_digest,
+        };
+        *self.lists.write().await = grouped;
+        *self.last_updated.write().await = timestamps;
+        *self.metadata.write().await = Some(metadata.clone());
+        info!(
+            source = %metadata.source,
+            digest = %metadata.dataset_digest,
+            generated_at = %metadata.dataset_generated_at,
+            "loaded verified sanctions dataset"
+        );
+        Ok(())
+    }
+
+    pub async fn metadata(&self) -> Option<SanctionsMetadata> {
+        self.metadata.read().await.clone()
+    }
+
+    /// Validate that all required lists and a non-stale verified snapshot remain
+    /// available. Used by startup and readiness; screening also checks coverage.
+    pub async fn validate_ready(&self) -> Result<(), ComplianceError> {
+        let lists = self.lists.read().await;
+        for required in [
+            SanctionsList::Ofac,
+            SanctionsList::UaeCentralBank,
+            SanctionsList::UnitedNations,
+            SanctionsList::EuropeanUnion,
+        ] {
+            if lists.get(&required).is_none_or(Vec::is_empty) {
+                return Err(ComplianceError::SanctionsError(format!(
+                    "required sanctions list {required} is unavailable"
+                )));
+            }
+        }
+        drop(lists);
+        let metadata = self.metadata().await.ok_or_else(|| {
+            ComplianceError::SanctionsError("sanctions metadata is unavailable".into())
+        })?;
+        if let Some(config) = self.source_config.read().await.as_ref() {
+            if metadata.dataset_generated_at
+                < Utc::now() - chrono::Duration::hours(config.max_age_hours)
+            {
+                return Err(ComplianceError::SanctionsError(
+                    "sanctions dataset is stale".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -59,6 +265,7 @@ impl SanctionsDatabase {
     // -----------------------------------------------------------------------
 
     /// Load OFAC SDN list entries.
+    #[cfg(any(test, feature = "mock-tee"))]
     pub async fn load_ofac_list(&self) {
         let entries = vec![
             SanctionsEntry {
@@ -83,6 +290,7 @@ impl SanctionsDatabase {
     }
 
     /// Load UAE Central Bank sanctions list entries.
+    #[cfg(any(test, feature = "mock-tee"))]
     pub async fn load_uae_list(&self) {
         let entries = vec![SanctionsEntry {
             entity_name: "UAE BLOCKED ENTITY".into(),
@@ -92,11 +300,13 @@ impl SanctionsDatabase {
             addresses: vec!["0xdead0003".into()],
             id_numbers: vec!["UAE-ID-001".into()],
         }];
-        self.upsert_list(SanctionsList::UaeCentralBank, entries).await;
+        self.upsert_list(SanctionsList::UaeCentralBank, entries)
+            .await;
         info!("loaded UAE Central Bank list");
     }
 
     /// Load United Nations Security Council consolidated list entries.
+    #[cfg(any(test, feature = "mock-tee"))]
     pub async fn load_un_list(&self) {
         let entries = vec![SanctionsEntry {
             entity_name: "UN SANCTIONED ENTITY".into(),
@@ -106,11 +316,13 @@ impl SanctionsDatabase {
             addresses: vec![],
             id_numbers: vec!["UN-REF-001".into()],
         }];
-        self.upsert_list(SanctionsList::UnitedNations, entries).await;
+        self.upsert_list(SanctionsList::UnitedNations, entries)
+            .await;
         info!("loaded UN consolidated list");
     }
 
     /// Load European Union consolidated sanctions list entries.
+    #[cfg(any(test, feature = "mock-tee"))]
     pub async fn load_eu_list(&self) {
         let entries = vec![SanctionsEntry {
             entity_name: "EU BLOCKED PERSON".into(),
@@ -120,7 +332,8 @@ impl SanctionsDatabase {
             addresses: vec!["0xdead0004".into()],
             id_numbers: vec![],
         }];
-        self.upsert_list(SanctionsList::EuropeanUnion, entries).await;
+        self.upsert_list(SanctionsList::EuropeanUnion, entries)
+            .await;
         info!("loaded EU consolidated list");
     }
 
@@ -158,6 +371,18 @@ impl SanctionsDatabase {
         id_numbers: &[String],
     ) -> Result<SanctionsCheckResult, ComplianceError> {
         let lists = self.lists.read().await;
+        for required in [
+            SanctionsList::Ofac,
+            SanctionsList::UaeCentralBank,
+            SanctionsList::UnitedNations,
+            SanctionsList::EuropeanUnion,
+        ] {
+            if lists.get(&required).is_none_or(Vec::is_empty) {
+                return Err(ComplianceError::SanctionsError(format!(
+                    "required sanctions list {required} is unavailable"
+                )));
+            }
+        }
         let mut matched_entries: Vec<SanctionsMatchDetail> = Vec::new();
         let mut best_score: f64 = 0.0;
 
@@ -268,6 +493,17 @@ impl SanctionsDatabase {
         }
         None
     }
+}
+
+fn required_env_path(name: &str) -> Result<PathBuf, ComplianceError> {
+    let value = std::env::var(name)
+        .map_err(|_| ComplianceError::SanctionsError(format!("{name} is required")))?;
+    if value.trim().is_empty() {
+        return Err(ComplianceError::SanctionsError(format!(
+            "{name} is required"
+        )));
+    }
+    Ok(PathBuf::from(value))
 }
 
 // ---------------------------------------------------------------------------
@@ -428,12 +664,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_database_returns_no_match() {
+    async fn empty_database_fails_closed() {
         let db = SanctionsDatabase::new();
-        let result = db.check_entity("anyone", &[], &[]).await.unwrap();
-        assert!(!result.is_match);
-        assert_eq!(result.match_score, 0.0);
-        assert!(result.matched_entries.is_empty());
+        assert!(db.check_entity("anyone", &[], &[]).await.is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -472,7 +705,10 @@ mod tests {
             .check_entity("Unknown", &["0xDEAD0001".to_string()], &[])
             .await
             .unwrap();
-        assert!(result.is_match, "Address matching should be case-insensitive");
+        assert!(
+            result.is_match,
+            "Address matching should be case-insensitive"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -497,46 +733,49 @@ mod tests {
     async fn upsert_replaces_existing_list() {
         let db = SanctionsDatabase::new();
         // Insert 2 entries
-        db.upsert_list(SanctionsList::Ofac, vec![
-            SanctionsEntry {
-                entity_name: "ENTRY ONE".into(),
-                entity_type: EntityType::Individual,
-                list_source: SanctionsList::Ofac,
-                aliases: vec![],
-                addresses: vec![],
-                id_numbers: vec![],
-            },
-            SanctionsEntry {
-                entity_name: "ENTRY TWO".into(),
-                entity_type: EntityType::Individual,
-                list_source: SanctionsList::Ofac,
-                aliases: vec![],
-                addresses: vec![],
-                id_numbers: vec![],
-            },
-        ]).await;
+        db.upsert_list(
+            SanctionsList::Ofac,
+            vec![
+                SanctionsEntry {
+                    entity_name: "ENTRY ONE".into(),
+                    entity_type: EntityType::Individual,
+                    list_source: SanctionsList::Ofac,
+                    aliases: vec![],
+                    addresses: vec![],
+                    id_numbers: vec![],
+                },
+                SanctionsEntry {
+                    entity_name: "ENTRY TWO".into(),
+                    entity_type: EntityType::Individual,
+                    list_source: SanctionsList::Ofac,
+                    aliases: vec![],
+                    addresses: vec![],
+                    id_numbers: vec![],
+                },
+            ],
+        )
+        .await;
         assert_eq!(db.total_entries().await, 2);
 
         // Replace with 1 entry
-        db.upsert_list(SanctionsList::Ofac, vec![
-            SanctionsEntry {
+        db.upsert_list(
+            SanctionsList::Ofac,
+            vec![SanctionsEntry {
                 entity_name: "ENTRY THREE".into(),
                 entity_type: EntityType::Organization,
                 list_source: SanctionsList::Ofac,
                 aliases: vec![],
                 addresses: vec![],
                 id_numbers: vec![],
-            },
-        ]).await;
+            }],
+        )
+        .await;
         assert_eq!(db.total_entries().await, 1);
 
-        // Old entries should not match
-        let result = db.check_entity("ENTRY ONE", &[], &[]).await.unwrap();
-        assert!(!result.is_match);
-
-        // New entry should match
-        let result = db.check_entity("ENTRY THREE", &[], &[]).await.unwrap();
-        assert!(result.is_match);
+        let lists = db.lists.read().await;
+        let ofac = lists.get(&SanctionsList::Ofac).unwrap();
+        assert_eq!(ofac.len(), 1);
+        assert_eq!(ofac[0].entity_name, "ENTRY THREE");
     }
 
     // -----------------------------------------------------------------------
@@ -562,30 +801,45 @@ mod tests {
     async fn check_entity_across_multiple_lists() {
         let db = SanctionsDatabase::with_default_lists().await;
         // BLOCKED PERSON ALPHA is on OFAC, check it matches
-        let result = db.check_entity("BLOCKED PERSON ALPHA", &[], &[]).await.unwrap();
+        let result = db
+            .check_entity("BLOCKED PERSON ALPHA", &[], &[])
+            .await
+            .unwrap();
         assert!(result.is_match);
         // Verify it's from OFAC
-        assert!(result.matched_entries.iter().any(|m| m.entry.list_source == SanctionsList::Ofac));
+        assert!(result
+            .matched_entries
+            .iter()
+            .any(|m| m.entry.list_source == SanctionsList::Ofac));
     }
 
     #[tokio::test]
     async fn check_entity_un_list() {
         let db = SanctionsDatabase::with_default_lists().await;
-        let result = db.check_entity("UN SANCTIONED ENTITY", &[], &[]).await.unwrap();
+        let result = db
+            .check_entity("UN SANCTIONED ENTITY", &[], &[])
+            .await
+            .unwrap();
         assert!(result.is_match);
     }
 
     #[tokio::test]
     async fn check_entity_eu_list() {
         let db = SanctionsDatabase::with_default_lists().await;
-        let result = db.check_entity("EU BLOCKED PERSON", &[], &[]).await.unwrap();
+        let result = db
+            .check_entity("EU BLOCKED PERSON", &[], &[])
+            .await
+            .unwrap();
         assert!(result.is_match);
     }
 
     #[tokio::test]
     async fn check_entity_uae_list() {
         let db = SanctionsDatabase::with_default_lists().await;
-        let result = db.check_entity("UAE BLOCKED ENTITY", &[], &[]).await.unwrap();
+        let result = db
+            .check_entity("UAE BLOCKED ENTITY", &[], &[])
+            .await
+            .unwrap();
         assert!(result.is_match);
     }
 
@@ -601,7 +855,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.is_match);
-        assert!(result.matched_entries.len() >= 1);
+        assert!(!result.matched_entries.is_empty());
         assert!(result.match_score > 0.0);
     }
 
@@ -610,7 +864,11 @@ mod tests {
         let db = SanctionsDatabase::with_default_lists().await;
         // Match by both name and address
         let result = db
-            .check_entity("BLOCKED PERSON ALPHA", &["0xdead0001".to_string()], &["PASS-001".to_string()])
+            .check_entity(
+                "BLOCKED PERSON ALPHA",
+                &["0xdead0001".to_string()],
+                &["PASS-001".to_string()],
+            )
             .await
             .unwrap();
         assert!(result.is_match);

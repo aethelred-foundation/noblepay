@@ -1,283 +1,297 @@
-import {
-  createMockPrisma,
-  resetAllMocks,
-} from "../setup";
-
-const mockPrisma = createMockPrisma();
-jest.mock("@prisma/client", () => ({
-  PrismaClient: jest.fn(() => mockPrisma),
-}));
-
 const mockStreamingService = {
   createStream: jest.fn(),
   listStreams: jest.fn(),
-  getStream: jest.fn(),
   getStreamBalance: jest.fn(),
   pauseStream: jest.fn(),
   resumeStream: jest.fn(),
   cancelStream: jest.fn(),
   adjustRate: jest.fn(),
   createBatchStreams: jest.fn(),
+  completeStream: jest.fn(),
+  recordWithdrawal: jest.fn(),
   getAnalytics: jest.fn(),
 };
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 3,
+  }),
+}));
+let authenticated = true;
 
-const mockAuditService = { createAuditEntry: jest.fn() };
-
-jest.mock("../../services/streaming", () => ({
-  StreamingService: jest.fn(() => mockStreamingService),
-  StreamError: class StreamError extends Error {
-    code: string;
-    statusCode: number;
-    constructor(code: string, message: string, statusCode: number) {
+jest.mock("../../lib/db", () => ({ prisma: {} }));
+jest.mock("../../services/audit", () => ({ AuditService: jest.fn() }));
+jest.mock("../../services/streaming", () => {
+  class StreamError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode = 400,
+    ) {
       super(message);
-      this.code = code;
-      this.statusCode = statusCode;
-      this.name = "StreamError";
     }
+  }
+  return {
+    StreamingService: jest.fn(() => mockStreamingService),
+    StreamError,
+  };
+});
+jest.mock("../../middleware/auth", () => ({
+  authenticateAPIKey: (
+    req: { businessId?: string },
+    _res: unknown,
+    next: () => void,
+  ) => {
+    if (authenticated) req.businessId = "business-1";
+    next();
   },
 }));
-
-jest.mock("../../services/audit", () => ({
-  AuditService: jest.fn(() => mockAuditService),
-}));
-
-jest.mock("../../middleware/auth", () => ({
-  authenticateAPIKey: jest.fn((_req: any, _res: any, next: any) => next()),
-}));
-
 jest.mock("../../middleware/rbac", () => ({
-  extractRole: jest.fn((_req: any, _res: any, next: any) => next()),
-  requireRole: jest.fn(() => (_req: any, _res: any, next: any) => next()),
-  requirePermission: jest.fn(() => (_req: any, _res: any, next: any) => next()),
+  extractRole: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireRole: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requirePermission: () => (_req: unknown, _res: unknown, next: () => void) =>
+    next(),
 }));
 
 import express from "express";
 import request from "supertest";
-import streamingRouter from "../../routes/streaming";
+import router from "../../routes/streaming";
 import { StreamError } from "../../services/streaming";
 
 const app = express();
 app.use(express.json());
-app.use("/v1/streaming", streamingRouter);
+app.use("/v1/streaming", router);
 
-beforeEach(() => {
-  resetAllMocks();
-});
+const TX_HASH = `0x${"c".repeat(64)}`;
+const ON_CHAIN_ID = `0x${"d".repeat(64)}`;
+const RECEIPT = { txHash: TX_HASH };
 
-describe("Streaming Routes", () => {
-  describe("POST /v1/streaming", () => {
-    it("should create a stream", async () => {
-      mockStreamingService.createStream.mockResolvedValue({
-        id: "stream-1",
-        status: "ACTIVE",
-        ratePerSecond: "0.001",
+const streamInput = {
+  sender: "0x1111111111111111111111111111111111111111",
+  recipient: "0x2222222222222222222222222222222222222222",
+  totalAmount: "100",
+  currency: "USDC",
+  startTime: "2026-07-21T10:00:00.000Z",
+  endTime: "2026-08-21T10:00:00.000Z",
+};
+
+const validStream = {
+  ...streamInput,
+  txHash: TX_HASH,
+  onChainStreamId: ON_CHAIN_ID,
+};
+
+describe("streaming routes", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authenticated = true;
+  });
+
+  it("passes a strict, bounded tenant filter to the durable list", async () => {
+    mockStreamingService.listStreams.mockResolvedValue([]);
+
+    const response = await request(app).get(
+      "/v1/streaming?status=ACTIVE&currency=USDC&page=2&limit=10",
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockStreamingService.listStreams).toHaveBeenCalledWith({
+      status: "ACTIVE",
+      currency: "USDC",
+      page: 2,
+      limit: 10,
+      businessId: "business-1",
+    });
+  });
+
+  it("rejects invalid addresses, chronology, and unknown keys", async () => {
+    const response = await request(app)
+      .post("/v1/streaming")
+      .send({
+        ...validStream,
+        recipient: validStream.sender,
+        endTime: validStream.startTime,
+        unexpected: true,
       });
 
-      const res = await request(app)
-        .post("/v1/streaming")
-        .send({ sender: "0x1", recipient: "0x2", totalAmount: "1000", ratePerSecond: "0.001" });
-
-      expect(res.status).toBe(201);
-      expect(res.body.data.id).toBe("stream-1");
-    });
-
-    it("should handle StreamError", async () => {
-      mockStreamingService.createStream.mockRejectedValue(
-        new StreamError("INVALID_RATE", "Rate too low", 400),
-      );
-
-      const res = await request(app).post("/v1/streaming").send({});
-
-      expect(res.status).toBe(400);
-      expect(res.body.error).toBe("INVALID_RATE");
-    });
-
-    it("should return 500 on unexpected error", async () => {
-      mockStreamingService.createStream.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/streaming").send({});
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe("VALIDATION_ERROR");
+    expect(mockStreamingService.createStream).not.toHaveBeenCalled();
   });
 
-  describe("GET /v1/streaming", () => {
-    it("should list streams", async () => {
-      mockStreamingService.listStreams.mockReturnValue([
-        { id: "stream-1", status: "ACTIVE" },
-      ]);
+  it("splits the receipt out of the create request", async () => {
+    mockStreamingService.createStream.mockResolvedValue({ id: "stream-1" });
 
-      const res = await request(app).get("/v1/streaming");
+    const response = await request(app).post("/v1/streaming").send(validStream);
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
-
-    it("should return 500 on error", async () => {
-      mockStreamingService.listStreams.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/streaming");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(201);
+    expect(mockStreamingService.createStream).toHaveBeenCalledWith(
+      streamInput,
+      "business-1",
+      { txHash: TX_HASH, onChainStreamId: ON_CHAIN_ID },
+      expect.anything(),
+    );
   });
 
-  describe("GET /v1/streaming/:id/balance", () => {
-    it("should return stream balance", async () => {
-      mockStreamingService.getStream.mockReturnValue({
-        id: "stream-1",
-        businessId: undefined,
-      });
-      mockStreamingService.getStreamBalance.mockReturnValue({
-        streamed: "500",
-        remaining: "500",
-      });
+  it("refuses a create with no receipt", async () => {
+    const response = await request(app).post("/v1/streaming").send(streamInput);
 
-      const res = await request(app).get("/v1/streaming/stream-1/balance");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.streamed).toBe("500");
-    });
-
-    it("should return 404 when stream not found", async () => {
-      mockStreamingService.getStream.mockReturnValue(undefined);
-
-      const res = await request(app).get("/v1/streaming/stream-1/balance");
-
-      expect(res.status).toBe(404);
-    });
-
-    it("should return 500 on error", async () => {
-      mockStreamingService.getStream.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/streaming/stream-1/balance");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(400);
+    expect(mockStreamingService.createStream).not.toHaveBeenCalled();
   });
 
-  describe("POST /v1/streaming/:id/pause", () => {
-    it("should pause a stream", async () => {
-      mockStreamingService.pauseStream.mockResolvedValue({ id: "stream-1", status: "PAUSED" });
+  it("requires a receipt, and only a receipt, on state-changing actions", async () => {
+    const unknownField = await request(app)
+      .post("/v1/streaming/stream-1/pause")
+      .send({ ...RECEIPT, pretendSuccess: true });
+    expect(unknownField.status).toBe(400);
 
-      const res = await request(app).post("/v1/streaming/stream-1/pause");
+    const noReceipt = await request(app)
+      .post("/v1/streaming/stream-1/pause")
+      .send({});
+    expect(noReceipt.status).toBe(400);
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.status).toBe("PAUSED");
-    });
-
-    it("should return 500 on error", async () => {
-      mockStreamingService.pauseStream.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/streaming/stream-1/pause");
-
-      expect(res.status).toBe(500);
-    });
+    expect(mockStreamingService.pauseStream).not.toHaveBeenCalled();
   });
 
-  describe("POST /v1/streaming/:id/resume", () => {
-    it("should resume a stream", async () => {
-      mockStreamingService.resumeStream.mockResolvedValue({ id: "stream-1", status: "ACTIVE" });
+  it("records a withdrawal so withdrawable stops over-reporting", async () => {
+    mockStreamingService.recordWithdrawal.mockResolvedValue({ id: "stream-1" });
 
-      const res = await request(app).post("/v1/streaming/stream-1/resume");
+    const response = await request(app)
+      .post("/v1/streaming/stream-1/withdrawals")
+      .send(RECEIPT);
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.status).toBe("ACTIVE");
-    });
-
-    it("should return 500 on error", async () => {
-      mockStreamingService.resumeStream.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/streaming/stream-1/resume");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(200);
+    expect(mockStreamingService.recordWithdrawal).toHaveBeenCalledWith(
+      "stream-1",
+      "business-1",
+      "business-1",
+      RECEIPT,
+      expect.anything(),
+    );
   });
 
-  describe("POST /v1/streaming/:id/cancel", () => {
-    it("should cancel a stream", async () => {
-      mockStreamingService.cancelStream.mockResolvedValue({ id: "stream-1", status: "CANCELLED" });
-
-      const res = await request(app).post("/v1/streaming/stream-1/cancel");
-
-      expect(res.status).toBe(200);
+  it("passes tenant identity to balance reads", async () => {
+    mockStreamingService.getStreamBalance.mockResolvedValue({
+      streamId: "stream-1",
+      withdrawable: "1",
     });
 
-    it("should return 500 on error", async () => {
-      mockStreamingService.cancelStream.mockRejectedValue(new Error("crash"));
+    const response = await request(app).get("/v1/streaming/stream-1/balance");
 
-      const res = await request(app).post("/v1/streaming/stream-1/cancel");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(200);
+    expect(mockStreamingService.getStreamBalance).toHaveBeenCalledWith(
+      "stream-1",
+      "business-1",
+    );
   });
 
-  describe("POST /v1/streaming/:id/adjust-rate", () => {
-    it("should adjust stream rate", async () => {
-      mockStreamingService.adjustRate.mockResolvedValue({
-        id: "stream-1",
-        ratePerSecond: "0.002",
-      });
+  it.each([
+    ["pause", "pauseStream", "/v1/streaming/stream-1/pause"],
+    ["resume", "resumeStream", "/v1/streaming/stream-1/resume"],
+    ["cancel", "cancelStream", "/v1/streaming/stream-1/cancel"],
+    ["complete", "completeStream", "/v1/streaming/stream-1/complete"],
+  ])("passes the %s receipt to the service", async (_name, method, path) => {
+    (mockStreamingService as any)[method].mockResolvedValue({ id: "stream-1" });
 
-      const res = await request(app)
-        .post("/v1/streaming/stream-1/adjust-rate")
-        .send({ ratePerSecond: "0.002" });
+    const response = await request(app).post(path).send(RECEIPT);
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.ratePerSecond).toBe("0.002");
-    });
-
-    it("should return 500 on error", async () => {
-      mockStreamingService.adjustRate.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/streaming/stream-1/adjust-rate").send({ ratePerSecond: "0.002" });
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(200);
+    expect((mockStreamingService as any)[method]).toHaveBeenCalledWith(
+      "stream-1",
+      "business-1",
+      "business-1",
+      RECEIPT,
+      expect.anything(),
+    );
   });
 
-  describe("POST /v1/streaming/batch", () => {
-    it("should batch create streams", async () => {
-      mockStreamingService.createBatchStreams.mockResolvedValue({
-        created: [{ id: "stream-1" }],
-        failed: [],
-      });
+  it("surfaces a permanent rate refusal as 422, not a gate", async () => {
+    // The contract has no rate-adjustment function, so this is never coming.
+    mockStreamingService.adjustRate.mockRejectedValue(
+      new StreamError(
+        "STREAM_RATE_IMMUTABLE",
+        "A stream's rate is fixed at creation",
+        422,
+      ),
+    );
 
-      const res = await request(app)
-        .post("/v1/streaming/batch")
-        .send({ streams: [{ sender: "0x1", recipient: "0x2" }] });
+    const response = await request(app)
+      .post("/v1/streaming/stream-1/adjust-rate")
+      .send({ ratePerSecond: "2" });
 
-      expect(res.status).toBe(201);
-    });
-
-    it("should return 500 on error", async () => {
-      mockStreamingService.createBatchStreams.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/streaming/batch").send({ streams: [] });
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(422);
+    expect(response.body.error).toBe("STREAM_RATE_IMMUTABLE");
   });
 
-  describe("GET /v1/streaming/analytics", () => {
-    it("should return streaming analytics", async () => {
-      mockStreamingService.getAnalytics.mockReturnValue({
-        totalStreams: 10,
-        activeStreams: 5,
-      });
+  it("surfaces the batch refusal with its own reason", async () => {
+    mockStreamingService.createBatchStreams.mockRejectedValue(
+      new StreamError(
+        "BATCH_STREAM_UNVERIFIABLE",
+        "BatchStreamsCreated does not identify the streams it created",
+        501,
+      ),
+    );
 
-      const res = await request(app).get("/v1/streaming/analytics");
+    const response = await request(app)
+      .post("/v1/streaming/batch")
+      .send({ streams: [validStream], label: "payroll" });
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.totalStreams).toBe(10);
+    expect(response.status).toBe(501);
+    expect(response.body.error).toBe("BATCH_STREAM_UNVERIFIABLE");
+  });
+
+  it("returns tenant-scoped stream analytics", async () => {
+    mockStreamingService.getAnalytics.mockResolvedValue({
+      totalActiveStreams: 2,
     });
 
-    it("should return 500 on error", async () => {
-      mockStreamingService.getAnalytics.mockImplementation(() => { throw new Error("crash"); });
+    const response = await request(app).get("/v1/streaming/analytics");
 
-      const res = await request(app).get("/v1/streaming/analytics");
+    expect(response.status).toBe(200);
+    expect(mockStreamingService.getAnalytics).toHaveBeenCalledWith(
+      "business-1",
+    );
+  });
 
-      expect(res.status).toBe(500);
-    });
+  it.each([
+    ["create", "post", "/v1/streaming", validStream],
+    ["list", "get", "/v1/streaming", undefined],
+    ["balance", "get", "/v1/streaming/stream-1/balance", undefined],
+    ["pause", "post", "/v1/streaming/stream-1/pause", RECEIPT],
+    ["resume", "post", "/v1/streaming/stream-1/resume", RECEIPT],
+    ["cancel", "post", "/v1/streaming/stream-1/cancel", RECEIPT],
+    [
+      "adjust",
+      "post",
+      "/v1/streaming/stream-1/adjust-rate",
+      { ratePerSecond: "2" },
+    ],
+    ["batch", "post", "/v1/streaming/batch", { streams: [validStream] }],
+    ["analytics", "get", "/v1/streaming/analytics", undefined],
+  ])(
+    "rejects %s without tenant identity",
+    async (_name, method, path, body) => {
+      authenticated = false;
+      const operation = request(app)[method as "get" | "post"](path);
+      if (body) operation.send(body);
+
+      const response = await operation;
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe("UNAUTHORIZED");
+    },
+  );
+
+  it("redacts unexpected stream service failures", async () => {
+    mockStreamingService.listStreams.mockRejectedValue(
+      new Error("database secret-value"),
+    );
+
+    const response = await request(app).get("/v1/streaming");
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).toBe("INTERNAL_ERROR");
+    expect(JSON.stringify(response.body)).not.toContain("secret-value");
   });
 });

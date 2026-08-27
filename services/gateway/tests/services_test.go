@@ -2,9 +2,6 @@ package tests
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -18,7 +15,7 @@ import (
 func TestPaymentServiceSubmit(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 
 	payment, err := svc.Submit(context.Background(), &models.SubmitPaymentRequest{
@@ -75,7 +72,7 @@ func TestPaymentServiceSubmitValidation(t *testing.T) {
 func TestPaymentServiceCancel(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 
 	payment, _ := svc.Submit(context.Background(), &models.SubmitPaymentRequest{
@@ -103,7 +100,7 @@ func TestPaymentServiceCancel(t *testing.T) {
 func TestPaymentServiceList(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	svc := services.NewPaymentService(memStore, compliance, logger)
 
 	for i := 0; i < 5; i++ {
@@ -167,7 +164,7 @@ func TestBlockchainIndexer(t *testing.T) {
 func TestSettlementReconcile(t *testing.T) {
 	logger := zap.NewNop()
 	memStore := store.NewMemoryStore()
-	compliance := services.NewComplianceProxy("http://localhost:19999", logger)
+	compliance := approvedComplianceProxy(t, logger)
 	paymentSvc := services.NewPaymentService(memStore, compliance, logger)
 	settlementSvc := services.NewSettlementService(memStore, memStore, logger)
 
@@ -189,11 +186,11 @@ func TestSettlementReconcile(t *testing.T) {
 		t.Error("expected unsettled record")
 	}
 
-	// Add a transfer_complete event.
+	// Add the exact canonical PaymentSettled event topic.
 	memStore.SaveEvent(ctx, &models.BlockchainEvent{
 		BlockHeight: 100,
 		TxHash:      "0xsettled",
-		EventType:   "transfer_complete",
+		EventType:   services.PaymentSettledTopic,
 		PaymentID:   payment.ID,
 		Timestamp:   time.Now().UTC(),
 	})
@@ -204,36 +201,21 @@ func TestSettlementReconcile(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !record.Settled {
-		t.Error("expected settled record after transfer_complete event")
+		t.Error("expected settled record after canonical PaymentSettled event")
 	}
 	if record.OnChainTx != "0xsettled" {
 		t.Errorf("expected on_chain_tx '0xsettled', got %q", record.OnChainTx)
 	}
 
-	// Payment should now be completed.
+	// Payment should now reflect the exact on-chain settled state.
 	updated, _ := paymentSvc.GetByID(ctx, payment.ID)
-	if updated.Status != models.PaymentStatusCompleted {
-		t.Errorf("expected completed status after settlement, got %q", updated.Status)
+	if updated.Status != models.PaymentStatusSettled {
+		t.Errorf("expected settled status after settlement, got %q", updated.Status)
 	}
 }
 
 func TestComplianceProxyWithMockServer(t *testing.T) {
-	// Start a mock compliance TEE server.
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/compliance/check" {
-			t.Errorf("unexpected path: %s", r.URL.Path)
-		}
-		if r.Method != http.MethodPost {
-			t.Errorf("unexpected method: %s", r.Method)
-		}
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(models.ComplianceResult{
-			Approved: true,
-			Score:    95,
-			Reason:   "all clear",
-		})
-	}))
-	defer mockServer.Close()
+	mockServer := approvedComplianceServer(t)
 
 	logger := zap.NewNop()
 	proxy := services.NewComplianceProxy(mockServer.URL, logger)
@@ -245,7 +227,7 @@ func TestComplianceProxyWithMockServer(t *testing.T) {
 	if !result.Approved {
 		t.Error("expected approved=true")
 	}
-	if result.Score != 95 {
-		t.Errorf("expected score 95, got %d", result.Score)
+	if result.Score != 5 {
+		t.Errorf("expected score 5, got %d", result.Score)
 	}
 }

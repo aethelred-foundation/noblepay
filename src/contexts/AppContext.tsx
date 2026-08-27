@@ -25,13 +25,14 @@ import {
   useChainId,
   useConnect,
   useDisconnect,
-  useReconnect,
   useSwitchChain,
   useBlockNumber,
 } from "wagmi";
+import type { Connector } from "wagmi";
 
 import { formatUnits } from "viem";
 import { activeChain } from "@/config/wagmi";
+import { orderWalletConnectors } from "@/config/wallet-picker";
 import { CONTRACT_ADDRESSES } from "@/config/chains";
 
 // ---------------------------------------------------------------------------
@@ -100,7 +101,7 @@ export interface Notification {
 export interface AppContextValue {
   // Wallet (real blockchain state)
   wallet: WalletState;
-  connectWallet: () => void;
+  connectWallet: (connector?: Connector) => void;
   disconnectWallet: () => void;
   switchNetwork: () => void;
 
@@ -190,9 +191,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   // --- Real Wallet via wagmi ------------------------------------------------
   const { address, isConnected, isConnecting: wagmiConnecting } = useAccount();
   const chainId = useChainId();
-  const { connectAsync, connectors } = useConnect();
-  const { disconnect, disconnectAsync } = useDisconnect();
-  const { reconnectAsync } = useReconnect();
+  const { connect, connectors } = useConnect();
+  const { disconnect } = useDisconnect();
   const { switchChain } = useSwitchChain();
 
   // Query native AETHEL balance
@@ -265,61 +265,24 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     chainId,
   ]);
 
-  // Connect: use the first available connector (MetaMask/injected preferred).
-  // Self-healing: several dApps share test origins (same host:port reused for
-  // ZeroID/NoblePay), so the injected provider can already hold an authorized
-  // session for this origin — wagmi then throws ConnectorAlreadyConnected on
-  // a plain connect. Adopt that session instead of erroring; if adoption
-  // fails, reset the connector once and retry cleanly.
-  const connectWallet = useCallback(async () => {
-    const injectedConnector = connectors.find(
-      (c) => c.id === "injected" || c.id === "metaMask",
-    );
-    const connector = injectedConnector || connectors[0];
-
-    const hasInjectedProvider =
-      typeof window !== "undefined" &&
-      (window as unknown as { ethereum?: unknown }).ethereum !== undefined;
-    if (!hasInjectedProvider) {
-      addNotificationRef.current(
-        "error",
-        "No wallet detected",
-        "No injected wallet was found on this page. Make sure the Aethelred Wallet or MetaMask extension is installed and enabled for this site, then reload. If it still is not detected, some wallets restrict plain-HTTP origins — try an SSH tunnel (http://localhost:<port>) or HTTPS.",
-      );
-      return;
-    }
-    if (!connector || isConnected) return;
-
-    try {
-      await connectAsync({ connector, chainId: activeChain.id });
-      return;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (!/already connected/i.test(message)) {
-        addNotificationRef.current("error", "Wallet connection failed", message);
-        return;
+  // Connect: use the first available connector (MetaMask/injected preferred)
+  const connectWallet = useCallback(
+    (chosen?: Connector) => {
+      // Guard against `onClick={connectWallet}`: a DOM event is not a
+      // connector, so only honor arguments that carry a connector uid.
+      const requested =
+        chosen && typeof (chosen as { uid?: unknown }).uid === "string"
+          ? chosen
+          : undefined;
+      // Explicit choice from the picker wins; otherwise fall back to the
+      // curated order (Aethelred Wallet -> MetaMask -> other -> injected).
+      const connector = requested ?? orderWalletConnectors(connectors)[0];
+      if (connector) {
+        connect({ connector, chainId: activeChain.id });
       }
-    }
-
-    // The connector holds a live session wagmi's state does not reflect:
-    // adopt it, and if that fails reset the connector and retry once.
-    try {
-      await reconnectAsync({ connectors: [connector] });
-      return;
-    } catch {
-      /* fall through to a clean reset */
-    }
-    try {
-      await disconnectAsync({ connector });
-      await connectAsync({ connector, chainId: activeChain.id });
-    } catch (retryError) {
-      addNotificationRef.current(
-        "error",
-        "Wallet connection failed",
-        retryError instanceof Error ? retryError.message : String(retryError),
-      );
-    }
-  }, [connectAsync, reconnectAsync, disconnectAsync, connectors, isConnected]);
+    },
+    [connect, connectors],
+  );
 
   const disconnectWallet = useCallback(() => {
     disconnect();

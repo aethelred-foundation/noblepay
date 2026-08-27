@@ -1,526 +1,345 @@
 import {
   createMockPrisma,
   resetAllMocks,
+  VALID_BYTES32,
   VALID_ETH_ADDRESS,
 } from "../setup";
 
 const mockPrisma = createMockPrisma();
-jest.mock("@prisma/client", () => ({
-  PrismaClient: jest.fn(() => mockPrisma),
-  KYCStatus: { UNVERIFIED: "UNVERIFIED", VERIFIED: "VERIFIED", SUSPENDED: "SUSPENDED" },
-  BusinessTier: { STARTER: "STARTER", STANDARD: "STANDARD", ENTERPRISE: "ENTERPRISE", INSTITUTIONAL: "INSTITUTIONAL" },
-}));
+const mockRegistrationService = { register: jest.fn() };
+const mockReconciliationService = {
+  reconcileVerification: jest.fn(),
+  reconcileTierUpgrade: jest.fn(),
+  reconcileSuspension: jest.fn(),
+  reconcileReinstatement: jest.fn(),
+  reconcileRevocation: jest.fn(),
+  getOnChainLimits: jest.fn(),
+};
+let ownershipAllowed = true;
 
-const mockAuditService = { createAuditEntry: jest.fn().mockResolvedValue({}) };
-
-jest.mock("../../services/audit", () => ({
-  AuditService: jest.fn(() => mockAuditService),
-}));
-
+jest.mock("../../lib/db", () => ({ prisma: mockPrisma }));
+jest.mock("../../services/audit", () => ({ AuditService: jest.fn() }));
+jest.mock("../../services/business-registration", () => {
+  class BusinessRegistrationError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode = 400,
+    ) {
+      super(message);
+    }
+  }
+  return {
+    BusinessRegistrationService: jest.fn(() => mockRegistrationService),
+    BusinessRegistrationError,
+  };
+});
+jest.mock("../../services/business-reconciliation", () => {
+  class BusinessReconciliationError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode = 400,
+    ) {
+      super(message);
+    }
+  }
+  return {
+    BusinessReconciliationService: jest.fn(() => mockReconciliationService),
+    BusinessReconciliationError,
+  };
+});
 jest.mock("../../middleware/auth", () => ({
-  authenticateAPIKey: jest.fn((req: any, _res: any, next: any) => {
-    // Set default businessId for tests (can be overridden via header)
+  authenticateAPIKey: (req: any, _res: unknown, next: () => void) => {
     req.businessId = req.headers["x-test-business-id"] || "biz-1";
-    req.businessTier = "STANDARD";
+    req.signerId = "0x1111111111111111111111111111111111111111";
     next();
-  }),
-  generateAPIKey: jest.fn(() => ({
-    rawKey: "npk_" + "a".repeat(64),
-    keyHash: "b".repeat(64),
-  })),
+  },
+  createPublicRateLimit:
+    () => (_req: unknown, _res: unknown, next: () => void) =>
+      next(),
 }));
-
 jest.mock("../../middleware/validation", () => ({
-  validate: jest.fn(() => (_req: any, _res: any, next: any) => next()),
+  validate: () => (_req: unknown, _res: unknown, next: () => void) => next(),
   CreateBusinessSchema: {},
   UpdateBusinessSchema: {},
   ListBusinessesSchema: {},
+  BusinessVerificationSchema: {},
+  BusinessTierUpgradeSchema: {},
 }));
-
-// Mock rbac middleware to pass through by default (role checks tested separately)
-const mockRequireOwnership = jest.fn().mockReturnValue(true);
-const mockRequireRole = jest.fn((..._roles: any[]) => (_req: any, _res: any, next: any) => next());
-const mockExtractRole = jest.fn((_req: any, _res: any, next: any) => next());
-const mockRequirePermission = jest.fn((..._perms: any[]) => (_req: any, _res: any, next: any) => next());
-jest.mock("../../middleware/rbac", () => {
-  const actual = jest.requireActual("../../middleware/rbac");
-  return {
-    ...actual,
-    extractRole: mockExtractRole,
-    requireRole: mockRequireRole,
-    requirePermission: mockRequirePermission,
-    requireOwnership: mockRequireOwnership,
-  };
-});
+jest.mock("../../middleware/rbac", () => ({
+  extractRole: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireCurrentPlatformAdmin: (
+    _req: unknown,
+    _res: unknown,
+    next: () => void,
+  ) => next(),
+  revalidatePlatformAdmin: (_req: unknown, _res: unknown, next: () => void) =>
+    next(),
+  requirePermission: () => (_req: unknown, _res: unknown, next: () => void) =>
+    next(),
+  requireOwnership: () => ownershipAllowed,
+}));
 
 import express from "express";
 import request from "supertest";
-import businessesRouter from "../../routes/businesses";
-
-// Capture requireRole calls made during module initialization (route definitions)
-const moduleLoadRoleCalls = [...mockRequireRole.mock.calls];
+import router from "../../routes/businesses";
+import { BusinessRegistrationError } from "../../services/business-registration";
+import { BusinessReconciliationError } from "../../services/business-reconciliation";
 
 const app = express();
 app.use(express.json());
-app.use("/v1/businesses", businessesRouter);
+app.use("/v1/businesses", router);
 
-const baseBusiness = {
-  id: "biz-1",
-  address: VALID_ETH_ADDRESS,
-  licenseNumber: "LIC-001",
-  businessName: "Test Corp",
-  jurisdiction: "UAE",
-  businessType: "Fintech",
-  contactEmail: "test@example.com",
-  kycStatus: "UNVERIFIED",
-  tier: "STARTER",
-  dailyLimit: 10000,
-  monthlyLimit: 100000,
-  registeredAt: new Date(),
-};
+function business(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "biz-1",
+    address: VALID_ETH_ADDRESS,
+    licenseNumber: "DMCC-12345",
+    businessName: "Noble Merchant",
+    jurisdiction: "UAE",
+    businessType: "Payments",
+    complianceOfficer: "0x2222222222222222222222222222222222222222",
+    contactEmail: "ops@noble.test",
+    kycStatus: "PENDING",
+    tier: "STANDARD",
+    dailyLimit: { toString: () => "50000" },
+    monthlyLimit: { toString: () => "500000" },
+    registrationBlockNumber: 99n,
+    registeredAt: new Date("2026-07-21T00:00:00.000Z"),
+    ...overrides,
+  };
+}
 
-beforeEach(() => {
-  resetAllMocks();
-  mockRequireOwnership.mockReturnValue(true);
-});
+describe("business routes", () => {
+  beforeEach(() => {
+    resetAllMocks();
+    ownershipAllowed = true;
+  });
 
-describe("Businesses Routes", () => {
-  // ─── POST /v1/businesses ────────────────────────────────────────────────────
-
-  describe("POST /v1/businesses", () => {
-    it("should register a new business", async () => {
-      mockPrisma.business.findFirst.mockResolvedValue(null);
-      mockPrisma.business.create.mockResolvedValue(baseBusiness);
-      mockPrisma.aPIKey.create.mockResolvedValue({});
-
-      const res = await request(app)
-        .post("/v1/businesses")
-        .send({
-          address: VALID_ETH_ADDRESS,
-          licenseNumber: "LIC-001",
-          businessName: "Test Corp",
-          jurisdiction: "UAE",
-          businessType: "Fintech",
-          contactEmail: "test@example.com",
-        });
-
-      expect(res.status).toBe(201);
-      expect(res.body.success).toBe(true);
-      expect(res.body.apiKey).toBeDefined();
+  it("persists a newly reconciled registration and serializes chain values", async () => {
+    mockRegistrationService.register.mockResolvedValue({
+      business: business(),
+      apiKey: "npk_secret-returned-once",
+      replayed: false,
+      confirmations: 3,
+      chainId: "7332",
     });
 
-    it("should return 409 when business already exists", async () => {
-      mockPrisma.business.findFirst.mockResolvedValue(baseBusiness);
-
-      const res = await request(app)
-        .post("/v1/businesses")
-        .send({
-          address: VALID_ETH_ADDRESS,
-          licenseNumber: "LIC-001",
-          businessName: "Test Corp",
-          jurisdiction: "UAE",
-          businessType: "Fintech",
-          contactEmail: "test@example.com",
-        });
-
-      expect(res.status).toBe(409);
-      expect(res.body.error).toBe("DUPLICATE_BUSINESS");
+    const response = await request(app).post("/v1/businesses").send({
+      address: VALID_ETH_ADDRESS,
+      txHash: VALID_BYTES32,
     });
 
-    it("should return 500 on unexpected error", async () => {
-      mockPrisma.business.findFirst.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app)
-        .post("/v1/businesses")
-        .send({ address: VALID_ETH_ADDRESS, licenseNumber: "LIC-002", businessName: "Fail Corp", jurisdiction: "UAE", businessType: "Fintech", contactEmail: "x@y.com" });
-
-      expect(res.status).toBe(500);
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      business: {
+        id: "biz-1",
+        dailyLimit: "50000",
+        monthlyLimit: "500000",
+        registrationBlockNumber: "99",
+      },
+      replayed: false,
+      confirmations: 3,
+      chainId: "7332",
     });
   });
 
-  // ─── GET /v1/businesses ─────────────────────────────────────────────────────
-
-  describe("GET /v1/businesses", () => {
-    it("should list businesses", async () => {
-      mockPrisma.business.findMany.mockResolvedValue([baseBusiness]);
-      mockPrisma.business.count.mockResolvedValue(1);
-
-      const res = await request(app).get("/v1/businesses");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-      expect(res.body.pagination).toBeDefined();
+  it("returns 200 for an idempotently replayed registration", async () => {
+    mockRegistrationService.register.mockResolvedValue({
+      business: business(),
+      apiKey: "",
+      replayed: true,
+      confirmations: 3,
+      chainId: "7332",
     });
-
-    it("should filter by kycStatus", async () => {
-      mockPrisma.business.findMany.mockResolvedValue([baseBusiness]);
-      mockPrisma.business.count.mockResolvedValue(1);
-
-      const res = await request(app).get("/v1/businesses?kycStatus=VERIFIED");
-
-      expect(res.status).toBe(200);
-    });
-
-    it("should filter by tier", async () => {
-      mockPrisma.business.findMany.mockResolvedValue([baseBusiness]);
-      mockPrisma.business.count.mockResolvedValue(1);
-
-      const res = await request(app).get("/v1/businesses?tier=STARTER");
-
-      expect(res.status).toBe(200);
-    });
-
-    it("should filter by jurisdiction", async () => {
-      mockPrisma.business.findMany.mockResolvedValue([baseBusiness]);
-      mockPrisma.business.count.mockResolvedValue(1);
-
-      const res = await request(app).get("/v1/businesses?jurisdiction=UAE");
-
-      expect(res.status).toBe(200);
-    });
-
-    it("should return 500 on error", async () => {
-      mockPrisma.business.findMany.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app).get("/v1/businesses");
-
-      expect(res.status).toBe(500);
-    });
+    const response = await request(app).post("/v1/businesses").send({});
+    expect(response.status).toBe(200);
+    expect(response.body.data.replayed).toBe(true);
   });
 
-  // ─── GET /v1/businesses/:id ─────────────────────────────────────────────────
+  it("preserves registration verification errors", async () => {
+    mockRegistrationService.register.mockRejectedValue(
+      new BusinessRegistrationError("INVALID_SIGNATURE", "bad signature", 401),
+    );
+    const response = await request(app).post("/v1/businesses").send({});
+    expect(response.status).toBe(401);
+    expect(response.body.error).toBe("INVALID_SIGNATURE");
+  });
 
-  describe("GET /v1/businesses/:id", () => {
-    it("should return business by ID", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({
-        ...baseBusiness,
-        apiKeys: [{ id: "key-1", name: "Default", lastUsed: null, status: "ACTIVE", createdAt: new Date() }],
+  it("lists serialized businesses with bounded defaults", async () => {
+    mockPrisma.business.findMany.mockResolvedValue([business()]);
+    mockPrisma.business.count.mockResolvedValue(1);
+    const response = await request(app).get("/v1/businesses");
+    expect(response.status).toBe(200);
+    expect(response.body.data[0].dailyLimit).toBe("50000");
+    expect(response.body.pagination).toEqual({
+      page: 1,
+      limit: 20,
+      total: 1,
+      totalPages: 1,
+    });
+    expect(mockPrisma.business.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        skip: 0,
+        take: 20,
+      }),
+    );
+  });
+
+  it("returns an owned business and conceals unauthorized records", async () => {
+    mockPrisma.business.findUnique.mockResolvedValue(business({ apiKeys: [] }));
+    const owned = await request(app).get("/v1/businesses/biz-1");
+    expect(owned.status).toBe(200);
+
+    ownershipAllowed = false;
+    const foreign = await request(app)
+      .get("/v1/businesses/biz-2")
+      .set("x-test-business-id", "biz-1");
+    expect(foreign.status).toBe(403);
+    expect(foreign.body.error).toBe("FORBIDDEN");
+  });
+
+  it("updates only the authenticated tenant's off-chain profile", async () => {
+    mockPrisma.business.findUnique.mockResolvedValue(business());
+    mockPrisma.business.update.mockResolvedValue(
+      business({ contactEmail: "new@noble.test" }),
+    );
+    const response = await request(app)
+      .patch("/v1/businesses/biz-1")
+      .send({ contactEmail: "new@noble.test" });
+    expect(response.status).toBe(200);
+    expect(mockPrisma.business.update).toHaveBeenCalledWith({
+      where: { id: "biz-1" },
+      data: { contactEmail: "new@noble.test" },
+    });
+
+    const denied = await request(app)
+      .patch("/v1/businesses/biz-2")
+      .send({ contactEmail: "x@noble.test" });
+    expect(denied.status).toBe(403);
+  });
+
+  it("reconciles verification from an exact chain transaction", async () => {
+    mockReconciliationService.reconcileVerification.mockResolvedValue({
+      business: business({ kycStatus: "VERIFIED" }),
+      replayed: false,
+      txHash: VALID_BYTES32,
+      confirmations: 4,
+      chainId: "7332",
+    });
+    mockPrisma.business.count.mockResolvedValue(5);
+
+    const response = await request(app)
+      .post("/v1/businesses/biz-1/verify")
+      .send({ txHash: VALID_BYTES32 });
+
+    expect(response.status).toBe(200);
+    expect(
+      mockReconciliationService.reconcileVerification,
+    ).toHaveBeenCalledWith("biz-1", VALID_BYTES32);
+    expect(response.body.data.business.kycStatus).toBe("VERIFIED");
+  });
+
+  it("allows a platform admin to reconcile another tenant's verification", async () => {
+    ownershipAllowed = false;
+    const response = await request(app)
+      .post("/v1/businesses/biz-2/verify")
+      .set("x-test-business-id", "biz-1")
+      .send({ txHash: VALID_BYTES32 });
+
+    expect(response.status).toBe(200);
+    expect(
+      mockReconciliationService.reconcileVerification,
+    ).toHaveBeenCalledWith("biz-2", VALID_BYTES32);
+  });
+
+  it.each([
+    ["suspend", "reconcileSuspension", "SUSPENDED"],
+    ["reinstate", "reconcileReinstatement", "VERIFIED"],
+    ["revoke", "reconcileRevocation", "REVOKED"],
+  ] as const)(
+    "reconciles the %s lifecycle transaction",
+    async (path, method, status) => {
+      mockReconciliationService[method].mockResolvedValue({
+        business: business({ kycStatus: status }),
+        replayed: false,
+        txHash: VALID_BYTES32,
+        confirmations: 4,
+        chainId: "7332",
       });
-
-      const res = await request(app).get("/v1/businesses/biz-1");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.id).toBe("biz-1");
-    });
-
-    it("should return 404 when business not found", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(null);
-
-      const res = await request(app).get("/v1/businesses/nonexistent");
-
-      expect(res.status).toBe(404);
-      expect(res.body.error).toBe("BUSINESS_NOT_FOUND");
-    });
-
-    it("should return 500 on error", async () => {
-      mockPrisma.business.findUnique.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app).get("/v1/businesses/biz-1");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  // ─── PATCH /v1/businesses/:id ───────────────────────────────────────────────
-
-  describe("PATCH /v1/businesses/:id", () => {
-    it("should update a business", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(baseBusiness);
-      mockPrisma.business.update.mockResolvedValue({
-        ...baseBusiness,
-        businessName: "Updated Corp",
-      });
-
-      const res = await request(app)
-        .patch("/v1/businesses/biz-1")
-        .send({ businessName: "Updated Corp" });
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.businessName).toBe("Updated Corp");
-    });
-
-    it("should return 404 when business not found", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(null);
-
-      // Must use same business ID as the authenticated caller to pass ownership check
-      const res = await request(app)
-        .patch("/v1/businesses/biz-1")
-        .set("x-test-business-id", "biz-1")
-        .send({ businessName: "X" });
-
-      expect(res.status).toBe(404);
-    });
-
-    it("should return 500 on error", async () => {
-      mockPrisma.business.findUnique.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app)
-        .patch("/v1/businesses/biz-1")
-        .set("x-test-business-id", "biz-1")
-        .send({ businessName: "Fail" });
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  // ─── POST /v1/businesses/:id/verify ─────────────────────────────────────────
-
-  describe("POST /v1/businesses/:id/verify", () => {
-    it("should verify a business", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({ ...baseBusiness, kycStatus: "UNVERIFIED" });
-      mockPrisma.business.update.mockResolvedValue({ ...baseBusiness, kycStatus: "VERIFIED", tier: "STARTER" });
-      mockPrisma.business.count.mockResolvedValue(5);
-
-      const res = await request(app).post("/v1/businesses/biz-1/verify");
-
-      expect(res.status).toBe(200);
-      expect(res.body.message).toBe("Business KYC verified successfully");
-    });
-
-    it("should return 404 when business not found", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(null);
-
-      const res = await request(app).post("/v1/businesses/nonexistent/verify");
-
-      expect(res.status).toBe(404);
-    });
-
-    it("should return 409 when already verified", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({ ...baseBusiness, kycStatus: "VERIFIED" });
-
-      const res = await request(app).post("/v1/businesses/biz-1/verify");
-
-      expect(res.status).toBe(409);
-      expect(res.body.error).toBe("ALREADY_VERIFIED");
-    });
-
-    it("should return 500 on error", async () => {
-      mockPrisma.business.findUnique.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app).post("/v1/businesses/biz-1/verify");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  // ─── POST /v1/businesses/:id/suspend ────────────────────────────────────────
-
-  describe("POST /v1/businesses/:id/suspend", () => {
-    it("should suspend a business and revoke API keys", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({ ...baseBusiness, kycStatus: "VERIFIED" });
-      mockPrisma.business.update.mockResolvedValue({ ...baseBusiness, kycStatus: "SUSPENDED" });
-      mockPrisma.aPIKey.updateMany.mockResolvedValue({ count: 2 });
-
-      const res = await request(app).post("/v1/businesses/biz-1/suspend");
-
-      expect(res.status).toBe(200);
-      expect(res.body.message).toContain("suspended");
-      expect(mockPrisma.aPIKey.updateMany).toHaveBeenCalled();
-    });
-
-    it("should return 409 when already suspended", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({ ...baseBusiness, kycStatus: "SUSPENDED" });
-
-      const res = await request(app).post("/v1/businesses/biz-1/suspend");
-
-      expect(res.status).toBe(409);
-      expect(res.body.error).toBe("ALREADY_SUSPENDED");
-    });
-
-    it("should return 404 when business not found", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(null);
-
-      const res = await request(app).post("/v1/businesses/nonexistent/suspend");
-
-      expect(res.status).toBe(404);
-    });
-
-    it("should return 500 on error", async () => {
-      mockPrisma.business.findUnique.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app).post("/v1/businesses/biz-1/suspend");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  // ─── POST /v1/businesses/:id/upgrade ────────────────────────────────────────
-
-  describe("POST /v1/businesses/:id/upgrade", () => {
-    it("should upgrade a verified business tier", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({
-        ...baseBusiness,
-        kycStatus: "VERIFIED",
-        tier: "STARTER",
-      });
-      mockPrisma.business.update.mockResolvedValue({
-        ...baseBusiness,
-        tier: "STANDARD",
-        dailyLimit: 50000,
-        monthlyLimit: 500000,
-      });
-
-      const res = await request(app).post("/v1/businesses/biz-1/upgrade");
-
-      expect(res.status).toBe(200);
-      expect(res.body.message).toContain("STANDARD");
-    });
-
-    it("should return 403 when business not KYC verified", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({
-        ...baseBusiness,
-        kycStatus: "UNVERIFIED",
-      });
-
-      const res = await request(app).post("/v1/businesses/biz-1/upgrade");
-
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe("KYC_REQUIRED");
-    });
-
-    it("should return 409 when at max tier", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue({
-        ...baseBusiness,
-        kycStatus: "VERIFIED",
-        tier: "INSTITUTIONAL",
-      });
-
-      const res = await request(app).post("/v1/businesses/biz-1/upgrade");
-
-      expect(res.status).toBe(409);
-      expect(res.body.error).toBe("MAX_TIER");
-    });
-
-    it("should return 404 when business not found", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(null);
-
-      const res = await request(app).post("/v1/businesses/nonexistent/upgrade");
-
-      expect(res.status).toBe(404);
-    });
-
-    it("should return 500 on error", async () => {
-      mockPrisma.business.findUnique.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app).post("/v1/businesses/biz-1/upgrade");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  // ─── GET /v1/businesses/:id/limits ──────────────────────────────────────────
-
-  describe("GET /v1/businesses/:id/limits", () => {
-    it("should return business payment limits", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(baseBusiness);
-      mockPrisma.payment.aggregate
-        .mockResolvedValueOnce({ _sum: { amount: 5000 }, _count: { id: 10 } })
-        .mockResolvedValueOnce({ _sum: { amount: 20000 }, _count: { id: 50 } });
-
-      const res = await request(app).get("/v1/businesses/biz-1/limits");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.tier).toBe("STARTER");
-      expect(res.body.data.daily).toBeDefined();
-      expect(res.body.data.monthly).toBeDefined();
-    });
-
-    it("should return 404 when business not found", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(null);
-
-      const res = await request(app).get("/v1/businesses/nonexistent/limits");
-
-      expect(res.status).toBe(404);
-    });
-
-    it("should handle null aggregate sums", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(baseBusiness);
-      mockPrisma.payment.aggregate
-        .mockResolvedValueOnce({ _sum: { amount: null }, _count: { id: 0 } })
-        .mockResolvedValueOnce({ _sum: { amount: null }, _count: { id: 0 } });
-
-      const res = await request(app).get("/v1/businesses/biz-1/limits");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.daily.used).toBe("0");
-      expect(res.body.data.monthly.used).toBe("0");
-    });
-
-    it("should return 500 on error", async () => {
-      mockPrisma.business.findUnique.mockRejectedValue(new Error("DB error"));
-
-      const res = await request(app).get("/v1/businesses/biz-1/limits");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  // ─── NP-03 Tenant Isolation Tests ────────────────────────────────────────────
-
-  describe("Tenant isolation (NP-03)", () => {
-    it("should return 403 when tenant A tries to read tenant B's record", async () => {
-      // Mock requireOwnership to deny access
-      mockRequireOwnership.mockReturnValue(false);
-
-      const res = await request(app)
-        .get("/v1/businesses/biz-other")
-        .set("x-test-business-id", "biz-1");
-
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe("FORBIDDEN");
-    });
-
-    it("should return 403 when tenant A tries to PATCH tenant B's record", async () => {
-      // The PATCH route checks req.businessId !== req.params.id directly
-      const res = await request(app)
-        .patch("/v1/businesses/biz-other")
-        .set("x-test-business-id", "biz-1")
-        .send({ businessName: "Hacked Corp" });
-
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe("FORBIDDEN");
-    });
-
-    it("should allow owner to PATCH their own record", async () => {
-      mockPrisma.business.findUnique.mockResolvedValue(baseBusiness);
-      mockPrisma.business.update.mockResolvedValue({
-        ...baseBusiness,
-        businessName: "Updated Corp",
-      });
-
-      const res = await request(app)
-        .patch("/v1/businesses/biz-1")
-        .set("x-test-business-id", "biz-1")
-        .send({ businessName: "Updated Corp" });
-
-      expect(res.status).toBe(200);
-    });
-
-    it("should enforce admin/compliance role for verify endpoint", () => {
-      // Verify requireRole was called with ADMIN + COMPLIANCE_OFFICER at route definition time
-      const verifyCalls = moduleLoadRoleCalls.filter(
-        (c: any[]) => c.length === 2 && c[0] === "ADMIN" && c[1] === "COMPLIANCE_OFFICER",
+      const response = await request(app)
+        .post(`/v1/businesses/biz-1/${path}`)
+        .send({ txHash: VALID_BYTES32 });
+      expect(response.status).toBe(200);
+      expect(mockReconciliationService[method]).toHaveBeenCalledWith(
+        "biz-1",
+        VALID_BYTES32,
       );
-      expect(verifyCalls.length).toBe(1);
+      expect(response.body.data.business.kycStatus).toBe(status);
+    },
+  );
+
+  it("reconciles a tier upgrade from chain evidence", async () => {
+    mockReconciliationService.reconcileTierUpgrade.mockResolvedValue({
+      business: business({ tier: "PREMIUM" }),
+      replayed: false,
+      txHash: VALID_BYTES32,
+      confirmations: 4,
+      chainId: "7332",
     });
+    const response = await request(app)
+      .post("/v1/businesses/biz-1/upgrade")
+      .send({ newTier: "PREMIUM", txHash: VALID_BYTES32 });
+    expect(response.status).toBe(200);
+    expect(mockReconciliationService.reconcileTierUpgrade).toHaveBeenCalledWith(
+      "biz-1",
+      "PREMIUM",
+      VALID_BYTES32,
+    );
+  });
 
-    it("should enforce admin role for list, suspend and upgrade endpoints", () => {
-      // Verify requireRole was called with just ADMIN (for list, suspend, and upgrade)
-      const adminOnlyCalls = moduleLoadRoleCalls.filter(
-        (c: any[]) => c.length === 1 && c[0] === "ADMIN",
-      );
-      expect(adminOnlyCalls.length).toBeGreaterThanOrEqual(3); // list + suspend + upgrade
+  it("allows a platform admin to reconcile another tenant's tier", async () => {
+    ownershipAllowed = false;
+    const response = await request(app)
+      .post("/v1/businesses/biz-2/upgrade")
+      .set("x-test-business-id", "biz-1")
+      .send({ newTier: "PREMIUM", txHash: VALID_BYTES32 });
+
+    expect(response.status).toBe(200);
+    expect(mockReconciliationService.reconcileTierUpgrade).toHaveBeenCalledWith(
+      "biz-2",
+      "PREMIUM",
+      VALID_BYTES32,
+    );
+  });
+
+  it("returns verified on-chain limits only to the owner", async () => {
+    mockReconciliationService.getOnChainLimits.mockResolvedValue({
+      tier: "STANDARD",
+      source: "onchain",
     });
+    const response = await request(app).get("/v1/businesses/biz-1/limits");
+    expect(response.status).toBe(200);
+    expect(response.body.data.source).toBe("onchain");
 
-    it("should return 403 when non-owner queries another business's limits", async () => {
-      mockRequireOwnership.mockReturnValue(false);
+    ownershipAllowed = false;
+    const denied = await request(app).get("/v1/businesses/biz-2/limits");
+    expect(denied.status).toBe(403);
+  });
 
-      const res = await request(app)
-        .get("/v1/businesses/biz-other/limits")
-        .set("x-test-business-id", "biz-1");
-
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe("FORBIDDEN");
-    });
+  it("preserves reconciliation errors", async () => {
+    mockReconciliationService.reconcileVerification.mockRejectedValue(
+      new BusinessReconciliationError(
+        "WRONG_REGISTRY_CONTRACT",
+        "wrong contract",
+        422,
+      ),
+    );
+    const response = await request(app)
+      .post("/v1/businesses/biz-1/verify")
+      .send({ txHash: VALID_BYTES32 });
+    expect(response.status).toBe(422);
+    expect(response.body.error).toBe("WRONG_REGISTRY_CONTRACT");
   });
 });

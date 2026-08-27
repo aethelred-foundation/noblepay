@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Datelike, Duration, Timelike, Utc};
 use serde::{Deserialize, Serialize};
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::types::Payment;
 
@@ -55,9 +55,7 @@ impl BehavioralProfile {
         let cutoff = Utc::now() - Duration::days(window_days as i64);
         let relevant: Vec<&Payment> = payments
             .iter()
-            .filter(|p| {
-                (p.sender == entity || p.recipient == entity) && p.timestamp >= cutoff
-            })
+            .filter(|p| (p.sender == entity || p.recipient == entity) && p.timestamp >= cutoff)
             .collect();
 
         if relevant.is_empty() {
@@ -66,20 +64,24 @@ impl BehavioralProfile {
 
         let amounts: Vec<f64> = relevant.iter().map(|p| p.amount as f64).collect();
         let avg = amounts.iter().sum::<f64>() / amounts.len() as f64;
-        let variance = amounts.iter().map(|a| (a - avg).powi(2)).sum::<f64>() / amounts.len() as f64;
+        let variance =
+            amounts.iter().map(|a| (a - avg).powi(2)).sum::<f64>() / amounts.len() as f64;
         let stddev = variance.sqrt();
 
         let mut sorted_amounts = amounts.clone();
         sorted_amounts.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let median = if sorted_amounts.len() % 2 == 0 {
-            (sorted_amounts[sorted_amounts.len() / 2 - 1] + sorted_amounts[sorted_amounts.len() / 2]) / 2.0
+        let median = if sorted_amounts.len().is_multiple_of(2) {
+            (sorted_amounts[sorted_amounts.len() / 2 - 1]
+                + sorted_amounts[sorted_amounts.len() / 2])
+                / 2.0
         } else {
             sorted_amounts[sorted_amounts.len() / 2]
         };
 
         let mut hourly_pattern = [0.0f64; 24];
         let mut daily_pattern = [0.0f64; 7];
-        let mut counterparties: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut counterparties: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
         let mut currency_counts: HashMap<String, usize> = HashMap::new();
 
         for p in &relevant {
@@ -88,7 +90,11 @@ impl BehavioralProfile {
             hourly_pattern[hour] += 1.0;
             daily_pattern[day] += 1.0;
 
-            let counterparty = if p.sender == entity { &p.recipient } else { &p.sender };
+            let counterparty = if p.sender == entity {
+                &p.recipient
+            } else {
+                &p.sender
+            };
             counterparties.insert(counterparty.clone());
             *currency_counts.entry(p.currency.clone()).or_default() += 1;
         }
@@ -96,11 +102,15 @@ impl BehavioralProfile {
         // Normalize patterns
         let total_h: f64 = hourly_pattern.iter().sum();
         if total_h > 0.0 {
-            for h in hourly_pattern.iter_mut() { *h /= total_h; }
+            for h in hourly_pattern.iter_mut() {
+                *h /= total_h;
+            }
         }
         let total_d: f64 = daily_pattern.iter().sum();
         if total_d > 0.0 {
-            for d in daily_pattern.iter_mut() { *d /= total_d; }
+            for d in daily_pattern.iter_mut() {
+                *d /= total_d;
+            }
         }
 
         let total = relevant.len() as f64;
@@ -110,8 +120,16 @@ impl BehavioralProfile {
             .collect();
 
         let total_volume = amounts.iter().sum();
-        let first_ts = relevant.iter().map(|p| p.timestamp).min().unwrap_or(Utc::now());
-        let last_ts = relevant.iter().map(|p| p.timestamp).max().unwrap_or(Utc::now());
+        let first_ts = relevant
+            .iter()
+            .map(|p| p.timestamp)
+            .min()
+            .unwrap_or(Utc::now());
+        let last_ts = relevant
+            .iter()
+            .map(|p| p.timestamp)
+            .max()
+            .unwrap_or(Utc::now());
         let active_days = (last_ts - first_ts).num_days().max(1) as f64;
 
         Self {
@@ -232,6 +250,12 @@ pub struct BehavioralEngine {
     window_days: u32,
 }
 
+impl Default for BehavioralEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BehavioralEngine {
     /// Create a new engine with default configuration.
     pub fn new() -> Self {
@@ -332,7 +356,11 @@ impl BehavioralEngine {
         }
     }
 
-    fn check_amount_anomaly(&self, payment: &Payment, profile: &BehavioralProfile) -> Option<BehavioralAnomaly> {
+    fn check_amount_anomaly(
+        &self,
+        payment: &Payment,
+        profile: &BehavioralProfile,
+    ) -> Option<BehavioralAnomaly> {
         if profile.amount_stddev == 0.0 || profile.total_transactions < 3 {
             return None;
         }
@@ -360,7 +388,11 @@ impl BehavioralEngine {
         }
     }
 
-    fn check_temporal_anomaly(&self, payment: &Payment, profile: &BehavioralProfile) -> Option<BehavioralAnomaly> {
+    fn check_temporal_anomaly(
+        &self,
+        payment: &Payment,
+        profile: &BehavioralProfile,
+    ) -> Option<BehavioralAnomaly> {
         let hour = payment.timestamp.hour() as usize;
         let hour_frequency = profile.hourly_pattern[hour];
 
@@ -388,7 +420,11 @@ impl BehavioralEngine {
         }
     }
 
-    fn check_dormant_activation(&self, payment: &Payment, profile: &BehavioralProfile) -> Option<BehavioralAnomaly> {
+    fn check_dormant_activation(
+        &self,
+        payment: &Payment,
+        profile: &BehavioralProfile,
+    ) -> Option<BehavioralAnomaly> {
         let days_since_last = (Utc::now() - profile.last_transaction).num_days();
 
         if days_since_last > 60 {
@@ -411,8 +447,16 @@ impl BehavioralEngine {
         }
     }
 
-    fn check_currency_anomaly(&self, payment: &Payment, profile: &BehavioralProfile) -> Option<BehavioralAnomaly> {
-        if !profile.currency_distribution.contains_key(&payment.currency) && profile.total_transactions >= 5 {
+    fn check_currency_anomaly(
+        &self,
+        payment: &Payment,
+        profile: &BehavioralProfile,
+    ) -> Option<BehavioralAnomaly> {
+        if !profile
+            .currency_distribution
+            .contains_key(&payment.currency)
+            && profile.total_transactions >= 5
+        {
             Some(BehavioralAnomaly {
                 anomaly_type: AnomalyType::CurrencyAnomaly,
                 severity: 0.3,
@@ -600,7 +644,10 @@ mod tests {
             .anomalies
             .iter()
             .any(|a| a.anomaly_type == AnomalyType::DormantActivation);
-        assert!(has_dormant, "New entity should trigger dormant activation anomaly");
+        assert!(
+            has_dormant,
+            "New entity should trigger dormant activation anomaly"
+        );
         // Severity should be 0.3 for new entity path
         let dormant = score
             .anomalies
@@ -707,7 +754,7 @@ mod tests {
 
     #[test]
     fn anomaly_types_are_distinct() {
-        let types = vec![
+        let types = [
             AnomalyType::AmountAnomaly,
             AnomalyType::VelocityAnomaly,
             AnomalyType::TemporalAnomaly,
@@ -751,13 +798,11 @@ mod tests {
 
     #[test]
     fn temporal_anomaly_detected_for_unusual_hour() {
-        use chrono::TimeZone;
-
         let mut engine = BehavioralEngine::new();
         // Create payments all at the same hour to concentrate the hourly pattern
         let mut payments: Vec<Payment> = Vec::new();
         for i in 0..15 {
-            let mut p = Payment::test_payment("sender", &format!("r{}", i % 3), 1000 + i * 100, "USD");
+            let p = Payment::test_payment("sender", &format!("r{}", i % 3), 1000 + i * 100, "USD");
             // All at the current hour, which will dominate the pattern
             payments.push(p);
         }

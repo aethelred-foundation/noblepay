@@ -1,35 +1,43 @@
-# NoblePay frontend — systemd unit (testnet standalone deployment)
+# NoblePay frontend — systemd unit (standalone production build, port 3008)
 #
 # NOTE: NEXT_PUBLIC_* variables are baked in at BUILD time — rebuild with the
 # correct values before (re)starting this service:
-#   NEXT_PUBLIC_CHAIN_ENV=testnet \
-#   NEXT_PUBLIC_AETHELRED_TESTNET_RPC_URL=http://<node>:8545 \
-#   NEXT_PUBLIC_NOBLEPAY_ADDRESS=0x<deployed> npm run build
+#   cp deploy/production.env.example /etc/aethelred/noblepay.env
+#   # replace every placeholder, then build using the reviewed environment
 #
 # Install:
-#   1. Adjust User/WorkingDirectory below (run `which npm` as the service
-#      user — nvm installs need the bash -lc wrapper kept).
-#   2. sudo cp deploy/systemd/noblepay.service /etc/systemd/system/
+#   1. Install Node 24.18.0 and npm at /usr/bin/npm.
+#   2. Create the `noblepay` service account and place the reviewed release at
+#      /opt/aethelred/noblepay, owned by that account.
+#   3. sudo cp deploy/systemd/noblepay.service /etc/systemd/system/
 #      sudo systemctl daemon-reload
 #      sudo systemctl enable --now noblepay
 #   Logs: journalctl -u noblepay -f
 
 [Unit]
-Description=NoblePay frontend (Next.js standalone)
+Description=NoblePay frontend (Next.js standalone, port 3008)
 Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=simple
-User=administrator
-WorkingDirectory=/home/administrator/noblepay
+User=noblepay
+Group=noblepay
+WorkingDirectory=/opt/aethelred/noblepay
 Environment=NODE_ENV=production
-Environment=PORT=3000
-ExecStart=/bin/bash -lc 'npm run start:standalone'
+Environment=PORT=3008
+Environment=HOSTNAME=0.0.0.0
+ExecStart=/usr/bin/npm run start:standalone
 Restart=always
 RestartSec=5
 NoNewPrivileges=true
 PrivateTmp=true
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
 
 [Install]
 WantedBy=multi-user.target

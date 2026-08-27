@@ -26,15 +26,12 @@
  * Without JOB_ID it stops after proving no-seal-no-clearance and printing the
  * mint command.
  *
- * Contract provenance: this deploys the reviewed creation bytecode
- * (scripts/artifacts/SealSettlementGate.bin), built from contracts/src/
- * SealSettlementGate.sol — the current revision, including the optional
- * ZeroID identity layer (off by default). The seal-binding core of this
- * contract is proven against the REAL ISeal precompile + a real seal keeper
- * in the chain repo (internal/evmhost/noblepay_test.go: direction
- * sensitivity, jurisdiction policy, live revocation, clearance permanence);
- * that proof predates the identity layer, which is covered by this repo's
- * Hardhat suite (mock registry). This script is the live-node counterpart.
+ * Contract provenance: this deploys the exact reviewed creation bytecode
+ * (scripts/artifacts/SealSettlementGate.bin) — the same artifact the chain repo
+ * runs against the REAL ISeal precompile + a real seal keeper in
+ * internal/evmhost/noblepay_test.go (the definitive seal-binding proof, incl.
+ * direction sensitivity, jurisdiction policy, live revocation and clearance
+ * permanence). This script is the live-node counterpart.
  *
  * Env: DEPLOYER_KEY (funded; also governance), RPC_URL (default
  *      http://127.0.0.1:8545), GATE_ADDRESS (optional; deploys if unset),
@@ -77,7 +74,9 @@ const bytecode = `0x${readFileSync(
   "utf8",
 ).trim()}`;
 if (bytecode.length < 4) {
-  console.error("No creation bytecode in scripts/artifacts/SealSettlementGate.bin");
+  console.error(
+    "No creation bytecode in scripts/artifacts/SealSettlementGate.bin",
+  );
   process.exit(2);
 }
 
@@ -117,7 +116,9 @@ let GATE_ADDRESS = process.env.GATE_ADDRESS;
 // lags just-committed state (e.g. right after a deploy) and would under-shoot.
 // WRITE_GAS/DEPLOY_GAS override the estimate entirely if ever needed.
 const WRITE_GAS = process.env.WRITE_GAS ? BigInt(process.env.WRITE_GAS) : null;
-const DEPLOY_GAS = process.env.DEPLOY_GAS ? BigInt(process.env.DEPLOY_GAS) : null;
+const DEPLOY_GAS = process.env.DEPLOY_GAS
+  ? BigInt(process.env.DEPLOY_GAS)
+  : null;
 const FLOOR_WRITE = 800_000n;
 const FLOOR_DEPLOY = 6_000_000n;
 const withHeadroom = (estimate, floor) => {
@@ -241,7 +242,9 @@ async function main() {
     return;
   }
 
-  step(`clear(payer, payee, ${JOB_ID}) — verify seal via ISeal + record clearance`);
+  step(
+    `clear(payer, payee, ${JOB_ID}) — verify seal via ISeal + record clearance`,
+  );
   await write("clear", [PAYER, PAYEE, JOB_ID]);
   const after = await read("isCleared", [PAYER, PAYEE]);
   if (!after) fail("corridor not cleared after clear()");

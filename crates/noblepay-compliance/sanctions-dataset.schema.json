@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "NoblePay verified sanctions dataset",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "generated_at", "entries"],
+  "properties": {
+    "source": { "type": "string", "minLength": 1 },
+    "generated_at": { "type": "string", "format": "date-time" },
+    "entries": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "entity_name",
+          "entity_type",
+          "list_source",
+          "aliases",
+          "addresses",
+          "id_numbers"
+        ],
+        "properties": {
+          "entity_name": { "type": "string", "minLength": 1 },
+          "entity_type": {
+            "enum": [
+              "Individual",
+              "Organization",
+              "Vessel",
+              "Aircraft",
+              "Unknown"
+            ]
+          },
+          "list_source": {
+            "enum": ["Ofac", "UaeCentralBank", "UnitedNations", "EuropeanUnion"]
+          },
+          "aliases": { "type": "array", "items": { "type": "string" } },
+          "addresses": { "type": "array", "items": { "type": "string" } },
+          "id_numbers": { "type": "array", "items": { "type": "string" } }
+        }
+      }
+    }
+  }
+}

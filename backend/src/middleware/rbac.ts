@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from "express";
-import { logger, maskIdentifier } from "../lib/logger";
+import { logger } from "../lib/logger";
+import { hasCurrentBusinessRegistryAdminRole } from "../lib/business-registry-authorization";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -56,8 +57,21 @@ export type Permission =
 // ─── Role Hierarchy ─────────────────────────────────────────────────────────
 
 const ROLE_HIERARCHY: Record<Role, Role[]> = {
-  SUPER_ADMIN: ["ADMIN", "TREASURY_MANAGER", "COMPLIANCE_OFFICER", "ANALYST", "OPERATOR", "VIEWER"],
-  ADMIN: ["TREASURY_MANAGER", "COMPLIANCE_OFFICER", "ANALYST", "OPERATOR", "VIEWER"],
+  SUPER_ADMIN: [
+    "ADMIN",
+    "TREASURY_MANAGER",
+    "COMPLIANCE_OFFICER",
+    "ANALYST",
+    "OPERATOR",
+    "VIEWER",
+  ],
+  ADMIN: [
+    "TREASURY_MANAGER",
+    "COMPLIANCE_OFFICER",
+    "ANALYST",
+    "OPERATOR",
+    "VIEWER",
+  ],
   TREASURY_MANAGER: ["ANALYST", "VIEWER"],
   COMPLIANCE_OFFICER: ["ANALYST", "VIEWER"],
   ANALYST: ["VIEWER"],
@@ -70,38 +84,84 @@ const ROLE_HIERARCHY: Record<Role, Role[]> = {
 const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
   SUPER_ADMIN: ["admin:all"],
   ADMIN: [
-    "payments:read", "payments:create", "payments:cancel", "payments:refund",
-    "compliance:read", "compliance:manage", "compliance:override",
-    "businesses:read", "businesses:manage",
-    "treasury:read", "treasury:propose", "treasury:approve", "treasury:execute",
-    "liquidity:read", "liquidity:manage",
-    "streams:read", "streams:create", "streams:manage",
-    "fx:read", "fx:trade", "fx:manage",
-    "invoices:read", "invoices:create", "invoices:finance", "invoices:manage",
-    "crosschain:read", "crosschain:initiate", "crosschain:manage",
-    "reports:read", "reports:generate", "reports:submit",
-    "ai:read", "ai:manage", "ai:override",
-    "audit:read", "audit:export",
-    "settings:read", "settings:manage",
+    "payments:read",
+    "payments:create",
+    "payments:cancel",
+    "payments:refund",
+    "compliance:read",
+    "compliance:manage",
+    "compliance:override",
+    "businesses:read",
+    "businesses:manage",
+    "treasury:read",
+    "treasury:propose",
+    "treasury:approve",
+    "treasury:execute",
+    "liquidity:read",
+    "liquidity:manage",
+    "streams:read",
+    "streams:create",
+    "streams:manage",
+    "fx:read",
+    "fx:trade",
+    "fx:manage",
+    "invoices:read",
+    "invoices:create",
+    "invoices:finance",
+    "invoices:manage",
+    "crosschain:read",
+    "crosschain:initiate",
+    "crosschain:manage",
+    "reports:read",
+    "reports:generate",
+    "reports:submit",
+    "ai:read",
+    "ai:manage",
+    "ai:override",
+    "audit:read",
+    "audit:export",
+    "settings:read",
+    "settings:manage",
   ],
   TREASURY_MANAGER: [
-    "payments:read", "payments:create",
-    "treasury:read", "treasury:propose", "treasury:approve", "treasury:execute",
-    "liquidity:read", "liquidity:manage",
-    "streams:read", "streams:create", "streams:manage",
-    "fx:read", "fx:trade", "fx:manage",
-    "invoices:read", "invoices:create", "invoices:finance",
-    "reports:read", "reports:generate",
+    "payments:read",
+    "payments:create",
+    "treasury:read",
+    "treasury:propose",
+    "treasury:approve",
+    "treasury:execute",
+    "liquidity:read",
+    "liquidity:manage",
+    "streams:read",
+    "streams:create",
+    "streams:manage",
+    "fx:read",
+    "fx:trade",
+    "fx:manage",
+    "invoices:read",
+    "invoices:create",
+    "invoices:finance",
+    "reports:read",
+    "reports:generate",
     "audit:read",
     "settings:read",
   ],
   COMPLIANCE_OFFICER: [
     "payments:read",
-    "compliance:read", "compliance:manage", "compliance:override",
-    "businesses:read", "businesses:manage",
-    "reports:read", "reports:generate", "reports:submit",
-    "ai:read", "ai:manage", "ai:override",
-    "audit:read", "audit:export",
+    "payments:refund",
+    "compliance:read",
+    "compliance:manage",
+    "compliance:override",
+    "businesses:read",
+    "businesses:manage",
+    "reports:read",
+    "reports:generate",
+    "reports:submit",
+    "ai:read",
+    "ai:manage",
+    "ai:override",
+    "audit:read",
+    "audit:export",
     "settings:read",
   ],
   ANALYST: [
@@ -114,15 +174,20 @@ const ROLE_PERMISSIONS: Record<Role, Permission[]> = {
     "fx:read",
     "invoices:read",
     "crosschain:read",
-    "reports:read", "reports:generate",
+    "reports:read",
+    "reports:generate",
     "ai:read",
     "audit:read",
   ],
   OPERATOR: [
-    "payments:read", "payments:create",
-    "streams:read", "streams:create",
-    "crosschain:read", "crosschain:initiate",
-    "invoices:read", "invoices:create",
+    "payments:read",
+    "payments:create",
+    "streams:read",
+    "streams:create",
+    "crosschain:read",
+    "crosschain:initiate",
+    "invoices:read",
+    "invoices:create",
     "fx:read",
     "liquidity:read",
   ],
@@ -197,11 +262,12 @@ export function requirePermission(...required: Permission[]) {
     const role = req.userRole || "VIEWER";
     const effective = getEffectivePermissions(role);
 
-    const missing = required.filter((p) => !effective.has(p) && !effective.has("admin:all"));
+    const missing = required.filter(
+      (p) => !effective.has(p) && !effective.has("admin:all"),
+    );
 
     if (missing.length > 0) {
       logger.warn("RBAC: Permission denied", {
-        actorPresent: Boolean(req.userId),
         role,
         required,
         missing,
@@ -228,27 +294,16 @@ export function requirePermission(...required: Permission[]) {
 export function requireRole(...roles: Role[]) {
   return (req: RBACRequest, res: Response, next: NextFunction): void => {
     const userRole = req.userRole || "VIEWER";
-
-    // Check if the user has the required role or any higher role
-    const hasRole = roles.some((required) => {
-      if (userRole === required) return true;
-      const hierarchy = ROLE_HIERARCHY[userRole] || [];
-      // Check if required role is in user's subordinate chain (user is higher)
-      return false; // Direct role match only for requireRole
-    });
-
-    // Also check if the user's role inherits the required role
-    const effectiveRoles = new Set<Role>([userRole, ...ROLE_HIERARCHY[userRole] || []]);
-    // User needs to have OR be above the required role
-    const userLevel = Object.keys(ROLE_HIERARCHY).indexOf(userRole);
-    const hasAccess = roles.some((required) => {
-      const requiredLevel = Object.keys(ROLE_HIERARCHY).indexOf(required);
-      return userLevel <= requiredLevel; // Lower index = higher privilege
-    });
+    // Authorization follows the explicitly declared graph. Object-key order is
+    // not an authorization primitive and must never create privilege edges.
+    const effectiveRoles = new Set<Role>([
+      userRole,
+      ...(ROLE_HIERARCHY[userRole] || []),
+    ]);
+    const hasAccess = roles.some((required) => effectiveRoles.has(required));
 
     if (!hasAccess) {
       logger.warn("RBAC: Role denied", {
-        actorPresent: Boolean(req.userId),
         userRole,
         requiredRoles: roles,
         path: req.path,
@@ -269,33 +324,104 @@ export function requireRole(...roles: Role[]) {
  * Middleware to extract role and userId from JWT token (not headers).
  * Headers are untrusted and must not be used for authorization decisions.
  */
-export function extractRole(req: RBACRequest, _res: Response, next: NextFunction): void {
-  const validRoles: Role[] = ["SUPER_ADMIN", "ADMIN", "TREASURY_MANAGER", "COMPLIANCE_OFFICER", "ANALYST", "OPERATOR", "VIEWER"];
+export function extractRole(
+  req: RBACRequest,
+  _res: Response,
+  next: NextFunction,
+): void {
+  const validRoles: Role[] = [
+    "SUPER_ADMIN",
+    "ADMIN",
+    "TREASURY_MANAGER",
+    "COMPLIANCE_OFFICER",
+    "ANALYST",
+    "OPERATOR",
+    "VIEWER",
+  ];
 
   // Derive role from authenticated JWT payload, never from headers
-  const jwtPayload = (req as any).jwtPayload;
-  if (jwtPayload && jwtPayload.role && validRoles.includes(jwtPayload.role as Role)) {
+  const jwtPayload = req.jwtPayload;
+  if (
+    jwtPayload &&
+    jwtPayload.role &&
+    validRoles.includes(jwtPayload.role as Role)
+  ) {
     req.userRole = jwtPayload.role as Role;
   } else {
     req.userRole = "VIEWER";
   }
 
   // Derive userId from JWT subject, never from headers
-  req.userId = jwtPayload?.sub || (req as any).businessId || "anonymous";
+  req.userId = jwtPayload?.sub || req.businessId || "anonymous";
   next();
 }
 
 /**
  * Check that the requesting business owns the target resource.
- * Returns true if the caller's businessId matches the resource's businessId, or if the caller is an admin.
+ * Returns true if the caller owns the resource. Only a platform SUPER_ADMIN
+ * may cross tenant boundaries; business ADMIN is intentionally tenant-local.
  */
-export function requireOwnership(req: RBACRequest, resourceBusinessId: string): boolean {
-  const callerBusinessId = (req as any).businessId;
+export function requireOwnership(
+  req: RBACRequest,
+  resourceBusinessId: string,
+): boolean {
+  const callerBusinessId = req.businessId;
   if (!callerBusinessId) return false;
   if (callerBusinessId === resourceBusinessId) return true;
-  // Admins and super admins can access any resource
   const role = req.userRole || "VIEWER";
-  const roleIndex = Object.keys(ROLE_HIERARCHY).indexOf(role);
-  const adminIndex = Object.keys(ROLE_HIERARCHY).indexOf("ADMIN");
-  return roleIndex <= adminIndex; // Lower index = higher privilege
+  return role === "SUPER_ADMIN";
+}
+
+/** Require and revalidate the on-chain platform administrator role. */
+export async function requireCurrentPlatformAdmin(
+  req: RBACRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  if (req.userRole !== "SUPER_ADMIN") {
+    res.status(403).json({
+      error: "FORBIDDEN",
+      message:
+        "A current BusinessRegistry administrator wallet session is required",
+    });
+    return;
+  }
+  await checkCurrentPlatformAdmin(req, res, next);
+}
+
+/** Recheck only sessions that are using cross-tenant SUPER_ADMIN authority. */
+export async function revalidatePlatformAdmin(
+  req: RBACRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  if (req.userRole !== "SUPER_ADMIN") {
+    next();
+    return;
+  }
+  await checkCurrentPlatformAdmin(req, res, next);
+}
+
+async function checkCurrentPlatformAdmin(
+  req: RBACRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> {
+  try {
+    const signer = req.jwtPayload?.sub;
+    if (!signer || !(await hasCurrentBusinessRegistryAdminRole(signer))) {
+      res.status(403).json({
+        error: "PLATFORM_ADMIN_ROLE_REQUIRED",
+        message: "The wallet no longer holds BusinessRegistry ADMIN_ROLE",
+      });
+      return;
+    }
+    next();
+  } catch {
+    logger.error("Platform administrator role check unavailable");
+    res.status(503).json({
+      error: "AUTHORIZATION_UNAVAILABLE",
+      message: "Unable to verify the current platform administrator role",
+    });
+  }
 }

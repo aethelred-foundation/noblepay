@@ -1,16 +1,20 @@
 import { Server as HTTPServer } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import crypto from "crypto";
-import jwt from "jsonwebtoken";
 import { logger } from "../lib/logger";
+import {
+  parseCookieHeader,
+  SESSION_COOKIE_NAME,
+  type JWTPayload,
+  verifySessionToken,
+} from "../middleware/auth";
+import { prisma } from "../lib/db";
+import { getCurrentBusinessRegistryAuthorization } from "../lib/business-registry-authorization";
 
-const WS_JWT_SECRET: string | null = process.env.JWT_SECRET || (() => {
-  if (process.env.NODE_ENV === 'test') {
-    return 'test-secret';
-  }
-  logger.error('FATAL: JWT_SECRET environment variable is required in non-test environments. WebSocket token verification will reject all connections.');
-  return null;
-})();
+const WS_ALLOWED_ORIGINS = (process.env.CORS_ORIGIN || "http://localhost:3008")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter(Boolean);
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -36,6 +40,8 @@ export type WSChannel =
   | "crosschain"
   | "system";
 
+export type WSTenantChannel = Exclude<WSChannel, "system">;
+
 export interface WSMessage {
   type: WSEventType;
   channel: WSChannel;
@@ -49,6 +55,8 @@ interface WSClient {
   ws: WebSocket;
   channels: Set<WSChannel>;
   businessId: string | null;
+  signerAddress: string | null;
+  sessionExpiresAt: number | null;
   connectedAt: Date;
   lastPing: Date;
   messageCount: number;
@@ -60,6 +68,9 @@ const HEARTBEAT_INTERVAL_MS = 30_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const MAX_MESSAGES_PER_WINDOW = 100;
 const CLIENT_TIMEOUT_MS = 60_000;
+const MAX_PAYLOAD_BYTES = 16 * 1024;
+const SESSION_EXPIRED_CLOSE_CODE = 4001;
+const AUTHORIZATION_REVOKED_CLOSE_CODE = 4003;
 
 // ─── WebSocket Server ───────────────────────────────────────────────────────
 
@@ -67,31 +78,53 @@ export class WebSocketService {
   private wss: WebSocketServer | null = null;
   private clients: Map<string, WSClient> = new Map();
   private heartbeatTimer: NodeJS.Timeout | null = null;
-  private messageCounters: Map<string, { count: number; resetAt: number }> = new Map();
+  private messageCounters: Map<string, { count: number; resetAt: number }> =
+    new Map();
 
   /**
    * Attach WebSocket server to an existing HTTP server.
    */
   attach(server: HTTPServer): void {
-    this.wss = new WebSocketServer({ server, path: "/ws" });
+    this.wss = new WebSocketServer({
+      server,
+      path: "/ws",
+      maxPayload: MAX_PAYLOAD_BYTES,
+      perMessageDeflate: false,
+      verifyClient(info, done) {
+        const origin = info.origin;
+        // Browser cookie authentication is protected against cross-site
+        // WebSocket hijacking by the same explicit origin allowlist as CORS.
+        if (origin && !WS_ALLOWED_ORIGINS.includes(origin)) {
+          done(false, 403, "Origin not allowed");
+          return;
+        }
+        done(true);
+      },
+    });
 
-    this.wss.on("connection", (ws, req) => {
+    this.wss.on("connection", async (ws, req) => {
       const clientId = "ws-" + crypto.randomBytes(8).toString("hex");
       const ip = req.socket.remoteAddress || "unknown";
 
-      // Authenticate via JWT: check query param ?token= or Sec-WebSocket-Protocol header
+      // Browser clients use the same HttpOnly wallet session cookie as HTTP.
+      // Non-browser clients may use an Authorization bearer session token.
       let verifiedBusinessId: string | null = null;
+      let verifiedSignerAddress: string | null = null;
+      let sessionExpiresAt: number | null = null;
       try {
         const headers = req.headers || {};
-        const url = new URL(req.url || "/", `http://${headers.host || "localhost"}`);
-        const token = url.searchParams.get("token") || headers["sec-websocket-protocol"] as string || null;
+        const cookies = parseCookieHeader(headers.cookie);
+        const authorization = headers.authorization;
+        const bearerToken = authorization?.startsWith("Bearer ")
+          ? authorization.slice(7).trim()
+          : undefined;
+        const token = cookies[SESSION_COOKIE_NAME] || bearerToken;
         if (token) {
-          if (!WS_JWT_SECRET) {
-            logger.warn("WebSocket JWT verification rejected: JWT_SECRET not configured", { clientId, ip });
-          } else {
-            const decoded = jwt.verify(token, WS_JWT_SECRET) as { businessId?: string; sub?: string };
-            verifiedBusinessId = decoded.businessId || decoded.sub || null;
-          }
+          const session = verifySessionToken(token);
+          const authorization = await this.authorizeSession(session);
+          sessionExpiresAt = this.sessionExpirationMilliseconds(session.exp);
+          verifiedBusinessId = authorization.businessId;
+          verifiedSignerAddress = authorization.signerAddress;
         }
       } catch {
         // JWT verification failed — connection proceeds unauthenticated
@@ -104,6 +137,8 @@ export class WebSocketService {
         ws,
         channels: new Set(["system"]),
         businessId: verifiedBusinessId,
+        signerAddress: verifiedSignerAddress,
+        sessionExpiresAt,
         connectedAt: new Date(),
         lastPing: new Date(),
         messageCount: 0,
@@ -111,7 +146,12 @@ export class WebSocketService {
 
       this.clients.set(clientId, client);
 
-      logger.info("WebSocket client connected", { clientId, ip, businessId: verifiedBusinessId, totalClients: this.clients.size });
+      logger.info("WebSocket client connected", {
+        clientId,
+        ip,
+        businessId: verifiedBusinessId,
+        totalClients: this.clients.size,
+      });
 
       // Send welcome message
       this.sendToClient(client, {
@@ -120,19 +160,32 @@ export class WebSocketService {
         payload: {
           event: "connected",
           clientId,
-          availableChannels: ["payments", "compliance", "treasury", "streams", "alerts", "risk", "liquidity", "crosschain", "system"],
+          availableChannels: [
+            "payments",
+            "compliance",
+            "treasury",
+            "streams",
+            "alerts",
+            "risk",
+            "liquidity",
+            "crosschain",
+            "system",
+          ],
         },
         timestamp: new Date().toISOString(),
         correlationId: crypto.randomUUID(),
       });
 
       ws.on("message", (data) => {
-        this.handleMessage(clientId, data.toString());
+        return this.handleMessage(clientId, data.toString());
       });
 
       ws.on("close", () => {
         this.cleanupClient(clientId);
-        logger.info("WebSocket client disconnected", { clientId, totalClients: this.clients.size });
+        logger.info("WebSocket client disconnected", {
+          clientId,
+          totalClients: this.clients.size,
+        });
       });
 
       ws.on("pong", () => {
@@ -140,13 +193,18 @@ export class WebSocketService {
       });
 
       ws.on("error", (error) => {
-        logger.error("WebSocket client error", { clientId, error: error.message });
+        logger.error("WebSocket client error", {
+          clientId,
+          error: error.message,
+        });
         this.cleanupClient(clientId);
       });
     });
 
     // Start heartbeat
-    this.heartbeatTimer = setInterval(() => this.heartbeat(), HEARTBEAT_INTERVAL_MS);
+    this.heartbeatTimer = setInterval(() => {
+      void this.heartbeat();
+    }, HEARTBEAT_INTERVAL_MS);
 
     logger.info("WebSocket server attached", { path: "/ws" });
   }
@@ -154,16 +212,23 @@ export class WebSocketService {
   /**
    * Handle incoming client message.
    */
-  private handleMessage(clientId: string, raw: string): void {
+  private async handleMessage(clientId: string, raw: string): Promise<void> {
     const client = this.clients.get(clientId);
     if (!client) return;
+
+    if (this.closeExpiredSession(clientId, client)) return;
+    if (client.businessId && !(await this.revalidateClient(clientId, client)))
+      return;
 
     // Rate limiting
     if (!this.checkRateLimit(clientId)) {
       this.sendToClient(client, {
         type: "system_event",
         channel: "system",
-        payload: { event: "rate_limited", message: "Too many messages. Please slow down." },
+        payload: {
+          event: "rate_limited",
+          message: "Too many messages. Please slow down.",
+        },
         timestamp: new Date().toISOString(),
         correlationId: crypto.randomUUID(),
       });
@@ -200,7 +265,8 @@ export class WebSocketService {
           };
           if (rejected.length > 0) {
             responsePayload.rejected = rejected;
-            responsePayload.reason = "Authentication required for non-system channels";
+            responsePayload.reason =
+              "Authentication required for non-system channels";
           }
           this.sendToClient(client, {
             type: "system_event",
@@ -223,53 +289,50 @@ export class WebSocketService {
           this.sendToClient(client, {
             type: "system_event",
             channel: "system",
-            payload: { event: "unsubscribed", channels: Array.from(client.channels) },
+            payload: {
+              event: "unsubscribed",
+              channels: Array.from(client.channels),
+            },
             timestamp: new Date().toISOString(),
             correlationId: crypto.randomUUID(),
           });
           break;
 
-        case "authenticate": {
-          // Derive businessId from JWT token, never from self-asserted message data
-          let authBusinessId: string | null = null;
-          if (message.token) {
-            if (!WS_JWT_SECRET) {
-              this.sendToClient(client, {
-                type: "system_event",
-                channel: "system",
-                payload: { event: "auth_failed", message: "JWT verification unavailable: server misconfigured" },
-                timestamp: new Date().toISOString(),
-                correlationId: crypto.randomUUID(),
-              });
-              break;
-            }
-            try {
-              const decoded = jwt.verify(message.token, WS_JWT_SECRET) as { businessId?: string; sub?: string };
-              authBusinessId = decoded.businessId || decoded.sub || null;
-              client.businessId = authBusinessId;
-            } catch {
-              this.sendToClient(client, {
-                type: "system_event",
-                channel: "system",
-                payload: { event: "auth_failed", message: "Invalid or expired token" },
-                timestamp: new Date().toISOString(),
-                correlationId: crypto.randomUUID(),
-              });
-              break;
-            }
-          } else {
-            // No token provided — keep existing businessId from handshake
-            authBusinessId = client.businessId;
+        case "authenticate":
+          try {
+            if (typeof message.token !== "string")
+              throw new Error("Missing token");
+            const session = verifySessionToken(message.token);
+            const authorization = await this.authorizeSession(session);
+            client.businessId = authorization.businessId;
+            client.signerAddress = authorization.signerAddress;
+            client.sessionExpiresAt = this.sessionExpirationMilliseconds(
+              session.exp,
+            );
+            this.sendToClient(client, {
+              type: "system_event",
+              channel: "system",
+              payload: {
+                event: "authenticated",
+                businessId: session.businessId,
+              },
+              timestamp: new Date().toISOString(),
+              correlationId: crypto.randomUUID(),
+            });
+          } catch {
+            this.clearAuthentication(client);
+            this.sendToClient(client, {
+              type: "system_event",
+              channel: "system",
+              payload: {
+                event: "auth_failed",
+                message: "Invalid or expired token",
+              },
+              timestamp: new Date().toISOString(),
+              correlationId: crypto.randomUUID(),
+            });
           }
-          this.sendToClient(client, {
-            type: "system_event",
-            channel: "system",
-            payload: { event: "authenticated", businessId: authBusinessId },
-            timestamp: new Date().toISOString(),
-            correlationId: crypto.randomUUID(),
-          });
           break;
-        }
 
         case "ping":
           client.lastPing = new Date();
@@ -305,7 +368,32 @@ export class WebSocketService {
   /**
    * Broadcast a message to all clients subscribed to a channel.
    */
-  broadcast(channel: WSChannel, type: WSEventType, payload: Record<string, unknown>, targetBusinessId?: string): void {
+  broadcast(
+    channel: "system",
+    type: WSEventType,
+    payload: Record<string, unknown>,
+  ): Promise<void>;
+  broadcast(
+    channel: WSTenantChannel,
+    type: WSEventType,
+    payload: Record<string, unknown>,
+    targetBusinessId: string,
+  ): Promise<void>;
+  async broadcast(
+    channel: WSChannel,
+    type: WSEventType,
+    payload: Record<string, unknown>,
+    targetBusinessId?: string,
+  ): Promise<void> {
+    if (
+      channel !== "system" &&
+      (!targetBusinessId || !targetBusinessId.trim())
+    ) {
+      throw new TypeError(
+        "targetBusinessId is required for non-system WebSocket broadcasts",
+      );
+    }
+
     const message: WSMessage = {
       type,
       channel,
@@ -315,14 +403,26 @@ export class WebSocketService {
     };
 
     let sent = 0;
-    for (const client of this.clients.values()) {
-      if (!client.channels.has(channel) || client.ws.readyState !== WebSocket.OPEN) {
+    for (const [clientId, client] of this.clients) {
+      if (this.closeExpiredSession(clientId, client)) {
+        continue;
+      }
+      if (
+        channel !== "system" &&
+        client.businessId &&
+        !(await this.revalidateClient(clientId, client))
+      ) {
+        continue;
+      }
+      if (
+        !client.channels.has(channel) ||
+        client.ws.readyState !== WebSocket.OPEN
+      ) {
         continue;
       }
 
-      // Enforce tenant isolation: if a targetBusinessId is specified,
-      // only deliver to clients whose verified businessId matches.
-      if (targetBusinessId && client.businessId !== targetBusinessId) {
+      // Every non-system event is explicitly bound to one authenticated tenant.
+      if (channel !== "system" && client.businessId !== targetBusinessId) {
         continue;
       }
 
@@ -337,7 +437,7 @@ export class WebSocketService {
     }
 
     if (sent > 0) {
-      logger.debug("WebSocket broadcast", { channel, type, recipients: sent, targetBusinessId });
+      logger.debug("WebSocket broadcast");
     }
   }
 
@@ -366,7 +466,10 @@ export class WebSocketService {
     const counter = this.messageCounters.get(clientId);
 
     if (!counter || now > counter.resetAt) {
-      this.messageCounters.set(clientId, { count: 1, resetAt: now + RATE_LIMIT_WINDOW_MS });
+      this.messageCounters.set(clientId, {
+        count: 1,
+        resetAt: now + RATE_LIMIT_WINDOW_MS,
+      });
       return true;
     }
 
@@ -384,8 +487,8 @@ export class WebSocketService {
   private cleanupClient(clientId: string): void {
     const client = this.clients.get(clientId);
     if (client) {
+      this.clearAuthentication(client);
       client.channels.clear();
-      client.businessId = null;
     }
     this.clients.delete(clientId);
     this.messageCounters.delete(clientId);
@@ -394,10 +497,16 @@ export class WebSocketService {
   /**
    * Heartbeat: ping clients and remove stale connections.
    */
-  private heartbeat(): void {
+  private async heartbeat(): Promise<void> {
     const now = Date.now();
 
     for (const [id, client] of this.clients) {
+      if (this.closeExpiredSession(id, client, now)) {
+        continue;
+      }
+      if (client.businessId && !(await this.revalidateClient(id, client))) {
+        continue;
+      }
       if (now - client.lastPing.getTime() > CLIENT_TIMEOUT_MS) {
         logger.info("WebSocket client timed out", { clientId: id });
         client.ws.terminate();
@@ -411,11 +520,135 @@ export class WebSocketService {
     }
   }
 
+  private sessionExpirationMilliseconds(expirationSeconds: number): number {
+    if (!Number.isSafeInteger(expirationSeconds) || expirationSeconds <= 0) {
+      throw new Error("Session token is missing a valid expiration");
+    }
+    return expirationSeconds * 1000;
+  }
+
+  private clearAuthentication(client: WSClient): void {
+    client.businessId = null;
+    client.signerAddress = null;
+    client.sessionExpiresAt = null;
+    for (const channel of client.channels) {
+      if (channel !== "system") client.channels.delete(channel);
+    }
+  }
+
+  private closeExpiredSession(
+    clientId: string,
+    client: WSClient,
+    now = Date.now(),
+  ): boolean {
+    if (
+      !client.businessId ||
+      (client.sessionExpiresAt !== null && now < client.sessionExpiresAt)
+    ) {
+      return false;
+    }
+
+    logger.info("WebSocket session expired", { clientId });
+    try {
+      client.ws.close(SESSION_EXPIRED_CLOSE_CODE, "Session expired");
+    } catch (error) {
+      logger.warn("Failed to close expired WebSocket session cleanly", {
+        clientId,
+        error: (error as Error).message,
+      });
+      try {
+        client.ws.terminate();
+      } catch (terminateError) {
+        logger.warn("Failed to terminate expired WebSocket session", {
+          clientId,
+          error: (terminateError as Error).message,
+        });
+      }
+    } finally {
+      this.cleanupClient(clientId);
+    }
+    return true;
+  }
+
+  private async authorizeSession(session: JWTPayload): Promise<{
+    businessId: string;
+    signerAddress: string;
+  }> {
+    const business = await prisma.business.findUnique({
+      where: { id: session.businessId },
+      select: { id: true, address: true },
+    });
+    if (
+      !business ||
+      business.address.toLowerCase() !== session.sub.toLowerCase()
+    ) {
+      throw new Error("Session is not bound to the registered business wallet");
+    }
+    const current = await getCurrentBusinessRegistryAuthorization(
+      business.address,
+    );
+    if (!current.active) {
+      throw new Error(`Business is ${current.status.toLowerCase()}`);
+    }
+    return { businessId: business.id, signerAddress: current.wallet };
+  }
+
+  private async revalidateClient(
+    clientId: string,
+    client: WSClient,
+  ): Promise<boolean> {
+    try {
+      if (!client.businessId || !client.signerAddress) return false;
+      const business = await prisma.business.findUnique({
+        where: { id: client.businessId },
+        select: { id: true, address: true },
+      });
+      if (
+        !business ||
+        business.address.toLowerCase() !== client.signerAddress.toLowerCase()
+      ) {
+        throw new Error("Session business wallet binding changed");
+      }
+      const current = await getCurrentBusinessRegistryAuthorization(
+        business.address,
+      );
+      if (!current.active || current.wallet !== client.signerAddress) {
+        throw new Error(`Business is ${current.status.toLowerCase()}`);
+      }
+      return true;
+    } catch (error) {
+      logger.warn("WebSocket chain authorization revoked or unavailable", {
+        clientId,
+        businessId: client.businessId,
+        error: (error as Error).message,
+      });
+      try {
+        client.ws.close(
+          AUTHORIZATION_REVOKED_CLOSE_CODE,
+          "Business authorization revoked or unavailable",
+        );
+      } finally {
+        this.cleanupClient(clientId);
+      }
+      return false;
+    }
+  }
+
   /**
    * Validate channel name.
    */
   private isValidChannel(channel: string): boolean {
-    const valid: WSChannel[] = ["payments", "compliance", "treasury", "streams", "alerts", "risk", "liquidity", "crosschain", "system"];
+    const valid: WSChannel[] = [
+      "payments",
+      "compliance",
+      "treasury",
+      "streams",
+      "alerts",
+      "risk",
+      "liquidity",
+      "crosschain",
+      "system",
+    ];
     return valid.includes(channel as WSChannel);
   }
 
@@ -443,7 +676,8 @@ export class WebSocketService {
     return {
       totalConnections: this.clients.size,
       channelSubscriptions,
-      avgMessageRate: this.clients.size > 0 ? totalMessages / this.clients.size : 0,
+      avgMessageRate:
+        this.clients.size > 0 ? totalMessages / this.clients.size : 0,
     };
   }
 
@@ -457,8 +691,8 @@ export class WebSocketService {
     }
 
     for (const client of this.clients.values()) {
+      this.clearAuthentication(client);
       client.channels.clear();
-      client.businessId = null;
       client.ws.close(1001, "Server shutting down");
     }
     this.clients.clear();

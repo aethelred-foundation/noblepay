@@ -1,9 +1,6 @@
 import {
   createMockPrisma,
   resetAllMocks,
-  mockCounter,
-  mockHistogram,
-  mockLogger,
 } from "../setup";
 import { PaymentService, PaymentError } from "../../services/payment";
 import { AuditService } from "../../services/audit";
@@ -33,69 +30,36 @@ describe("PaymentService", () => {
       currency: "USDC",
     };
 
-    it("should create a payment and return it", async () => {
-      const mockPayment = {
-        id: "uuid-1",
-        paymentId: "0xabc123",
-        sender: input.sender,
-        recipient: input.recipient,
-        amount: { toString: () => "1000.50" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-      prisma.payment.create.mockResolvedValue(mockPayment);
-
-      const result = await paymentService.createPayment(input, "biz-1");
-
-      expect(prisma.payment.create).toHaveBeenCalledTimes(1);
-      expect(result).toEqual(mockPayment);
-      expect(mockCounter.inc).toHaveBeenCalledWith({
-        status: "PENDING",
-        currency: "USDC",
+    it("requires a confirmed on-chain initiation", async () => {
+      await expect(
+        paymentService.createPayment(input, "biz-1"),
+      ).rejects.toMatchObject({
+        code: "ON_CHAIN_INITIATION_REQUIRED",
+        statusCode: 410,
       });
-      expect(mockHistogram.observe).toHaveBeenCalledWith(
-        { currency: "USDC" },
-        1000.5,
-      );
-      expect(auditService.createAuditEntry).toHaveBeenCalledWith(
-        expect.objectContaining({
-          eventType: "PAYMENT_CREATED",
-          actor: input.sender,
-        }),
-      );
     });
 
-    it("should generate a unique paymentId starting with 0x", async () => {
-      prisma.payment.create.mockImplementation(async ({ data }: any) => {
-        expect(data.paymentId).toMatch(/^0x[a-f0-9]{64}$/);
-        return { ...data, id: "uuid-1" };
-      });
-
-      await paymentService.createPayment(input, "biz-1");
-      expect(prisma.payment.create).toHaveBeenCalledTimes(1);
+    it("never writes an unverified payment", async () => {
+      await expect(
+        paymentService.createPayment(input, "biz-1"),
+      ).rejects.toBeInstanceOf(PaymentError);
+      expect(prisma.payment.create).not.toHaveBeenCalled();
     });
 
-    it("should store purposeHash when provided", async () => {
-      const purposeHash =
-        "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef";
-      prisma.payment.create.mockImplementation(async ({ data }: any) => {
-        expect(data.purposeHash).toBe(purposeHash);
-        return data;
+    it("also retires the legacy idempotent creation path", async () => {
+      await expect(
+        paymentService.createPaymentWithIdempotency(input, "biz-1", "key-1"),
+      ).rejects.toMatchObject({
+        code: "ON_CHAIN_INITIATION_REQUIRED",
+        statusCode: 410,
       });
-
-      await paymentService.createPayment(
-        { ...input, purposeHash },
-        "biz-1",
-      );
     });
 
-    it("should set purposeHash to null when not provided", async () => {
-      prisma.payment.create.mockImplementation(async ({ data }: any) => {
-        expect(data.purposeHash).toBeNull();
-        return data;
-      });
-
-      await paymentService.createPayment(input, "biz-1");
+    it("does not emit an audit record without a verified receipt", async () => {
+      await expect(
+        paymentService.createPayment(input, "biz-1"),
+      ).rejects.toBeInstanceOf(PaymentError);
+      expect(auditService.createAuditEntry).not.toHaveBeenCalled();
     });
   });
 
@@ -104,30 +68,36 @@ describe("PaymentService", () => {
   describe("getPayment", () => {
     it("should look up by paymentId hash when id starts with 0x", async () => {
       const hash = "0x" + "a".repeat(64);
-      prisma.payment.findUnique.mockResolvedValue({ id: "1", paymentId: hash });
+      prisma.payment.findFirst.mockResolvedValue({ id: "1", paymentId: hash });
 
       await paymentService.getPayment(hash);
 
-      expect(prisma.payment.findUnique).toHaveBeenCalledWith({
+      expect(prisma.payment.findFirst).toHaveBeenCalledWith({
         where: { paymentId: hash },
-        include: { screenings: true, travelRuleRecord: true },
+        include: {
+          screenings: true,
+          travelRuleRecord: { select: { shared: true, sharedAt: true } },
+        },
       });
     });
 
     it("should look up by UUID when id does not start with 0x", async () => {
       const uuid = "uuid-123";
-      prisma.payment.findUnique.mockResolvedValue({ id: uuid });
+      prisma.payment.findFirst.mockResolvedValue({ id: uuid });
 
       await paymentService.getPayment(uuid);
 
-      expect(prisma.payment.findUnique).toHaveBeenCalledWith({
+      expect(prisma.payment.findFirst).toHaveBeenCalledWith({
         where: { id: uuid },
-        include: { screenings: true, travelRuleRecord: true },
+        include: {
+          screenings: true,
+          travelRuleRecord: { select: { shared: true, sharedAt: true } },
+        },
       });
     });
 
     it("should return null when payment is not found", async () => {
-      prisma.payment.findUnique.mockResolvedValue(null);
+      prisma.payment.findFirst.mockResolvedValue(null);
 
       const result = await paymentService.getPayment("nonexistent");
       expect(result).toBeNull();
@@ -249,128 +219,6 @@ describe("PaymentService", () => {
     });
   });
 
-  // ─── cancelPayment ─────────────────────────────────────────────────────────
-
-  describe("cancelPayment", () => {
-    it("should cancel a PENDING payment", async () => {
-      const payment = {
-        id: "uuid-1",
-        paymentId: "0xabc",
-        status: "PENDING",
-        currency: "USDC",
-      };
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(payment as any);
-      prisma.payment.update.mockResolvedValue({
-        ...payment,
-        status: "CANCELLED",
-      });
-
-      const result = await paymentService.cancelPayment("uuid-1", "actor-1");
-
-      expect(result.status).toBe("CANCELLED");
-      expect(auditService.createAuditEntry).toHaveBeenCalledWith(
-        expect.objectContaining({ eventType: "PAYMENT_CANCELLED" }),
-      );
-    });
-
-    it("should cancel a SCREENING payment", async () => {
-      const payment = {
-        id: "uuid-1",
-        paymentId: "0xabc",
-        status: "SCREENING",
-        currency: "USDC",
-      };
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(payment as any);
-      prisma.payment.update.mockResolvedValue({
-        ...payment,
-        status: "CANCELLED",
-      });
-
-      const result = await paymentService.cancelPayment("uuid-1", "actor-1");
-      expect(result.status).toBe("CANCELLED");
-    });
-
-    it("should throw PAYMENT_NOT_FOUND when payment does not exist", async () => {
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(null);
-
-      await expect(
-        paymentService.cancelPayment("nonexistent", "actor"),
-      ).rejects.toThrow(PaymentError);
-
-      await expect(
-        paymentService.cancelPayment("nonexistent", "actor"),
-      ).rejects.toMatchObject({
-        code: "PAYMENT_NOT_FOUND",
-        statusCode: 404,
-      });
-    });
-
-    it("should throw INVALID_STATE when payment is SETTLED", async () => {
-      const payment = { id: "1", paymentId: "0x1", status: "SETTLED" };
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(payment as any);
-
-      await expect(
-        paymentService.cancelPayment("1", "actor"),
-      ).rejects.toMatchObject({
-        code: "INVALID_STATE",
-        statusCode: 409,
-      });
-    });
-
-    it("should throw INVALID_STATE when payment is APPROVED", async () => {
-      const payment = { id: "1", paymentId: "0x1", status: "APPROVED" };
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(payment as any);
-
-      await expect(
-        paymentService.cancelPayment("1", "actor"),
-      ).rejects.toMatchObject({ code: "INVALID_STATE" });
-    });
-  });
-
-  // ─── refundPayment ─────────────────────────────────────────────────────────
-
-  describe("refundPayment", () => {
-    it("should refund a SETTLED payment", async () => {
-      const payment = {
-        id: "uuid-1",
-        paymentId: "0xabc",
-        status: "SETTLED",
-        amount: { toString: () => "500" },
-        currency: "USDC",
-      };
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(payment as any);
-      prisma.payment.update.mockResolvedValue({
-        ...payment,
-        status: "REFUNDED",
-        refundedAt: expect.any(Date),
-      });
-
-      const result = await paymentService.refundPayment("uuid-1", "actor-1");
-
-      expect(result.status).toBe("REFUNDED");
-      expect(auditService.createAuditEntry).toHaveBeenCalledWith(
-        expect.objectContaining({ eventType: "PAYMENT_REFUNDED" }),
-      );
-    });
-
-    it("should throw PAYMENT_NOT_FOUND when payment does not exist", async () => {
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(null);
-
-      await expect(
-        paymentService.refundPayment("nonexistent", "actor"),
-      ).rejects.toMatchObject({ code: "PAYMENT_NOT_FOUND", statusCode: 404 });
-    });
-
-    it("should throw INVALID_STATE when payment is PENDING", async () => {
-      const payment = { id: "1", paymentId: "0x1", status: "PENDING" };
-      jest.spyOn(paymentService, "getPayment").mockResolvedValue(payment as any);
-
-      await expect(
-        paymentService.refundPayment("1", "actor"),
-      ).rejects.toMatchObject({ code: "INVALID_STATE", statusCode: 409 });
-    });
-  });
-
   // ─── validateBusinessLimits ────────────────────────────────────────────────
 
   describe("validateBusinessLimits", () => {
@@ -479,28 +327,28 @@ describe("PaymentService", () => {
   // ─── calculateFees ─────────────────────────────────────────────────────────
 
   describe("calculateFees", () => {
-    it("should calculate STARTER fees at 50 basis points", () => {
-      const result = paymentService.calculateFees("10000", "STARTER");
-      expect(result.basisPoints).toBe(50);
-      expect(parseFloat(result.fee)).toBeCloseTo(50, 1);
-      expect(parseFloat(result.netAmount)).toBeCloseTo(9950, 1);
+    it("should calculate STANDARD fees at 30 basis points", () => {
+      const result = paymentService.calculateFees("10000", "STANDARD");
+      expect(result.basisPoints).toBe(30);
+      expect(parseFloat(result.fee)).toBeCloseTo(30, 1);
+      expect(parseFloat(result.netAmount)).toBeCloseTo(9970, 1);
     });
 
-    it("should calculate ENTERPRISE fees at 15 basis points", () => {
-      const result = paymentService.calculateFees("10000", "ENTERPRISE");
+    it("should calculate PREMIUM fees at 15 basis points", () => {
+      const result = paymentService.calculateFees("10000", "PREMIUM");
       expect(result.basisPoints).toBe(15);
       expect(parseFloat(result.fee)).toBeCloseTo(15, 1);
     });
 
-    it("should calculate INSTITUTIONAL fees at 5 basis points", () => {
-      const result = paymentService.calculateFees("100000", "INSTITUTIONAL");
+    it("should calculate ENTERPRISE fees at 5 basis points", () => {
+      const result = paymentService.calculateFees("100000", "ENTERPRISE");
       expect(result.basisPoints).toBe(5);
       expect(parseFloat(result.fee)).toBeCloseTo(50, 1);
     });
 
-    it("should default to STARTER for unknown tiers", () => {
+    it("should default to STANDARD for unknown tiers", () => {
       const result = paymentService.calculateFees("1000", "UNKNOWN_TIER");
-      expect(result.basisPoints).toBe(50);
+      expect(result.basisPoints).toBe(30);
     });
 
     it("should handle zero amount", () => {
@@ -513,7 +361,7 @@ describe("PaymentService", () => {
   // ─── batchProcessPayments ──────────────────────────────────────────────────
 
   describe("batchProcessPayments", () => {
-    it("should process multiple payments and return succeeded/failed", async () => {
+    it("requires confirmed on-chain transactions for multiple payments", async () => {
       const payments = [
         {
           sender: "0x1234567890abcdef1234567890abcdef12345678",
@@ -529,47 +377,36 @@ describe("PaymentService", () => {
         },
       ];
 
-      jest
-        .spyOn(paymentService, "createPayment")
-        .mockResolvedValueOnce({ id: "1" } as any)
-        .mockRejectedValueOnce(new Error("DB error"));
-
-      const result = await paymentService.batchProcessPayments(
-        payments,
-        "biz-1",
-      );
-
-      expect(result.succeeded).toHaveLength(1);
-      expect(result.failed).toHaveLength(1);
-      expect(result.failed[0]).toEqual({ index: 1, error: "DB error" });
+      await expect(
+        paymentService.batchProcessPayments(payments, "biz-1"),
+      ).rejects.toMatchObject({
+        code: "ON_CHAIN_BATCH_INITIATION_REQUIRED",
+        statusCode: 410,
+      });
     });
 
-    it("should handle all payments failing", async () => {
-      jest
-        .spyOn(paymentService, "createPayment")
-        .mockRejectedValue(new Error("fail"));
-
-      const result = await paymentService.batchProcessPayments(
-        [
-          {
-            sender: "0x1234567890abcdef1234567890abcdef12345678",
-            recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-            amount: "100",
-            currency: "USDC",
-          },
-        ],
-        "biz-1",
-      );
-
-      expect(result.succeeded).toHaveLength(0);
-      expect(result.failed).toHaveLength(1);
+    it("does not call the retired per-payment creation path", async () => {
+      const create = jest.spyOn(paymentService, "createPayment");
+      await expect(
+        paymentService.batchProcessPayments(
+          [
+            {
+              sender: "0x1234567890abcdef1234567890abcdef12345678",
+              recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+              amount: "100",
+              currency: "USDC",
+            },
+          ],
+          "biz-1",
+        ),
+      ).rejects.toBeInstanceOf(PaymentError);
+      expect(create).not.toHaveBeenCalled();
     });
 
-    it("should handle empty payments array", async () => {
-      const result = await paymentService.batchProcessPayments([], "biz-1");
-
-      expect(result.succeeded).toHaveLength(0);
-      expect(result.failed).toHaveLength(0);
+    it("also rejects empty direct-service batches", async () => {
+      await expect(
+        paymentService.batchProcessPayments([], "biz-1"),
+      ).rejects.toMatchObject({ code: "ON_CHAIN_BATCH_INITIATION_REQUIRED" });
     });
   });
 

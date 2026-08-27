@@ -1,8 +1,9 @@
-import { expect } from "chai";
-import { network } from "hardhat";
-
-const { ethers, networkHelpers } = await network.connect();
-const { loadFixture, time } = networkHelpers;
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
+const {
+  loadFixture,
+  time,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
 
 describe("LiquidityPool - Coverage", function () {
   async function deployFixture() {
@@ -23,16 +24,23 @@ describe("LiquidityPool - Coverage", function () {
     }
 
     const LiquidityPool = await ethers.getContractFactory("LiquidityPool");
-    const pool = await LiquidityPool.deploy(admin.address, treasuryAddr.address);
+    const pool = await LiquidityPool.deploy(
+      admin.address,
+      treasuryAddr.address,
+    );
 
     const POOL_ADMIN_ROLE = await pool.POOL_ADMIN_ROLE();
     const LP_ROLE = await pool.LIQUIDITY_PROVIDER_ROLE();
     await pool.connect(admin).grantRole(LP_ROLE, provider.address);
 
     // Create pool
-    const poolTx = await pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 8000);
+    const poolTx = await pool
+      .connect(admin)
+      .createPool(token0.target, token1.target, 30, 10, 8000);
     const poolReceipt = await poolTx.wait();
-    const poolEvent = poolReceipt.logs.find(l => l.fragment && l.fragment.name === "PoolCreated");
+    const poolEvent = poolReceipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "PoolCreated",
+    );
     const poolId = poolEvent.args[0];
 
     // Mint and approve tokens
@@ -48,7 +56,18 @@ describe("LiquidityPool - Coverage", function () {
     await token0.connect(other).approve(pool.target, ethers.MaxUint256);
     await token1.connect(other).approve(pool.target, ethers.MaxUint256);
 
-    return { pool, token0, token1, admin, provider, other, treasuryAddr, poolId, POOL_ADMIN_ROLE, LP_ROLE };
+    return {
+      pool,
+      token0,
+      token1,
+      admin,
+      provider,
+      other,
+      treasuryAddr,
+      poolId,
+      POOL_ADMIN_ROLE,
+      LP_ROLE,
+    };
   }
 
   async function liquidityAddedFixture() {
@@ -56,9 +75,13 @@ describe("LiquidityPool - Coverage", function () {
     const { pool, provider, poolId } = fixture;
     const amount0 = ethers.parseEther("10000");
     const amount1 = ethers.parseEther("10000");
-    const tx = await pool.connect(provider).addLiquidity(poolId, amount0, amount1, -1000, 1000);
+    const tx = await pool
+      .connect(provider)
+      .addLiquidity(poolId, amount0, amount1, -1000, 1000);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "LiquidityAdded");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "LiquidityAdded",
+    );
     const positionId = event.args[0];
     return { ...fixture, positionId, amount0, amount1 };
   }
@@ -67,79 +90,91 @@ describe("LiquidityPool - Coverage", function () {
     it("should add liquidity with only token0", async function () {
       const { pool, provider, poolId } = await loadFixture(deployFixture);
       const amount0 = ethers.parseEther("10000");
-      await expect(pool.connect(provider).addLiquidity(poolId, amount0, 0, -1000, 1000))
-        .to.emit(pool, "LiquidityAdded");
+      await expect(
+        pool.connect(provider).addLiquidity(poolId, amount0, 0, -1000, 1000),
+      ).to.emit(pool, "LiquidityAdded");
     });
 
     it("should add liquidity with only token1", async function () {
       const { pool, provider, poolId } = await loadFixture(deployFixture);
       const amount1 = ethers.parseEther("10000");
-      await expect(pool.connect(provider).addLiquidity(poolId, 0, amount1, -1000, 1000))
-        .to.emit(pool, "LiquidityAdded");
+      await expect(
+        pool.connect(provider).addLiquidity(poolId, 0, amount1, -1000, 1000),
+      ).to.emit(pool, "LiquidityAdded");
     });
   });
 
   describe("Remove Liquidity with Fees", function () {
     it("should remove liquidity and return fees", async function () {
-      const { pool, provider, poolId, positionId } = await liquidityAddedFixture();
+      const { pool, provider, poolId, positionId } =
+        await liquidityAddedFixture();
       // Since we can't easily simulate fee accrual, just remove with zero fees
-      await expect(pool.connect(provider).removeLiquidity(poolId, positionId))
-        .to.emit(pool, "LiquidityRemoved");
+      await expect(
+        pool.connect(provider).removeLiquidity(poolId, positionId),
+      ).to.emit(pool, "LiquidityRemoved");
     });
   });
 
   describe("Harvest Fees", function () {
     it("should harvest fees from a position", async function () {
-      const { pool, provider, poolId, positionId } = await liquidityAddedFixture();
+      const { pool, provider, poolId, positionId } =
+        await liquidityAddedFixture();
       // Even with no fees, this should work (just transfer 0)
-      await expect(pool.connect(provider).harvestFees(positionId, poolId))
-        .to.emit(pool, "FeesHarvested");
+      await expect(
+        pool.connect(provider).harvestFees(positionId, poolId),
+      ).to.emit(pool, "FeesHarvested");
     });
 
     it("should revert for non-owner harvest", async function () {
       const { pool, other, poolId, positionId } = await liquidityAddedFixture();
-      await expect(pool.connect(other).harvestFees(positionId, poolId))
-        .to.be.revertedWithCustomError(pool, "Unauthorized");
+      await expect(
+        pool.connect(other).harvestFees(positionId, poolId),
+      ).to.be.revertedWithCustomError(pool, "Unauthorized");
     });
 
     it("should revert for inactive position", async function () {
-      const { pool, provider, poolId, positionId } = await liquidityAddedFixture();
+      const { pool, provider, poolId, positionId } =
+        await liquidityAddedFixture();
       await pool.connect(provider).removeLiquidity(poolId, positionId);
-      await expect(pool.connect(provider).harvestFees(positionId, poolId))
-        .to.be.revertedWithCustomError(pool, "PositionNotActive");
+      await expect(
+        pool.connect(provider).harvestFees(positionId, poolId),
+      ).to.be.revertedWithCustomError(pool, "PositionNotActive");
     });
   });
 
   describe("Flash Loan", function () {
-    it("should execute a flash loan with proper repayment", async function () {
+    it("should reject a flash loan request from an EOA receiver", async function () {
       const { pool, token0, other, poolId } = await liquidityAddedFixture();
       const borrowAmount = ethers.parseEther("100");
-      // Pre-fund the pool with extra to simulate repayment
-      await token0.mint(pool.target, ethers.parseEther("10")); // fee coverage
-
-      // Flash loan will fail because we can't repay in same tx without a callback
-      // But we can test the revert path
-      await expect(pool.connect(other).flashLoan(poolId, token0.target, borrowAmount, "0x"))
-        .to.be.revertedWithCustomError(pool, "FlashLoanNotRepaid");
+      await expect(
+        pool
+          .connect(other)
+          .flashLoan(poolId, token0.target, borrowAmount, "0x"),
+      )
+        .to.be.revertedWithCustomError(pool, "InvalidFlashLoanReceiver")
+        .withArgs(other.address);
     });
 
     it("should revert flash loan with zero amount", async function () {
       const { pool, token0, other, poolId } = await liquidityAddedFixture();
-      await expect(pool.connect(other).flashLoan(poolId, token0.target, 0, "0x"))
-        .to.be.revertedWithCustomError(pool, "ZeroAmount");
+      await expect(
+        pool.connect(other).flashLoan(poolId, token0.target, 0, "0x"),
+      ).to.be.revertedWithCustomError(pool, "ZeroAmount");
     });
 
     it("should revert flash loan exceeding reserves", async function () {
       const { pool, token0, other, poolId } = await liquidityAddedFixture();
       const tooMuch = ethers.parseEther("100000");
-      await expect(pool.connect(other).flashLoan(poolId, token0.target, tooMuch, "0x"))
-        .to.be.revertedWithCustomError(pool, "InsufficientLiquidity");
+      await expect(
+        pool.connect(other).flashLoan(poolId, token0.target, tooMuch, "0x"),
+      ).to.be.revertedWithCustomError(pool, "InsufficientLiquidity");
     });
 
     it("should revert flash loan with invalid token", async function () {
       const { pool, other, poolId } = await liquidityAddedFixture();
-      await expect(pool.connect(other).flashLoan(poolId, other.address, 100, "0x"))
-        .to.be.revertedWith("LiquidityPool: invalid borrow token");
+      await expect(
+        pool.connect(other).flashLoan(poolId, other.address, 100, "0x"),
+      ).to.be.revertedWith("LiquidityPool: invalid borrow token");
     });
   });
 
@@ -149,7 +184,9 @@ describe("LiquidityPool - Coverage", function () {
       // Add highly imbalanced liquidity (mostly token0)
       const amount0 = ethers.parseEther("100000");
       const amount1 = ethers.parseEther("100");
-      await pool.connect(provider).addLiquidity(poolId, amount0, amount1, -1000, 1000);
+      await pool
+        .connect(provider)
+        .addLiquidity(poolId, amount0, amount1, -1000, 1000);
       // Check health
       const health = await pool.getPoolHealth(poolId);
       // Should be WARNING or CRITICAL depending on ratio
@@ -157,34 +194,40 @@ describe("LiquidityPool - Coverage", function () {
     });
 
     it("should reset circuit breaker after cooldown", async function () {
-      const { pool, admin, provider, poolId } = await loadFixture(deployFixture);
+      const { pool, admin, provider, poolId } =
+        await loadFixture(deployFixture);
       // Create extreme imbalance to trigger circuit breaker
       const amount0 = ethers.parseEther("100000");
       const amount1 = ethers.parseEther("10");
-      await pool.connect(provider).addLiquidity(poolId, amount0, amount1, -1000, 1000);
+      await expect(
+        pool
+          .connect(provider)
+          .addLiquidity(poolId, amount0, amount1, -1000, 1000),
+      ).to.emit(pool, "CircuitBreakerTriggered");
 
-      // Try resetting (may not have been triggered yet)
-      // If CB was triggered, wait for cooldown
       await time.increase(3601); // 1 hour + 1
-      try {
-        await pool.connect(admin).resetCircuitBreaker(poolId);
-      } catch {
-        // CB may not have been triggered, which is ok
-      }
+      await expect(pool.connect(admin).resetCircuitBreaker(poolId)).to.emit(
+        pool,
+        "CircuitBreakerReset",
+      );
+      const breaker = await pool.circuitBreakers(poolId);
+      expect(breaker.lastTriggeredAt).to.equal(0);
     });
   });
 
   describe("Pool Admin", function () {
     it("should update pool config", async function () {
       const { pool, admin, poolId } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).updatePoolConfig(poolId, 50, 20))
-        .to.emit(pool, "PoolConfigUpdated");
+      await expect(
+        pool.connect(admin).updatePoolConfig(poolId, 50, 20),
+      ).to.emit(pool, "PoolConfigUpdated");
     });
 
     it("should revert excessive fee rate", async function () {
       const { pool, admin, poolId } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).updatePoolConfig(poolId, 10001, 20))
-        .to.be.revertedWithCustomError(pool, "ExcessiveFeeRate");
+      await expect(
+        pool.connect(admin).updatePoolConfig(poolId, 10001, 20),
+      ).to.be.revertedWithCustomError(pool, "ExcessiveFeeRate");
     });
 
     it("should update circuit breaker config", async function () {
@@ -194,38 +237,46 @@ describe("LiquidityPool - Coverage", function () {
 
     it("should revert invalid imbalance threshold", async function () {
       const { pool, admin, poolId } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).updateCircuitBreaker(poolId, 0, 3600))
-        .to.be.revertedWithCustomError(pool, "InvalidImbalanceThreshold");
+      await expect(
+        pool.connect(admin).updateCircuitBreaker(poolId, 0, 3600),
+      ).to.be.revertedWithCustomError(pool, "InvalidImbalanceThreshold");
     });
 
     it("should revert imbalance threshold > 9500", async function () {
       const { pool, admin, poolId } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).updateCircuitBreaker(poolId, 9501, 3600))
-        .to.be.revertedWithCustomError(pool, "InvalidImbalanceThreshold");
+      await expect(
+        pool.connect(admin).updateCircuitBreaker(poolId, 9501, 3600),
+      ).to.be.revertedWithCustomError(pool, "InvalidImbalanceThreshold");
     });
 
     it("should set treasury", async function () {
       const { pool, admin, other } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).setTreasury(other.address))
-        .to.emit(pool, "TreasuryUpdated");
+      await expect(pool.connect(admin).setTreasury(other.address)).to.emit(
+        pool,
+        "TreasuryUpdated",
+      );
     });
 
     it("should revert treasury zero address", async function () {
       const { pool, admin } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).setTreasury(ethers.ZeroAddress))
-        .to.be.revertedWithCustomError(pool, "ZeroAddress");
+      await expect(
+        pool.connect(admin).setTreasury(ethers.ZeroAddress),
+      ).to.be.revertedWithCustomError(pool, "ZeroAddress");
     });
 
     it("should set protocol fee", async function () {
       const { pool, admin } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).setProtocolFee(1000))
-        .to.emit(pool, "ProtocolFeeUpdated");
+      await expect(pool.connect(admin).setProtocolFee(1000)).to.emit(
+        pool,
+        "ProtocolFeeUpdated",
+      );
     });
 
     it("should revert excessive protocol fee", async function () {
       const { pool, admin } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).setProtocolFee(5001))
-        .to.be.revertedWithCustomError(pool, "InvalidProtocolFee");
+      await expect(
+        pool.connect(admin).setProtocolFee(5001),
+      ).to.be.revertedWithCustomError(pool, "InvalidProtocolFee");
     });
   });
 
@@ -258,14 +309,20 @@ describe("LiquidityPool - Coverage", function () {
   describe("Pool Creation Edge Cases", function () {
     it("should revert duplicate pool", async function () {
       const { pool, admin, token0, token1 } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 8000))
-        .to.be.revertedWithCustomError(pool, "PoolAlreadyExists");
+      await expect(
+        pool
+          .connect(admin)
+          .createPool(token0.target, token1.target, 30, 10, 8000),
+      ).to.be.revertedWithCustomError(pool, "PoolAlreadyExists");
     });
 
     it("should revert with zero token address", async function () {
       const { pool, admin, token0 } = await loadFixture(deployFixture);
-      await expect(pool.connect(admin).createPool(ethers.ZeroAddress, token0.target, 30, 10, 8000))
-        .to.be.revertedWithCustomError(pool, "ZeroAddress");
+      await expect(
+        pool
+          .connect(admin)
+          .createPool(ethers.ZeroAddress, token0.target, 30, 10, 8000),
+      ).to.be.revertedWithCustomError(pool, "ZeroAddress");
     });
   });
 

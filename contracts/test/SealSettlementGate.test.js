@@ -1,466 +1,199 @@
-import { expect } from "chai";
-import { network } from "hardhat";
-
-const { ethers, networkHelpers } = await network.connect();
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
 
 /**
- * SealSettlementGate — consensus-anchored corridor clearance.
- *
- * The ISeal precompile lives at a fixed address (0x0900) on Aethelred, so the
- * suite installs MockISeal's runtime bytecode there with setCode. NOTE:
- * setCode wipes storage — mock seals must be (re)populated AFTER the code is
- * installed. The REAL precompile binding (real seal keeper, vendored bytecode,
- * live revocation) is proven in the aethelred repo's evmhost test.
+ * SealSettlementGate unit suite — mirrors the behaviour the chain repo proves
+ * against the REAL ISeal precompile in internal/evmhost/noblepay_test.go:
+ * corridor-direction sensitivity, CEAP policy enforcement, live revocation, and
+ * clearance permanence. Here the precompile is a MockISeal installed at 0x0900
+ * via hardhat_setCode; the real-precompile binding is the chain repo's job.
  */
+const SEAL_ADDR = "0x0000000000000000000000000000000000000900";
+
 describe("SealSettlementGate", function () {
-  const SEAL_PRECOMPILE = "0x0000000000000000000000000000000000000900";
-  const JOB = "job-screen-001";
-  const SEAL_ID = "a".repeat(64);
+  let gov, payer, payee, other, stranger;
+  let gate, seal;
 
-  const purposeFor = (payer, payee) =>
-    `noblepay:${payer.toLowerCase()}:${payee.toLowerCase()}`;
-
-  async function deployFixture() {
-    const [governance, payer, payee, stranger] = await ethers.getSigners();
-
-    // Install MockISeal's runtime bytecode at the precompile address.
-    const MockISeal = await ethers.getContractFactory("MockISeal");
-    const deployed = await MockISeal.deploy();
-    await deployed.waitForDeployment();
-    const runtime = await ethers.provider.getCode(deployed.target);
-    await networkHelpers.setCode(SEAL_PRECOMPILE, runtime);
-    const seal = MockISeal.attach(SEAL_PRECOMPILE);
-
-    // setCode wiped storage — set mock state afterwards.
-    await seal.setPolicyResult(true, "");
+  beforeEach(async function () {
+    [gov, payer, payee, other, stranger] = await ethers.getSigners();
 
     const Gate = await ethers.getContractFactory("SealSettlementGate");
-    const gate = await Gate.deploy(governance.address);
+    gate = await Gate.deploy(gov.address);
     await gate.waitForDeployment();
 
-    return { gate, seal, governance, payer, payee, stranger };
+    // Install the mock precompile's runtime code at 0x0900. hardhat_setCode
+    // zeroes the target's storage AND does not run the constructor, so the
+    // `_policyOk = true` initializer does NOT apply — set the baseline explicitly.
+    const Mock = await ethers.getContractFactory("MockISeal");
+    const impl = await Mock.deploy();
+    await impl.waitForDeployment();
+    const code = await ethers.provider.getCode(await impl.getAddress());
+    await ethers.provider.send("hardhat_setCode", [SEAL_ADDR, code]);
+    seal = await ethers.getContractAt("MockISeal", SEAL_ADDR);
+    await seal.setPolicyResult(true, "");
+
+    // Governance CEAP policy: TEE backend, UAE residency.
+    await gate.connect(gov).setCompliancePolicy(["tee"], "", [], false, ["AE"]);
+  });
+
+  async function seedCorridorSeal(jobId, sealId, p, q, active = true) {
+    const purpose = await gate.expectedPurpose(p.address, q.address);
+    await seal.setSeal(jobId, sealId, purpose, active);
   }
 
-  async function mintSeal(
-    seal,
-    payer,
-    payee,
-    { job = JOB, sealId = SEAL_ID, active = true } = {},
-  ) {
-    await seal.setSeal(
-      job,
-      sealId,
-      purposeFor(payer.address, payee.address),
-      active,
-    );
-  }
-
-  describe("clearing", function () {
-    it("clears a corridor backed by a bound, active, policy-satisfying seal", async function () {
-      const { gate, seal, payer, payee, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(
-        false,
-      );
-
-      await expect(
-        gate.connect(stranger).clear(payer.address, payee.address, JOB),
-      )
-        .to.emit(gate, "CorridorCleared")
-        .withArgs(payer.address, payee.address, SEAL_ID, JOB);
-
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
-      const record = await gate.getClearance(payer.address, payee.address);
-      expect(record.sealId).to.equal(SEAL_ID);
-      expect(record.exists).to.equal(true);
-      expect(record.revoked).to.equal(false);
-    });
-
-    it("clearance is direction-sensitive: payer→payee does not clear payee→payer", async function () {
-      const { gate, seal, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
-      expect(await gate.isCleared(payee.address, payer.address)).to.equal(
-        false,
-      );
-    });
-
-    it("rejects a seal bound to a different corridor", async function () {
-      const { gate, seal, payer, payee, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      // Seal bound to (payer → stranger), presented for (payer → payee).
-      await mintSeal(seal, payer, stranger);
-      await expect(
-        gate.clear(payer.address, payee.address, JOB),
-      ).to.be.revertedWithCustomError(gate, "SealNotBoundToCorridor");
-    });
-
-    it("rejects a reversed-direction seal (payee→payer seal cannot clear payer→payee)", async function () {
-      const { gate, seal, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payee, payer); // reversed binding
-      await expect(
-        gate.clear(payer.address, payee.address, JOB),
-      ).to.be.revertedWithCustomError(gate, "SealNotBoundToCorridor");
-    });
-
-    it("rejects a seal that fails the CEAP compliance policy", async function () {
-      const { gate, seal, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await seal.setPolicyResult(false, "jurisdiction not allowed");
-      await expect(gate.clear(payer.address, payee.address, JOB))
-        .to.be.revertedWithCustomError(gate, "PolicyNotSatisfied")
-        .withArgs("jurisdiction not allowed");
-    });
-
-    it("rejects an inactive (revoked/expired) seal", async function () {
-      const { gate, seal, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee, { active: false });
-      await expect(
-        gate.clear(payer.address, payee.address, JOB),
-      ).to.be.revertedWithCustomError(gate, "SealNotActive");
-    });
-
-    it("rejects seal replay across corridors (one seal, one clearance)", async function () {
-      const { gate, seal, payer, payee, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-
-      // Same seal presented for a second corridor via another job mapping.
-      await seal.setSeal(
-        "job-screen-002",
-        SEAL_ID,
-        purposeFor(payer.address, stranger.address),
-        true,
-      );
-      await expect(
-        gate.clear(payer.address, stranger.address, "job-screen-002"),
-      ).to.be.revertedWithCustomError(gate, "SealAlreadyUsed");
-    });
-
-    it("rejects zero-address corridor endpoints", async function () {
-      const { gate, payer } = await networkHelpers.loadFixture(deployFixture);
-      await expect(
-        gate.clear(ethers.ZeroAddress, payer.address, JOB),
-      ).to.be.revertedWithCustomError(gate, "ZeroCorridor");
-      await expect(
-        gate.clear(payer.address, ethers.ZeroAddress, JOB),
-      ).to.be.revertedWithCustomError(gate, "ZeroCorridor");
-    });
-
-    it("one corridor, one clearance: a live clearance cannot be overwritten", async function () {
-      const { gate, seal, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-      const before = await gate.getClearance(payer.address, payee.address);
-
-      await seal.setSeal(
-        "job-screen-dup",
-        "c".repeat(64),
-        purposeFor(payer.address, payee.address),
-        true,
-      );
-      await expect(gate.clear(payer.address, payee.address, "job-screen-dup"))
-        .to.be.revertedWithCustomError(gate, "AlreadyCleared")
-        .withArgs(payer.address, payee.address);
-
-      const after = await gate.getClearance(payer.address, payee.address);
-      expect(after.sealId).to.equal(before.sealId);
-      expect(after.clearedAt).to.equal(before.clearedAt);
-    });
-
-    it("SECURITY: a governance revocation cannot be undone by re-clearing with a fresh seal", async function () {
-      const { gate, seal, governance, payer, payee, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-      await gate.connect(governance).revoke(payer.address, payee.address);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(
-        false,
-      );
-
-      // Attacker holds a second, legitimately corridor-bound ACTIVE seal.
-      // Without the AlreadyCleared guard this would rewrite revoked=false,
-      // reopening a corridor governance closed — through a permissionless call.
-      await seal.setSeal(
-        "job-screen-fresh",
-        "d".repeat(64),
-        purposeFor(payer.address, payee.address),
-        true,
-      );
-      await expect(
-        gate
-          .connect(stranger)
-          .clear(payer.address, payee.address, "job-screen-fresh"),
-      ).to.be.revertedWithCustomError(gate, "AlreadyCleared");
-
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(
-        false,
-      );
-      const record = await gate.getClearance(payer.address, payee.address);
-      expect(record.revoked).to.equal(true);
-    });
+  it("sets and reads back the CEAP policy", async function () {
+    const [backends, minVerif, platforms, vendorRoot, residency] =
+      await gate.compliancePolicy();
+    expect(backends).to.deep.equal(["tee"]);
+    expect(minVerif).to.equal("");
+    expect(platforms).to.deep.equal([]);
+    expect(vendorRoot).to.equal(false);
+    expect(residency).to.deep.equal(["AE"]);
   });
 
-  describe("live consensus revocation", function () {
-    it("a corridor closes the moment the chain revokes the seal — no NoblePay tx", async function () {
-      const { gate, seal, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
-
-      await seal.setActive(SEAL_ID, false); // consensus-side revocation
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(
-        false,
-      );
-      await expect(
-        gate.requireCleared(payer.address, payee.address),
-      ).to.be.revertedWithCustomError(gate, "NoSuchClearance");
-    });
+  it("corridor is closed before any seal exists", async function () {
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
   });
 
-  describe("local revocation", function () {
-    it("governance can revoke a clearance", async function () {
-      const { gate, seal, governance, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
+  it("clears a corridor backed by a policy-satisfying, corridor-bound seal", async function () {
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    // Permissionless: the payee (a third party to governance) clears it.
+    await expect(
+      gate.connect(payee).clear(payer.address, payee.address, "job-1"),
+    )
+      .to.emit(gate, "CorridorCleared")
+      .withArgs(payer.address, payee.address, "seal-1", "job-1");
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
+    expect(await gate.sealUsed("seal-1")).to.equal(true);
 
-      await expect(
-        gate.connect(governance).revoke(payer.address, payee.address),
-      )
-        .to.emit(gate, "ClearanceRevoked")
-        .withArgs(payer.address, payee.address, governance.address);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(
-        false,
-      );
-    });
-
-    it("non-owner cannot revoke", async function () {
-      const { gate, seal, payer, payee, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-      await expect(
-        gate.connect(stranger).revoke(payer.address, payee.address),
-      ).to.be.revertedWith("Ownable: caller is not the owner");
-    });
-
-    it("revoking a non-existent clearance reverts", async function () {
-      const { gate, governance, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await expect(
-        gate.connect(governance).revoke(payer.address, payee.address),
-      ).to.be.revertedWithCustomError(gate, "NoSuchClearance");
-    });
+    const c = await gate.getClearance(payer.address, payee.address);
+    expect(c.sealId).to.equal("seal-1");
+    expect(c.exists).to.equal(true);
+    expect(c.revoked).to.equal(false);
   });
 
-  describe("governance", function () {
-    it("only owner can set the compliance policy", async function () {
-      const { gate, governance, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      await expect(
-        gate
-          .connect(stranger)
-          .setCompliancePolicy(["tee"], "", [], false, ["AE"]),
-      ).to.be.revertedWith("Ownable: caller is not the owner");
-
-      await gate
-        .connect(governance)
-        .setCompliancePolicy(["tee"], "", [], false, ["AE"]);
-      const policy = await gate.compliancePolicy();
-      expect(policy[0]).to.deep.equal(["tee"]);
-      expect(policy[4]).to.deep.equal(["AE"]);
-    });
-
-    it("ownership transfer is two-step; non-pending acceptor rejected", async function () {
-      const { gate, governance, payer, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      await gate.connect(governance).transferOwnership(payer.address);
-      expect(await gate.owner()).to.equal(governance.address); // not yet
-
-      await expect(gate.connect(stranger).acceptOwnership()).to.be.revertedWith(
-        "Ownable2Step: caller is not the new owner",
-      );
-      await gate.connect(payer).acceptOwnership();
-      expect(await gate.owner()).to.equal(payer.address);
-    });
-
-    it("pause blocks clearing but verification reads stay live; owner-only both ways", async function () {
-      const { gate, seal, governance, payer, payee, stranger } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-
-      await expect(gate.connect(stranger).pause()).to.be.revertedWith(
-        "Ownable: caller is not the owner",
-      );
-      await gate.connect(governance).pause();
-
-      await seal.setSeal(
-        "job-screen-003",
-        "b".repeat(64),
-        purposeFor(payee.address, payer.address),
-        true,
-      );
-      await expect(
-        gate.clear(payee.address, payer.address, "job-screen-003"),
-      ).to.be.revertedWith("Pausable: paused");
-
-      // Reads unaffected while paused.
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
-
-      await expect(gate.connect(stranger).unpause()).to.be.revertedWith(
-        "Ownable: caller is not the owner",
-      );
-      await gate.connect(governance).unpause();
-      // Succeeds after unpause (an unexpected revert would fail the test).
-      await gate.clear(payee.address, payer.address, "job-screen-003");
-    });
+  it("is direction-sensitive: a payer->payee seal does not clear payee->payer", async function () {
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    await gate.connect(payee).clear(payer.address, payee.address, "job-1");
+    expect(await gate.isCleared(payee.address, payer.address)).to.equal(false);
   });
 
-  describe("helpers", function () {
-    it("expectedPurpose returns the canonical corridor binding string", async function () {
-      const { gate, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      expect(await gate.expectedPurpose(payer.address, payee.address)).to.equal(
-        purposeFor(payer.address, payee.address),
-      );
-    });
-
-    it("requireCleared passes silently for a live clearance (hard-gate success path)", async function () {
-      const { gate, seal, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      await mintSeal(seal, payer, payee);
-      await gate.clear(payer.address, payee.address, JOB);
-      // A revert here would fail the test — this is the success path.
-      await gate.requireCleared(payer.address, payee.address);
-    });
-
-    it("getClearance on an unknown corridor returns an empty record", async function () {
-      const { gate, payer, payee } =
-        await networkHelpers.loadFixture(deployFixture);
-      const record = await gate.getClearance(payer.address, payee.address);
-      expect(record.exists).to.equal(false);
-      expect(record.revoked).to.equal(false);
-      expect(record.sealId).to.equal("");
-      expect(record.clearedAt).to.equal(0);
-    });
-
-    it("compliancePolicy starts empty (any backend/jurisdiction) until governance sets it", async function () {
-      const { gate } = await networkHelpers.loadFixture(deployFixture);
-      const policy = await gate.compliancePolicy();
-      expect(policy[0]).to.deep.equal([]);
-      expect(policy[1]).to.equal("");
-      expect(policy[2]).to.deep.equal([]);
-      expect(policy[3]).to.equal(false);
-      expect(policy[4]).to.deep.equal([]);
-    });
+  it("rejects a seal whose purpose does not bind the corridor", async function () {
+    // Seal minted for payer->other, presented for payer->payee.
+    await seedCorridorSeal("job-x", "seal-x", payer, other);
+    const expected = await gate.expectedPurpose(payer.address, payee.address);
+    await expect(gate.clear(payer.address, payee.address, "job-x"))
+      .to.be.revertedWithCustomError(gate, "SealNotBoundToCorridor")
+      .withArgs(expected);
   });
 
-  describe("ZeroID identity layer (ecosystem responsibility: consume, don't reimplement)", function () {
-    async function identityFixture() {
-      const base = await deployFixture();
-      const Registry = await ethers.getContractFactory("MockZeroIDRegistry");
-      const registry = await Registry.deploy();
-      await registry.waitForDeployment();
-      return { ...base, registry };
-    }
+  it("rejects a seal that fails the CEAP policy (e.g. US residency vs AE)", async function () {
+    await seedCorridorSeal("job-us", "seal-us", payer, other);
+    await seal.setPolicyResult(false, "data residency US not in [AE]");
+    await expect(gate.clear(payer.address, other.address, "job-us"))
+      .to.be.revertedWithCustomError(gate, "PolicyNotSatisfied")
+      .withArgs("data residency US not in [AE]");
+  });
 
-    const DID_PAYER = "0x" + "11".repeat(32);
-    const DID_PAYEE = "0x" + "22".repeat(32);
+  it("rejects an inactive (pending/revoked) seal", async function () {
+    await seedCorridorSeal("job-1", "seal-1", payer, payee, false);
+    await expect(gate.clear(payer.address, payee.address, "job-1"))
+      .to.be.revertedWithCustomError(gate, "SealNotActive")
+      .withArgs("seal-1");
+  });
 
-    async function clearCorridor(base) {
-      const { gate, seal, payer, payee } = base;
-      await seal.setSeal(JOB, SEAL_ID, purposeFor(payer.address, payee.address), true);
-      await gate.clear(payer.address, payee.address, JOB);
-    }
+  it("admits each seal exactly once (replay protection)", async function () {
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    await gate.clear(payer.address, payee.address, "job-1");
+    // Re-point a fresh corridor's job at the already-used seal id.
+    await seedCorridorSeal("job-2", "seal-1", payer, other);
+    await expect(gate.clear(payer.address, other.address, "job-2"))
+      .to.be.revertedWithCustomError(gate, "SealAlreadyUsed")
+      .withArgs("seal-1");
+  });
 
-    it("gate is OFF by default — clearing needs no identity registry", async function () {
-      const base = await networkHelpers.loadFixture(deployFixture);
-      await clearCorridor(base);
-      expect(await base.gate.isCleared(base.payer.address, base.payee.address)).to.equal(true);
-    });
+  it("rejects a zero-address corridor", async function () {
+    await expect(
+      gate.clear(ethers.ZeroAddress, payee.address, "job-1"),
+    ).to.be.revertedWithCustomError(gate, "ZeroCorridor");
+    await expect(
+      gate.clear(payer.address, ethers.ZeroAddress, "job-1"),
+    ).to.be.revertedWithCustomError(gate, "ZeroCorridor");
+  });
 
-    it("setIdentityRegistry is owner-only and rejects required-with-zero-registry", async function () {
-      const { gate, registry, stranger } = await networkHelpers.loadFixture(identityFixture);
-      await expect(
-        gate.connect(stranger).setIdentityRegistry(registry.target, true),
-      ).to.be.revertedWith("Ownable: caller is not the owner");
-      await expect(
-        gate.setIdentityRegistry(ethers.ZeroAddress, true),
-      ).to.be.revertedWithCustomError(gate, "InvalidIdentityRegistry");
-    });
+  it("closes the corridor live when the chain revokes the seal", async function () {
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    await gate.clear(payer.address, payee.address, "job-1");
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
 
-    it("with the gate ON, both corridor parties must hold ACTIVE ZeroID identities to clear", async function () {
-      const base = await networkHelpers.loadFixture(identityFixture);
-      const { gate, seal, registry, payer, payee } = base;
-      await gate.setIdentityRegistry(registry.target, true);
-      await seal.setSeal(JOB, SEAL_ID, purposeFor(payer.address, payee.address), true);
+    // Sanctions update: the chain revokes the seal — no NoblePay tx needed.
+    await seal.setActive("seal-1", false);
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
+  });
 
-      // Neither registered → payer named first.
-      await expect(gate.clear(payer.address, payee.address, JOB))
-        .to.be.revertedWithCustomError(gate, "IdentityNotVerified")
-        .withArgs(payer.address);
+  it("clearance permanence: a revoked corridor cannot be re-cleared with a fresh seal", async function () {
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    await gate.clear(payer.address, payee.address, "job-1");
+    await seal.setActive("seal-1", false); // revoked on-chain -> isCleared false
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
 
-      // Payer registered, payee not → payee named.
-      await registry.setIdentity(payer.address, DID_PAYER, true);
-      await expect(gate.clear(payer.address, payee.address, JOB))
-        .to.be.revertedWithCustomError(gate, "IdentityNotVerified")
-        .withArgs(payee.address);
+    // A fresh, active, policy-satisfying, corridor-bound seal must NOT re-open it.
+    await seedCorridorSeal("job-3", "seal-3", payer, payee);
+    await expect(gate.clear(payer.address, payee.address, "job-3"))
+      .to.be.revertedWithCustomError(gate, "AlreadyCleared")
+      .withArgs(payer.address, payee.address);
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
+  });
 
-      // Both active → clears.
-      await registry.setIdentity(payee.address, DID_PAYEE, true);
-      await gate.clear(payer.address, payee.address, JOB);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
-    });
+  it("requireCleared reverts for an uncleared corridor and passes for a cleared one", async function () {
+    await expect(
+      gate.requireCleared(payer.address, payee.address),
+    ).to.be.revertedWithCustomError(gate, "NoSuchClearance");
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    await gate.clear(payer.address, payee.address, "job-1");
+    await gate.requireCleared(payer.address, payee.address); // no revert
+  });
 
-    it("identity suspension in ZeroID closes the corridor LIVE — and reactivation reopens it", async function () {
-      const base = await networkHelpers.loadFixture(identityFixture);
-      const { gate, seal, registry, payer, payee } = base;
-      await registry.setIdentity(payer.address, DID_PAYER, true);
-      await registry.setIdentity(payee.address, DID_PAYEE, true);
-      await gate.setIdentityRegistry(registry.target, true);
-      await clearCorridor(base);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
+  it("governance revoke: only owner, records revocation, closes the corridor", async function () {
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    await gate.clear(payer.address, payee.address, "job-1");
 
-      // ZeroID is the canonical status authority: suspension closes the
-      // corridor with NO transaction on the gate…
-      await registry.setIdentity(payee.address, DID_PAYEE, false);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
+    await expect(
+      gate.connect(stranger).revoke(payer.address, payee.address),
+    ).to.be.revertedWith("Ownable: caller is not the owner");
+    await expect(
+      gate.connect(gov).revoke(other.address, stranger.address),
+    ).to.be.revertedWithCustomError(gate, "NoSuchClearance");
 
-      // …and reinstatement (unlike seal/local revocation) reopens it — the
-      // clearance record itself was never consumed.
-      await registry.setIdentity(payee.address, DID_PAYEE, true);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
-    });
+    await expect(gate.connect(gov).revoke(payer.address, payee.address))
+      .to.emit(gate, "ClearanceRevoked")
+      .withArgs(payer.address, payee.address, gov.address);
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
+  });
 
-    it("a broken registry fails CLOSED: isCleared false, clear reverts", async function () {
-      const base = await networkHelpers.loadFixture(identityFixture);
-      const { gate, seal, payer, payee, stranger } = base;
-      // Point at an EOA — staticcalls return empty data, decoding fails.
-      await gate.setIdentityRegistry(stranger.address, true);
-      await seal.setSeal(JOB, SEAL_ID, purposeFor(payer.address, payee.address), true);
-      await expect(gate.clear(payer.address, payee.address, JOB)).to.be.revert(ethers);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(false);
-    });
+  it("honours pause / unpause on the clearance path", async function () {
+    await gate.connect(gov).pause();
+    await seedCorridorSeal("job-1", "seal-1", payer, payee);
+    await expect(
+      gate.clear(payer.address, payee.address, "job-1"),
+    ).to.be.revertedWith("Pausable: paused");
+    await gate.connect(gov).unpause();
+    await gate.clear(payer.address, payee.address, "job-1");
+    expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
 
-    it("turning the gate off restores seal-only semantics", async function () {
-      const base = await networkHelpers.loadFixture(identityFixture);
-      const { gate, registry, payer, payee } = base;
-      await gate.setIdentityRegistry(registry.target, true);
-      await gate.setIdentityRegistry(ethers.ZeroAddress, false);
-      await clearCorridor(base);
-      expect(await gate.isCleared(payer.address, payee.address)).to.equal(true);
-    });
+    await gate.connect(gov).pause();
+    await expect(
+      gate.requireCleared(payer.address, payee.address),
+    ).to.be.revertedWith("Pausable: paused");
+    await gate.connect(gov).unpause();
+    await gate.requireCleared(payer.address, payee.address);
+  });
+
+  it("restricts setCompliancePolicy to the owner", async function () {
+    await expect(
+      gate
+        .connect(stranger)
+        .setCompliancePolicy(["fhe"], "", [], false, ["EU"]),
+    ).to.be.revertedWith("Ownable: caller is not the owner");
   });
 });

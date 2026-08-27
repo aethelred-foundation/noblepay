@@ -3,48 +3,253 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { PrismaClient, BusinessTier } from "@prisma/client";
 import { logger } from "../lib/logger";
+import { prisma } from "../lib/db";
+import { getCurrentBusinessRegistryAuthorization } from "../lib/business-registry-authorization";
 
-const prisma = new PrismaClient();
+function jwtSecret(): string {
+  const configured = process.env.JWT_SECRET;
+  if (configured) return configured;
+  if (process.env.NODE_ENV === "test")
+    return "noblepay-test-secret-not-for-production";
+  throw new Error("JWT_SECRET is not configured");
+}
 
-const JWT_SECRET: string = process.env.JWT_SECRET || (() => {
-  if (process.env.NODE_ENV === 'test') {
-    return 'test-secret';
+function apiKeyHashSecret(): string {
+  const configured = process.env.API_KEY_HASH_SECRET;
+  if (configured && Buffer.byteLength(configured, "utf8") >= 32) {
+    return configured;
   }
-  throw new Error('FATAL: JWT_SECRET environment variable is required in non-test environments');
-})();
+  if (process.env.NODE_ENV === "test") {
+    return "noblepay-test-api-key-hash-secret-not-for-production";
+  }
+  throw new Error("API_KEY_HASH_SECRET is not configured");
+}
 
-// Rate limits per business tier (requests per minute)
+/** One-way, deployment-specific API-key lookup value for durable storage. */
+export function hashAPIKey(rawKey: string): string {
+  return crypto
+    .createHmac("sha256", apiKeyHashSecret())
+    .update(rawKey, "utf8")
+    .digest("hex");
+}
+
+export const SESSION_COOKIE_NAME = "noblepay_session";
+export const CSRF_COOKIE_NAME = "noblepay_csrf";
+export const SESSION_TTL_SECONDS = 15 * 60;
+export const SESSION_ISSUER = "noblepay-api";
+export const SESSION_AUDIENCE = "noblepay-web";
+
+const VALID_TIERS = new Set<string>(["STANDARD", "PREMIUM", "ENTERPRISE"]);
+const VALID_ROLES = new Set([
+  "SUPER_ADMIN",
+  "ADMIN",
+  "TREASURY_MANAGER",
+  "COMPLIANCE_OFFICER",
+  "ANALYST",
+  "OPERATOR",
+  "VIEWER",
+]);
+
 const TIER_RATE_LIMITS: Record<BusinessTier, number> = {
-  STARTER: 60,
   STANDARD: 300,
-  ENTERPRISE: 1000,
-  INSTITUTIONAL: 5000,
+  PREMIUM: 1000,
+  ENTERPRISE: 5000,
 };
 
-// In-memory sliding window rate limiter per business
-const rateLimitWindows = new Map<string, { count: number; resetAt: number }>();
+const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_SCOPE = "api";
+
+export interface RateLimitConsumption {
+  count: number;
+  resetAt: Date;
+}
+
+export interface TierRateLimitStore {
+  consume(input: {
+    businessId: string;
+    scope: string;
+    windowStart: Date;
+    expiresAt: Date;
+  }): Promise<RateLimitConsumption>;
+}
+
+export interface PublicRateLimitStore {
+  consume(input: {
+    keyHash: string;
+    scope: string;
+    windowStart: Date;
+    expiresAt: Date;
+  }): Promise<RateLimitConsumption>;
+}
+
+/** PostgreSQL-backed fixed-window counter shared by every API process. */
+export class PrismaTierRateLimitStore implements TierRateLimitStore {
+  constructor(private readonly database: PrismaClient = prisma) {}
+
+  async consume(input: {
+    businessId: string;
+    scope: string;
+    windowStart: Date;
+    expiresAt: Date;
+  }): Promise<RateLimitConsumption> {
+    return this.database.$transaction(async (transaction) => {
+      // Bound storage growth without a process-local janitor. The expiry index
+      // keeps this tenant-scoped cleanup inexpensive.
+      await transaction.rateLimitWindow.deleteMany({
+        where: {
+          businessId: input.businessId,
+          scope: input.scope,
+          expiresAt: { lt: input.windowStart },
+        },
+      });
+
+      const window = await transaction.rateLimitWindow.upsert({
+        where: {
+          businessId_scope_windowStart: {
+            businessId: input.businessId,
+            scope: input.scope,
+            windowStart: input.windowStart,
+          },
+        },
+        create: {
+          businessId: input.businessId,
+          scope: input.scope,
+          windowStart: input.windowStart,
+          expiresAt: input.expiresAt,
+          count: 1,
+        },
+        update: { count: { increment: 1 } },
+        select: { count: true, expiresAt: true },
+      });
+
+      return { count: window.count, resetAt: window.expiresAt };
+    });
+  }
+}
+
+export class PrismaPublicRateLimitStore implements PublicRateLimitStore {
+  constructor(private readonly database: PrismaClient = prisma) {}
+
+  async consume(input: {
+    keyHash: string;
+    scope: string;
+    windowStart: Date;
+    expiresAt: Date;
+  }): Promise<RateLimitConsumption> {
+    return this.database.$transaction(async (transaction) => {
+      await transaction.publicRateLimitWindow.deleteMany({
+        where: {
+          expiresAt: { lt: input.windowStart },
+        },
+      });
+      const window = await transaction.publicRateLimitWindow.upsert({
+        where: {
+          keyHash_scope_windowStart: {
+            keyHash: input.keyHash,
+            scope: input.scope,
+            windowStart: input.windowStart,
+          },
+        },
+        create: { ...input, count: 1 },
+        update: { count: { increment: 1 } },
+        select: { count: true, expiresAt: true },
+      });
+      return { count: window.count, resetAt: window.expiresAt };
+    });
+  }
+}
 
 export interface AuthenticatedRequest extends Request {
   businessId?: string;
   businessTier?: BusinessTier;
   apiKeyId?: string;
   jwtPayload?: JWTPayload;
-  /** Unique signer identity for treasury approvals — derived from JWT sub or API key ID */
   signerId?: string;
+  authType?: "bearer" | "cookie";
+  rateLimitScopes?: Set<string>;
 }
 
-interface JWTPayload {
+export interface JWTPayload {
   sub: string;
   businessId: string;
   tier: BusinessTier;
-  role?: string;
+  role: string;
   iat: number;
   exp: number;
 }
 
+export function parseCookieHeader(
+  header: string | undefined,
+): Record<string, string> {
+  if (!header) return {};
+
+  const cookies: Record<string, string> = {};
+  for (const item of header.split(";")) {
+    const separator = item.indexOf("=");
+    if (separator <= 0) continue;
+    const name = item.slice(0, separator).trim();
+    const value = item.slice(separator + 1).trim();
+    try {
+      cookies[name] = decodeURIComponent(value);
+    } catch {
+      // Malformed cookie values are ignored instead of reaching auth logic.
+    }
+  }
+  return cookies;
+}
+
+export function verifySessionToken(token: string): JWTPayload {
+  const decoded = jwt.verify(token, jwtSecret(), {
+    algorithms: ["HS256"],
+    issuer: SESSION_ISSUER,
+    audience: SESSION_AUDIENCE,
+  }) as Partial<JWTPayload>;
+
+  if (
+    typeof decoded.sub !== "string" ||
+    typeof decoded.businessId !== "string" ||
+    typeof decoded.tier !== "string" ||
+    !VALID_TIERS.has(decoded.tier) ||
+    typeof decoded.role !== "string" ||
+    !VALID_ROLES.has(decoded.role)
+  ) {
+    throw new Error("Invalid session claims");
+  }
+
+  return decoded as JWTPayload;
+}
+
+function isUnsafeMethod(method: string): boolean {
+  return !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+}
+
+function safeTokenEqual(left: string, right: string): boolean {
+  const leftBytes = Buffer.from(left);
+  const rightBytes = Buffer.from(right);
+  return (
+    leftBytes.length === rightBytes.length &&
+    crypto.timingSafeEqual(leftBytes, rightBytes)
+  );
+}
+
+function validateCookieCSRF(
+  req: Request,
+  cookies: Record<string, string>,
+): boolean {
+  const cookieToken = cookies[CSRF_COOKIE_NAME];
+  const headerValue = req.headers["x-csrf-token"];
+  const headerToken = Array.isArray(headerValue) ? headerValue[0] : headerValue;
+  return Boolean(
+    cookieToken &&
+    typeof headerToken === "string" &&
+    safeTokenEqual(cookieToken, headerToken),
+  );
+}
+
 /**
- * Validate API key from Authorization header.
- * Expects: Authorization: Bearer <api-key>
+ * Authenticate a short-lived wallet session or an API key. Browser sessions
+ * may use the HttpOnly session cookie; unsafe cookie-authenticated requests
+ * additionally require the double-submit CSRF token.
  */
 export async function authenticateAPIKey(
   req: AuthenticatedRequest,
@@ -52,54 +257,111 @@ export async function authenticateAPIKey(
   next: NextFunction,
 ): Promise<void> {
   try {
-    const authHeader = req.headers.authorization;
+    // The app-level authenticated limiter may already have authenticated the
+    // request before a route's defense-in-depth auth middleware runs.
+    if (req.businessId && req.businessTier && req.signerId && req.jwtPayload) {
+      next();
+      return;
+    }
 
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    const authHeader = req.headers.authorization;
+    const cookies = parseCookieHeader(req.headers.cookie);
+    let token: string | undefined;
+    let authType: "bearer" | "cookie";
+
+    if (authHeader?.startsWith("Bearer ")) {
+      token = authHeader.slice(7).trim();
+      authType = "bearer";
+    } else {
+      token = cookies[SESSION_COOKIE_NAME];
+      authType = "cookie";
+    }
+
+    if (!token) {
       res.status(401).json({
         error: "UNAUTHORIZED",
-        message: "Missing or invalid Authorization header. Expected: Bearer <api-key>",
+        message: "Authentication required",
       });
       return;
     }
 
-    const token = authHeader.slice(7);
+    if (
+      authType === "cookie" &&
+      isUnsafeMethod(req.method) &&
+      !validateCookieCSRF(req, cookies)
+    ) {
+      res.status(403).json({
+        error: "CSRF_VALIDATION_FAILED",
+        message: "A valid X-CSRF-Token header is required",
+      });
+      return;
+    }
 
-    // First try JWT validation — if the token structurally looks like a JWT
-    // (three dot-separated segments), treat it as a JWT exclusively.
-    // NP-02 fix: a failed JWT verify MUST return 401, never fall through to
-    // API-key lookup (which could surface a 500 if the DB is unreachable).
     const looksLikeJWT = token.split(".").length === 3;
-    if (looksLikeJWT) {
+    if (looksLikeJWT || authType === "cookie") {
+      let decoded: JWTPayload;
       try {
-        const decoded = jwt.verify(token, JWT_SECRET) as JWTPayload;
-        req.businessId = decoded.businessId;
-        req.businessTier = decoded.tier;
-        req.jwtPayload = decoded;
-        req.signerId = decoded.sub;
-        next();
-        return;
+        decoded = verifySessionToken(token);
       } catch {
         res.status(401).json({
           error: "UNAUTHORIZED",
-          message: "Invalid or expired JWT token",
+          message: "Invalid or expired session",
         });
         return;
       }
+      const business = await prisma.business.findUnique({
+        where: { id: decoded.businessId },
+        select: { id: true, address: true },
+      });
+      if (
+        !business ||
+        business.address.toLowerCase() !== decoded.sub.toLowerCase()
+      ) {
+        res.status(401).json({
+          error: "UNAUTHORIZED",
+          message: "Session is not bound to the registered business wallet",
+        });
+        return;
+      }
+      const current = await getCurrentBusinessRegistryAuthorization(
+        business.address,
+      );
+      if (!current.active) {
+        res.status(403).json({
+          error: "BUSINESS_INACTIVE",
+          message: `Business is not currently authorized (${current.status.toLowerCase()})`,
+        });
+        return;
+      }
+
+      // Chain state is authoritative for revocable privilege and tier. A
+      // SUPER_ADMIN JWT is downgraded immediately after ADMIN_ROLE removal,
+      // and stale tier claims never influence request authorization/limits.
+      decoded.tier = current.tier;
+      decoded.role = current.isAdmin
+        ? "SUPER_ADMIN"
+        : decoded.role === "SUPER_ADMIN"
+          ? "ADMIN"
+          : decoded.role;
+      req.businessId = decoded.businessId;
+      req.businessTier = current.tier;
+      req.jwtPayload = decoded;
+      req.signerId = decoded.sub;
+      req.authType = authType;
+      next();
+      return;
     }
 
-    // Hash the provided key and look it up
-    const keyHash = crypto.createHash("sha256").update(token).digest("hex");
-
+    const keyHash = hashAPIKey(token);
     const apiKey = await prisma.aPIKey.findUnique({
       where: { keyHash },
       include: { business: true },
     });
 
     if (!apiKey) {
-      res.status(401).json({
-        error: "UNAUTHORIZED",
-        message: "Invalid API key",
-      });
+      res
+        .status(401)
+        .json({ error: "UNAUTHORIZED", message: "Invalid API key" });
       return;
     }
 
@@ -111,129 +373,226 @@ export async function authenticateAPIKey(
       return;
     }
 
-    if (apiKey.business.kycStatus === "SUSPENDED") {
+    const current = await getCurrentBusinessRegistryAuthorization(
+      apiKey.business.address,
+    );
+    if (!current.active) {
       res.status(403).json({
-        error: "FORBIDDEN",
-        message: "Business account is suspended",
+        error: "BUSINESS_INACTIVE",
+        message: `Business is not currently authorized (${current.status.toLowerCase()})`,
       });
       return;
     }
 
-    // Update last used timestamp (fire-and-forget)
     prisma.aPIKey
       .update({
         where: { id: apiKey.id },
         data: { lastUsed: new Date() },
       })
-      .catch((err) => logger.error("Failed to update API key last used", { error: err.message }));
+      .catch(() => {
+        // Database errors can contain the lookup digest. Keep the log static so
+        // credentials and credential-derived values never reach log storage.
+        logger.error("Failed to update API key last used");
+      });
 
     req.businessId = apiKey.businessId;
-    req.businessTier = apiKey.business.tier;
+    req.businessTier = current.tier;
     req.apiKeyId = apiKey.id;
     req.signerId = `apikey:${apiKey.id}`;
+    req.authType = "bearer";
+    // API keys represent the owning business administrator, never a platform
+    // super-admin. Cross-tenant administration therefore remains fail-closed.
+    req.jwtPayload = {
+      sub: req.signerId,
+      businessId: apiKey.businessId,
+      tier: current.tier,
+      role: "ADMIN",
+      iat: Math.floor(Date.now() / 1000),
+      exp: Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS,
+    };
 
     next();
-  } catch (error) {
-    logger.error("Authentication error", { error: (error as Error).message });
-    res.status(500).json({
-      error: "INTERNAL_ERROR",
+  } catch {
+    logger.error("Authentication service error");
+    res.status(503).json({
+      error: "AUTHENTICATION_UNAVAILABLE",
       message: "Authentication service unavailable",
     });
   }
 }
 
-/**
- * Enforce per-business rate limits based on tier.
- */
-export function tierRateLimit(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction,
-): void {
-  const businessId = req.businessId;
-  const tier = req.businessTier;
+export function createTierRateLimit(
+  options: {
+    store?: TierRateLimitStore;
+    now?: () => number;
+    scope?: string;
+    limitOverride?: number;
+  } = {},
+) {
+  const store = options.store || new PrismaTierRateLimitStore();
+  const now = options.now || Date.now;
+  const scope = options.scope || RATE_LIMIT_SCOPE;
 
-  if (!businessId || !tier) {
-    next();
-    return;
-  }
+  return async function durableTierRateLimit(
+    req: AuthenticatedRequest,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    const businessId = req.businessId;
+    const tier = req.businessTier;
 
-  const limit = TIER_RATE_LIMITS[tier];
-  const now = Date.now();
-  const windowKey = `rate:${businessId}`;
+    if (!businessId || !tier) {
+      next();
+      return;
+    }
 
-  let window = rateLimitWindows.get(windowKey);
+    if (req.rateLimitScopes?.has(scope)) {
+      next();
+      return;
+    }
 
-  if (!window || now > window.resetAt) {
-    window = { count: 0, resetAt: now + 60_000 };
-    rateLimitWindows.set(windowKey, window);
-  }
+    const limit = options.limitOverride || TIER_RATE_LIMITS[tier];
+    const nowMs = now();
+    const windowStartMs =
+      Math.floor(nowMs / RATE_LIMIT_WINDOW_MS) * RATE_LIMIT_WINDOW_MS;
+    const windowStart = new Date(windowStartMs);
+    const expiresAt = new Date(windowStartMs + RATE_LIMIT_WINDOW_MS);
 
-  window.count++;
+    try {
+      const consumption = await store.consume({
+        businessId,
+        scope,
+        windowStart,
+        expiresAt,
+      });
+      const resetAtMs = consumption.resetAt.getTime();
 
-  // Set rate limit headers
-  res.setHeader("X-RateLimit-Limit", limit);
-  res.setHeader("X-RateLimit-Remaining", Math.max(0, limit - window.count));
-  res.setHeader("X-RateLimit-Reset", Math.ceil(window.resetAt / 1000));
+      res.setHeader("X-RateLimit-Limit", limit);
+      res.setHeader(
+        "X-RateLimit-Remaining",
+        Math.max(0, limit - consumption.count),
+      );
+      res.setHeader("X-RateLimit-Reset", Math.ceil(resetAtMs / 1000));
 
-  if (window.count > limit) {
-    res.status(429).json({
-      error: "RATE_LIMITED",
-      message: `Rate limit exceeded for ${tier} tier (${limit} req/min)`,
-      retryAfter: Math.ceil((window.resetAt - now) / 1000),
-    });
-    return;
-  }
+      if (consumption.count > limit) {
+        res.setHeader(
+          "Retry-After",
+          Math.max(1, Math.ceil((resetAtMs - nowMs) / 1000)),
+        );
+        res.status(429).json({
+          error: "RATE_LIMITED",
+          message: `Rate limit exceeded for ${tier} tier (${limit} req/min)`,
+          retryAfter: Math.max(1, Math.ceil((resetAtMs - nowMs) / 1000)),
+        });
+        return;
+      }
 
-  next();
+      if (!req.rateLimitScopes) req.rateLimitScopes = new Set<string>();
+      req.rateLimitScopes.add(scope);
+      next();
+    } catch {
+      logger.error("Rate limit store unavailable");
+      res.status(503).json({
+        error: "RATE_LIMIT_UNAVAILABLE",
+        message: "Request throttling service unavailable",
+      });
+    }
+  };
 }
 
-/**
- * Generate a JWT token for a business.
- */
-export function generateJWT(businessId: string, tier: BusinessTier, role?: string, userId?: string): string {
+export const tierRateLimit = createTierRateLimit();
+
+export function createPublicRateLimit(options: {
+  scope: string;
+  limit: number;
+  key: (req: Request) => string;
+  store?: PublicRateLimitStore;
+  now?: () => number;
+}) {
+  if (!Number.isInteger(options.limit) || options.limit <= 0) {
+    throw new Error("Public rate limit must be a positive integer");
+  }
+  const store = options.store || new PrismaPublicRateLimitStore();
+  const now = options.now || Date.now;
+
+  return async function durablePublicRateLimit(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+  ): Promise<void> {
+    const rawKey = options.key(req).trim().toLowerCase();
+    const keyHash = crypto
+      .createHash("sha256")
+      .update(rawKey || "unknown")
+      .digest("hex");
+    const nowMs = now();
+    const windowStartMs =
+      Math.floor(nowMs / RATE_LIMIT_WINDOW_MS) * RATE_LIMIT_WINDOW_MS;
+    try {
+      const consumption = await store.consume({
+        keyHash,
+        scope: options.scope,
+        windowStart: new Date(windowStartMs),
+        expiresAt: new Date(windowStartMs + RATE_LIMIT_WINDOW_MS),
+      });
+      const resetAtMs = consumption.resetAt.getTime();
+      res.setHeader("X-RateLimit-Limit", options.limit);
+      res.setHeader(
+        "X-RateLimit-Remaining",
+        Math.max(0, options.limit - consumption.count),
+      );
+      res.setHeader("X-RateLimit-Reset", Math.ceil(resetAtMs / 1000));
+      if (consumption.count > options.limit) {
+        const retryAfter = Math.max(1, Math.ceil((resetAtMs - nowMs) / 1000));
+        res.setHeader("Retry-After", retryAfter);
+        res.status(429).json({
+          error: "RATE_LIMITED",
+          message: "Too many authentication requests. Please retry later.",
+          retryAfter,
+        });
+        return;
+      }
+      next();
+    } catch {
+      logger.error("Public rate limit store unavailable", {
+        scope: options.scope,
+      });
+      res.status(503).json({
+        error: "RATE_LIMIT_UNAVAILABLE",
+        message: "Request throttling service unavailable",
+      });
+    }
+  };
+}
+
+export function generateJWT(
+  businessId: string,
+  tier: BusinessTier,
+  role = "VIEWER",
+  userId?: string,
+): string {
   const payload: Omit<JWTPayload, "iat" | "exp"> = {
     sub: userId || `user:${businessId}:${crypto.randomUUID()}`,
     businessId,
     tier,
-    role: role || "VIEWER",
+    role,
   };
 
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: "24h" });
+  return jwt.sign(payload, jwtSecret(), {
+    algorithm: "HS256",
+    expiresIn: SESSION_TTL_SECONDS,
+    issuer: SESSION_ISSUER,
+    audience: SESSION_AUDIENCE,
+  });
 }
 
-/**
- * Generate a new API key for a business (returns raw key + hash).
- */
 export function generateAPIKey(): { rawKey: string; keyHash: string } {
   const rawKey = `npk_${crypto.randomBytes(32).toString("hex")}`;
-  const keyHash = crypto.createHash("sha256").update(rawKey).digest("hex");
+  const keyHash = hashAPIKey(rawKey);
   return { rawKey, keyHash };
 }
 
-// Periodic cleanup of expired rate limit windows.
-// Uses .unref() so the timer does not prevent Node from exiting (avoids open-handle leaks in tests).
-let _rateLimitJanitor: ReturnType<typeof setInterval> | null = null;
-
-function _startRateLimitJanitor(): void {
-  if (_rateLimitJanitor) return;
-  _rateLimitJanitor = setInterval(() => {
-    const now = Date.now();
-    for (const [key, window] of rateLimitWindows) {
-      if (now > window.resetAt + 60_000) {
-        rateLimitWindows.delete(key);
-      }
-    }
-  }, 300_000); // every 5 minutes
-  _rateLimitJanitor.unref();
-}
-
+/** Kept as a compatibility no-op; durable windows need no process janitor. */
 export function stopRateLimitJanitor(): void {
-  if (_rateLimitJanitor) {
-    clearInterval(_rateLimitJanitor);
-    _rateLimitJanitor = null;
-  }
+  // Expired records are removed transactionally by PrismaTierRateLimitStore.
 }
-
-// Auto-start — the .unref() ensures this won't keep the process alive.
-_startRateLimitJanitor();

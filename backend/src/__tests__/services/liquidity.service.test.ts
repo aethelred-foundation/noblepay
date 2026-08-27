@@ -1,299 +1,325 @@
-import { createMockPrisma, resetAllMocks } from "../setup";
-import { LiquidityService, LiquidityError } from "../../services/liquidity";
-import { AuditService } from "../../services/audit";
+import { Prisma } from "@prisma/client";
+import { LiquidityService } from "../../services/liquidity";
+import type { AuditService } from "../../services/audit";
+const mockVerifyLiquiditySettlement = jest.fn();
+const mockVerifyFlashLoan = jest.fn();
+jest.mock("../../services/liquidity-execution", () => ({
+  verifyLiquiditySettlement: (...a: unknown[]) =>
+    mockVerifyLiquiditySettlement(...a),
+  verifyFlashLoan: (...a: unknown[]) => mockVerifyFlashLoan(...a),
+  LiquiditySettlementError: class extends Error {},
+}));
 
-let prisma: ReturnType<typeof createMockPrisma>;
-let auditService: AuditService;
-let liquidityService: LiquidityService;
+const wallet = "0x1111111111111111111111111111111111111111";
+const now = new Date("2026-07-21T12:00:00.000Z");
 
-beforeEach(() => {
-  resetAllMocks();
-  prisma = createMockPrisma();
-  auditService = new AuditService(prisma);
-  jest.spyOn(auditService, "createAuditEntry").mockResolvedValue({} as any);
-  liquidityService = new LiquidityService(prisma, auditService);
-});
+function pool(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "pool-usdc-usdt",
+    tokenA: "USDC",
+    tokenB: "USDT",
+    reserveA: new Prisma.Decimal("1000"),
+    reserveB: new Prisma.Decimal("990"),
+    totalLiquidity: new Prisma.Decimal("1990"),
+    feeRate: new Prisma.Decimal("0.003"),
+    volume24h: new Prisma.Decimal("250"),
+    feesCollected: new Prisma.Decimal("3.5"),
+    isActive: true,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  };
+}
 
-describe("LiquidityService", () => {
-  // ─── getPools ──────────────────────────────────────────────────────────────
+function setup() {
+  const prisma = {
+    liquidityPool: {
+      findMany: jest.fn(),
+      findUnique: jest.fn(),
+    },
+    lPPosition: {
+      findMany: jest.fn(),
+      findFirst: jest.fn(),
+      findUnique: jest.fn(),
+      create: jest.fn(),
+      update: jest.fn(),
+    },
+    business: { findUnique: jest.fn() },
+  };
+  const service = new LiquidityService(prisma as never, {
+    createAuditEntry: jest.fn(),
+  } as unknown as AuditService);
+  return { prisma, service };
+}
 
-  describe("getPools", () => {
-    it("should return all pools sorted by TVL", () => {
-      const pools = liquidityService.getPools();
-      expect(pools.length).toBeGreaterThan(0);
-      for (let i = 1; i < pools.length; i++) {
-        expect(parseFloat(pools[i - 1].tvl)).toBeGreaterThanOrEqual(
-          parseFloat(pools[i].tvl),
-        );
-      }
+describe("LiquidityService production behavior", () => {
+  it("maps durable pool snapshots without inventing APY or utilization", async () => {
+    const { prisma, service } = setup();
+    prisma.liquidityPool.findMany.mockResolvedValue([pool()]);
+
+    const result = await service.getPools("ACTIVE", { page: 2, limit: 25 });
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: "pool-usdc-usdt",
+        tvl: "1990",
+        apy: null,
+        utilization: null,
+        dataSource: "DATABASE_SNAPSHOT",
+      }),
+    ]);
+    expect(prisma.liquidityPool.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { isActive: true },
+        skip: 25,
+        take: 25,
+      }),
+    );
+  });
+
+  it("maps paused pools, unfiltered snapshots, and deprecated as an empty view", async () => {
+    const { prisma, service } = setup();
+    prisma.liquidityPool.findMany.mockResolvedValue([
+      pool({ id: "paused-pool", isActive: false }),
+    ]);
+
+    await expect(service.getPools("PAUSED")).resolves.toEqual([
+      expect.objectContaining({ id: "paused-pool", status: "PAUSED" }),
+    ]);
+    expect(prisma.liquidityPool.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: { isActive: false },
+        skip: undefined,
+        take: undefined,
+      }),
+    );
+
+    prisma.liquidityPool.findMany.mockClear();
+    await expect(service.getPools("DEPRECATED")).resolves.toEqual([]);
+    expect(prisma.liquidityPool.findMany).not.toHaveBeenCalled();
+
+    prisma.liquidityPool.findMany.mockResolvedValue([]);
+    await service.getPools();
+    expect(prisma.liquidityPool.findMany).toHaveBeenLastCalledWith(
+      expect.objectContaining({ where: undefined }),
+    );
+  });
+
+  it("returns a durable pool by ID and a stable missing-pool error", async () => {
+    const { prisma, service } = setup();
+    prisma.liquidityPool.findUnique.mockResolvedValueOnce(pool());
+
+    await expect(service.getPool("pool-usdc-usdt")).resolves.toMatchObject({
+      id: "pool-usdc-usdt",
+      dataSource: "DATABASE_SNAPSHOT",
+    });
+    expect(prisma.liquidityPool.findUnique).toHaveBeenCalledWith({
+      where: { id: "pool-usdc-usdt" },
     });
 
-    it("should filter by status", () => {
-      const active = liquidityService.getPools("ACTIVE");
-      expect(active.every((p) => p.status === "ACTIVE")).toBe(true);
-    });
-
-    it("should return empty for non-matching status", () => {
-      const deprecated = liquidityService.getPools("DEPRECATED");
-      expect(deprecated).toHaveLength(0);
+    prisma.liquidityPool.findUnique.mockResolvedValueOnce(null);
+    await expect(service.getPool("missing-pool")).rejects.toMatchObject({
+      code: "POOL_NOT_FOUND",
+      statusCode: 404,
     });
   });
 
-  // ─── getPool ───────────────────────────────────────────────────────────────
+  it("tenant-scopes positions to the authenticated business wallet", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.lPPosition.findMany.mockResolvedValue([
+      {
+        id: "position-1",
+        poolId: "pool-usdc-usdt",
+        provider: wallet,
+        liquidity: new Prisma.Decimal("199"),
+        lowerTick: -10,
+        upperTick: 10,
+        feesEarned: new Prisma.Decimal("1.25"),
+        createdAt: now,
+        pool: pool(),
+      },
+    ]);
 
-  describe("getPool", () => {
-    it("should return a pool by ID", () => {
-      const pool = liquidityService.getPool("pool-aet-usdc");
-      expect(pool.pair).toBe("AET/USDC");
+    const positions = await service.getPositions("business-1", wallet, {
+      page: 1,
+      limit: 10,
     });
 
-    it("should throw POOL_NOT_FOUND for unknown ID", () => {
-      expect(() => liquidityService.getPool("nonexistent")).toThrow(
-        LiquidityError,
-      );
-    });
+    expect(positions[0]).toEqual(
+      expect.objectContaining({
+        businessId: "business-1",
+        provider: wallet,
+        sharePercentage: 10,
+        impermanentLoss: null,
+      }),
+    );
+    expect(prisma.lPPosition.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { provider: { equals: wallet, mode: "insensitive" } },
+        take: 10,
+      }),
+    );
   });
 
-  // ─── addLiquidity ──────────────────────────────────────────────────────────
+  it("rejects a provider filter that does not match the tenant", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
 
-  describe("addLiquidity", () => {
-    it("should add liquidity and return position", async () => {
-      const position = await liquidityService.addLiquidity(
-        { poolId: "pool-aet-usdc", amountA: "10000", amountB: "24500" },
-        "0xprovider",
-        "biz-1",
-      );
-
-      expect(position.id).toMatch(/^lp-/);
-      expect(position.poolId).toBe("pool-aet-usdc");
-      expect(position.provider).toBe("0xprovider");
-      expect(position.tier).toBe("RETAIL");
-      expect(parseFloat(position.liquidityAmount)).toBe(34500);
-      expect(position.sharePercentage).toBeGreaterThan(0);
-    });
-
-    it("should set tier when provided", async () => {
-      const position = await liquidityService.addLiquidity(
-        {
-          poolId: "pool-aet-usdc",
-          amountA: "10000",
-          amountB: "24500",
-          tier: "INSTITUTIONAL",
-        },
-        "0xprovider",
-        "biz-1",
-      );
-
-      expect(position.tier).toBe("INSTITUTIONAL");
-    });
-
-    it("should update pool reserves", async () => {
-      const poolBefore = liquidityService.getPool("pool-aet-usdc");
-      const reserveABefore = parseFloat(poolBefore.reserveA);
-
-      await liquidityService.addLiquidity(
-        { poolId: "pool-aet-usdc", amountA: "5000", amountB: "12250" },
-        "0xprovider",
-        "biz-1",
-      );
-
-      const poolAfter = liquidityService.getPool("pool-aet-usdc");
-      expect(parseFloat(poolAfter.reserveA)).toBe(reserveABefore + 5000);
-    });
-
-    it("should throw POOL_INACTIVE for non-active pools", async () => {
-      // Get a pool and manually set it inactive
-      const pool = liquidityService.getPool("pool-aet-usdc");
-      (pool as any).status = "PAUSED";
-
-      await expect(
-        liquidityService.addLiquidity(
-          { poolId: "pool-aet-usdc", amountA: "100", amountB: "245" },
-          "0xprovider",
-          "biz-1",
-        ),
-      ).rejects.toMatchObject({ code: "POOL_INACTIVE" });
-
-      // Restore
-      (pool as any).status = "ACTIVE";
-    });
+    await expect(
+      service.getPositions(
+        "business-1",
+        "0x2222222222222222222222222222222222222222",
+      ),
+    ).rejects.toMatchObject({ code: "FORBIDDEN", statusCode: 403 });
+    expect(prisma.lPPosition.findMany).not.toHaveBeenCalled();
   });
 
-  // ─── removeLiquidity ───────────────────────────────────────────────────────
+  it("fails before querying positions when the business is missing", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue(null);
 
-  describe("removeLiquidity", () => {
-    it("should remove partial liquidity", async () => {
-      const position = await liquidityService.addLiquidity(
-        { poolId: "pool-aet-usdc", amountA: "10000", amountB: "24500" },
-        "0xprovider",
-        "biz-1",
-      );
-
-      const result = await liquidityService.removeLiquidity(
-        { positionId: position.id, percentage: 50 },
-        "0xprovider",
-      );
-
-      expect(result.amountA).toBeDefined();
-      expect(result.amountB).toBeDefined();
-      expect(result.feesCollected).toBeDefined();
-
-      // Position should still exist with reduced share
-      const positions = liquidityService.getPositions("0xprovider");
-      expect(positions).toHaveLength(1);
-    });
-
-    it("should fully remove position at 100%", async () => {
-      const position = await liquidityService.addLiquidity(
-        { poolId: "pool-aet-usdc", amountA: "1000", amountB: "2450" },
-        "0xprovider",
-        "biz-1",
-      );
-
-      await liquidityService.removeLiquidity(
-        { positionId: position.id, percentage: 100 },
-        "0xprovider",
-      );
-
-      const positions = liquidityService.getPositions("0xprovider");
-      expect(positions).toHaveLength(0);
-    });
-
-    it("should throw POSITION_NOT_FOUND for unknown position", async () => {
-      await expect(
-        liquidityService.removeLiquidity(
-          { positionId: "nonexistent", percentage: 50 },
-          "0xactor",
-        ),
-      ).rejects.toMatchObject({ code: "POSITION_NOT_FOUND" });
-    });
+    await expect(
+      service.getPositions("missing-business"),
+    ).rejects.toMatchObject({ code: "BUSINESS_NOT_FOUND", statusCode: 404 });
+    expect(prisma.lPPosition.findMany).not.toHaveBeenCalled();
   });
 
-  // ─── getPositions ──────────────────────────────────────────────────────────
+  it("handles empty-pool math without dividing by zero", async () => {
+    const { prisma, service } = setup();
+    prisma.business.findUnique.mockResolvedValue({ address: wallet });
+    prisma.lPPosition.findMany.mockResolvedValue([
+      {
+        id: "position-empty-pool",
+        poolId: "empty-pool",
+        provider: wallet,
+        liquidity: new Prisma.Decimal("0"),
+        lowerTick: -10,
+        upperTick: 10,
+        feesEarned: new Prisma.Decimal("0"),
+        createdAt: now,
+        pool: pool({
+          id: "empty-pool",
+          totalLiquidity: new Prisma.Decimal("0"),
+          reserveA: new Prisma.Decimal("0"),
+          reserveB: new Prisma.Decimal("0"),
+        }),
+      },
+    ]);
 
-  describe("getPositions", () => {
-    it("should return all positions", async () => {
-      await liquidityService.addLiquidity(
-        { poolId: "pool-aet-usdc", amountA: "1000", amountB: "2450" },
-        "0xprovider1",
-        "biz-1",
-      );
+    const positions = await service.getPositions("business-1");
 
-      const all = liquidityService.getPositions();
-      expect(all.length).toBeGreaterThanOrEqual(1);
+    expect(positions[0]).toMatchObject({
+      sharePercentage: 0,
+      entryPrice: null,
     });
-
-    it("should filter by provider", async () => {
-      await liquidityService.addLiquidity(
-        { poolId: "pool-aet-usdc", amountA: "1000", amountB: "2450" },
-        "0xproviderX",
-        "biz-1",
-      );
-
-      const filtered = liquidityService.getPositions("0xproviderX");
-      expect(filtered).toHaveLength(1);
-      expect(filtered[0].provider).toBe("0xproviderX");
-    });
+    expect(prisma.lPPosition.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ skip: undefined, take: undefined }),
+    );
   });
 
-  // ─── requestFlashLiquidity ─────────────────────────────────────────────────
-
-  describe("requestFlashLiquidity", () => {
-    it("should fulfill flash liquidity request", async () => {
-      const request = await liquidityService.requestFlashLiquidity(
-        "pool-aet-usdc",
-        "100000",
-        "0xborrower",
-      );
-
-      expect(request.id).toMatch(/^flash-/);
-      expect(request.status).toBe("FULFILLED");
-      expect(parseFloat(request.fee)).toBeCloseTo(90, 0); // 9 bps of 100k
-      expect(request.currency).toBe("AET");
+  // The mutations are no longer blanket-disabled — a receipt verifier now
+  // exists — but they still fail closed. What is asserted is the invariant
+  // rather than the old 501: when the chain does not corroborate a settlement,
+  // nothing is written.
+  it("fails every unverified liquidity mutation closed", async () => {
+    const { prisma, service } = setup();
+    prisma.liquidityPool.findUnique.mockResolvedValue(pool());
+    prisma.lPPosition.findFirst.mockResolvedValue(null);
+    prisma.lPPosition.findUnique.mockResolvedValue({
+      id: "position-1",
+      provider: wallet,
+      poolId: "pool-1",
     });
+    mockVerifyLiquiditySettlement.mockRejectedValue(
+      new Error("SETTLEMENT_RPC_UNAVAILABLE"),
+    );
+    mockVerifyFlashLoan.mockRejectedValue(new Error("FLASH_LOAN_NOT_REPAID"));
 
-    it("should throw for unknown pool", async () => {
-      await expect(
-        liquidityService.requestFlashLiquidity(
-          "nonexistent",
-          "1000",
-          "0xborrower",
-        ),
-      ).rejects.toThrow(LiquidityError);
-    });
+    const settlement = {
+      txHash: `0x${"e".repeat(64)}`,
+      onChainPositionId: `0x${"b".repeat(64)}`,
+    };
+    const chainConfig = {
+      rpcUrl: "http://rpc.invalid",
+      minimumConfirmations: 1,
+    } as never;
+
+    await expect(
+      service.addLiquidity(
+        { poolId: "pool-1", amountA: "1", amountB: "1" },
+        wallet,
+        "business-1",
+        settlement,
+        chainConfig,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      service.removeLiquidity(
+        { positionId: "position-1", percentage: 100 },
+        wallet,
+        "business-1",
+        settlement,
+        chainConfig,
+      ),
+    ).rejects.toThrow();
+    await expect(
+      service.requestFlashLiquidity(
+        "pool-1",
+        wallet,
+        "business-1",
+        { txHash: settlement.txHash, flashLoanId: `0x${"d".repeat(64)}` },
+        chainConfig,
+      ),
+    ).rejects.toThrow();
+
+    // No position created, none updated: an unverified settlement leaves no
+    // trace in the ledger.
+    expect(prisma.lPPosition.create).not.toHaveBeenCalled();
+    expect(prisma.lPPosition.update).not.toHaveBeenCalled();
   });
 
-  // ─── getAnalytics ──────────────────────────────────────────────────────────
+  it("derives analytics only from persisted pool snapshots", async () => {
+    const { prisma, service } = setup();
+    prisma.liquidityPool.findMany.mockResolvedValue([
+      pool(),
+      pool({
+        id: "pool-2",
+        totalLiquidity: new Prisma.Decimal("10"),
+        volume24h: new Prisma.Decimal("5"),
+        feesCollected: new Prisma.Decimal("0.5"),
+      }),
+    ]);
 
-  describe("getAnalytics", () => {
-    it("should return pool analytics", () => {
-      const analytics = liquidityService.getAnalytics();
+    const analytics = await service.getAnalytics("business-1");
 
-      expect(parseFloat(analytics.totalTVL)).toBeGreaterThan(0);
-      expect(analytics.poolCount).toBeGreaterThan(0);
-      expect(analytics.avgUtilization).toBeGreaterThan(0);
-      expect(analytics.topPools.length).toBeGreaterThan(0);
-    });
-
-    it("should detect rebalancing alerts for high-utilization pools", () => {
-      const analytics = liquidityService.getAnalytics();
-      // USDC/USDT pool has 0.89 utilization, should trigger alert
-      const alert = analytics.rebalancingAlerts.find(
-        (a) => a.pair === "USDC/USDT",
-      );
-      expect(alert).toBeDefined();
-      expect(alert!.severity).toBe("WARNING");
-    });
-
-    it("should detect CRITICAL rebalancing alert for > 0.95 utilization", () => {
-      // Mutate pool utilization to trigger CRITICAL
-      const pool = liquidityService.getPool("pool-usdc-usdt");
-      const originalUtilization = pool.utilization;
-      (pool as any).utilization = 0.97;
-
-      const analytics = liquidityService.getAnalytics();
-      const alert = analytics.rebalancingAlerts.find(
-        (a) => a.pair === "USDC/USDT",
-      );
-      expect(alert).toBeDefined();
-      expect(alert!.severity).toBe("CRITICAL");
-
-      // Restore
-      (pool as any).utilization = originalUtilization;
-    });
+    expect(analytics).toEqual(
+      expect.objectContaining({
+        totalTVL: "2000",
+        totalVolume24h: "255",
+        totalFeesGenerated: "4",
+        avgUtilization: null,
+        rebalancingAlerts: [],
+      }),
+    );
   });
 
-  // ─── getAnalytics (empty pools branch) ────────────────────────────────────
+  it("reports the latest snapshot timestamp and an explicit null for no pools", async () => {
+    const { prisma, service } = setup();
+    const earlier = new Date("2026-07-20T12:00:00.000Z");
+    prisma.liquidityPool.findMany.mockResolvedValue([
+      pool({ id: "newer", updatedAt: now }),
+      pool({ id: "older", updatedAt: earlier }),
+    ]);
 
-  describe("getAnalytics (zero pools)", () => {
-    it("should return avgUtilization 0 when no active pools exist", () => {
-      // Mock getPools to return empty to hit the pools.length === 0 branch
-      const origGetPools = liquidityService.getPools.bind(liquidityService);
-      jest.spyOn(liquidityService, "getPools").mockReturnValue([]);
+    await expect(service.getAnalytics()).resolves.toMatchObject({ asOf: now });
 
-      const analytics = liquidityService.getAnalytics();
-      expect(analytics.avgUtilization).toBe(0);
-      expect(analytics.poolCount).toBe(0);
-      expect(analytics.topPools).toHaveLength(0);
-      expect(analytics.rebalancingAlerts).toHaveLength(0);
-
-      jest.restoreAllMocks();
-    });
-  });
-
-  // ─── LiquidityError ───────────────────────────────────────────────────────
-
-  describe("LiquidityError", () => {
-    it("should set properties correctly", () => {
-      const err = new LiquidityError("CODE", "msg", 404);
-      expect(err.code).toBe("CODE");
-      expect(err.statusCode).toBe(404);
-      expect(err.name).toBe("LiquidityError");
-    });
-
-    it("should default statusCode to 400", () => {
-      const err = new LiquidityError("CODE", "msg");
-      expect(err.statusCode).toBe(400);
+    prisma.liquidityPool.findMany.mockResolvedValue([]);
+    await expect(service.getAnalytics()).resolves.toMatchObject({
+      poolCount: 0,
+      totalTVL: "0",
+      asOf: null,
+      topPools: [],
     });
   });
 });

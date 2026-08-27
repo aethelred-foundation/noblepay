@@ -1,10 +1,10 @@
-// SPDX-License-Identifier: BUSL-1.1
-pragma solidity >=0.8.18;
+// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.19;
 
 /// @title ISeal — the Aethelred Digital Seal precompile
 /// @notice Exposes post-quantum Digital Seals — including the CEAP
 ///         confidentiality attestation (ADR-0003) — to Solidity contracts.
-///         A contract can gate settlement on "this inference ran under TEE
+///         A contract can gate settlement on "this screening ran under TEE
 ///         (or FHE), on approved silicon, with a vendor root, inside an
 ///         approved jurisdiction" without trusting any oracle: the answer is
 ///         computed by the same consensus logic that minted the seal.

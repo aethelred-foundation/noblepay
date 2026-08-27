@@ -1,0 +1,17 @@
+{
+  "name": "NoblePay",
+  "short_name": "NoblePay",
+  "description": "Enterprise cross-border payments with Aethelred settlement and verifiable compliance.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "/noblepay-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -5,6 +5,7 @@
  */
 
 import React, { Component, ErrorInfo, ReactNode } from "react";
+import * as Sentry from "@sentry/react";
 import { AlertTriangle, RefreshCw, Home, MessageCircle } from "lucide-react";
 import { BRAND } from "@/lib/constants";
 
@@ -47,14 +48,11 @@ export class ErrorBoundary extends Component<Props, State> {
       errorInfo,
     });
 
-    // Send to error tracking service (Sentry)
-    if (typeof window !== "undefined" && (window as any).Sentry) {
-      (window as any).Sentry.captureException(error, {
-        extra: {
-          componentStack: errorInfo.componentStack,
-        },
-      });
-    }
+    Sentry.captureException(error, {
+      extra: {
+        componentStack: errorInfo.componentStack,
+      },
+    });
   }
 
   handleReset = (): void => {

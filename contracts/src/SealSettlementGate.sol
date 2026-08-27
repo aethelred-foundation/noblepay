@@ -6,86 +6,63 @@ import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 
 import "./interfaces/ISeal.sol";
-import "./interfaces/IZeroIDRegistry.sol";
 
-/**
- * @title SealSettlementGate — consensus-anchored corridor clearance
- * @author Aethelred Team
- * @notice The top assurance tier of NoblePay's compliance stack, and the
- *         reason NoblePay is the default cross-border settlement rail for
- *         sovereign and regulated clients: a corridor clearance of the highest
- *         tier is not a role-held TEE key's signature — it is anchored to a
- *         **Digital Seal** minted by the Aethelred validator quorum when a
- *         PoUW compliance job (the attested sanctions/AML/travel-rule
- *         screening for a payer→payee corridor, run under a CEAP
- *         confidentiality policy) completed. The clearance is verified by the
- *         ISeal precompile (0x0900) — the SAME consensus logic that minted the
- *         seal. Even a compromised TEE node key cannot move funds past this
- *         gate.
- *
- *         Flow:
- *           1. A PoUW screening job runs for a corridor with purpose
- *              `noblepay:0x<payer>:0x<payee>` and a CEAP policy (jurisdiction,
- *              backend, vendor-root); the validator quorum mints the Digital
- *              Seal binding purpose + attestation.
- *           2. Anyone (relayer, keeper, the payer) calls {clear} with the job
- *              id — the seal is self-authorizing because its purpose binds the
- *              exact corridor, so clearing is permissionless by design.
- *           3. NoblePay's settlement path calls {isCleared} /
- *              {requireCleared}; the gate re-checks the seal's live ACTIVE
- *              status through ISeal, so a seal revoked on-chain (e.g. a
- *              sanctions-list update) closes the corridor instantly — no
- *              NoblePay transaction, no oracle round-trip.
- *
- * @dev One corridor, one clearance, forever: {clear} refuses to overwrite an
- *      existing record (AlreadyCleared), so a governance revocation cannot be
- *      undone through the permissionless path by a second bound seal. A
- *      re-screened corridor after remediation is a governance decision, not a
- *      permissionless rewrite. Deliberately NOT upgradeable — the clearance
- *      record must not be admin-mutable. Uses Ownable2Step (the cross-dApp
- *      convention for Aethelred seal registries) rather than NoblePay's
- *      AccessControl roles: the gate has exactly one governance surface.
- */
+/// @title SealSettlementGate — NoblePay's consensus-anchored corridor clearance
+/// @notice The clearance side of Aethelred's seal-gated settlement model, and
+///         the reason NoblePay is more than a wallet for sovereign/regulated
+///         corridors: a cross-border corridor (payer → payee) is cleared for
+///         settlement not by an issuer's on-chain signature or an off-chain
+///         screening oracle, but by a **Digital Seal** minted by the chain's own
+///         Proof-of-Useful-Work pipeline, verified by the ISeal precompile
+///         (0x0900), i.e. by the SAME consensus logic that minted the seal. No
+///         allowlist oracle, no off-chain screening server sits in the trust
+///         path at settlement time.
+///
+///         Flow:
+///           1. A PoUW screening job runs for a corridor with purpose
+///              `noblepay:0x<payer>:0x<payee>` and a CEAP confidentiality policy
+///              (jurisdiction, backend, vendor-root); the validator quorum mints
+///              the Digital Seal binding purpose + attestation.
+///           2. Anyone (permissionlessly — the seal's purpose binds the exact
+///              corridor, so a caller cannot mis-attribute a clearance) calls
+///              {clear} with the job id. The gate checks via ISeal that the seal
+///              is ACTIVE, its purpose binds THIS ordered payer → payee pair, and
+///              its attestation satisfies the gate's CEAP policy — then records a
+///              consensus-anchored clearance.
+///           3. NoblePay (or any integrator) calls {isCleared} / {requireCleared};
+///              the gate re-checks the seal's live ACTIVE status through ISeal, so
+///              a seal revoked on-chain (a sanctions update) closes the corridor
+///              instantly with no NoblePay transaction.
+///
+/// @dev    Direction-sensitive (payer → payee ≠ payee → payer), one-seal-one-
+///         clearance, and clearance permanence: a corridor admits exactly one
+///         clearance ever — a withdrawn (revoked) corridor cannot be re-opened
+///         through the permissionless path, even with a fresh policy-satisfying
+///         seal. Immutable core + governed parameters; two-step ownership;
+///         withdrawal-of-trust (revoke) always available. Non-upgradeable.
+///
+/// @dev    The ABI remains compatible with the historical reviewed artifact,
+///         while this source adds fail-closed emergency-pause settlement
+///         semantics verified by test/SealSettlementGate.test.js. Production
+///         deployment must use the freshly compiled Hardhat artifact from this
+///         source; historical vendored bytecode predating this check is not a
+///         release artifact.
 contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
-    // ──────────────────────────────────────────────────────────────
-    // Constants
-    // ──────────────────────────────────────────────────────────────
-
-    /// @dev The ISeal precompile (see aethelred repo precompiles/seal). Only
-    ///      real on Aethelred (EVM chain id 7332 / its production successor).
+    /// @dev The ISeal precompile (see aethelred repo precompiles/seal).
     ISeal internal constant SEAL = ISeal(0x0000000000000000000000000000000000000900);
 
-    // ──────────────────────────────────────────────────────────────
-    // Types
-    // ──────────────────────────────────────────────────────────────
-
-    /// @notice A consensus-anchored clearance for a payer→payee corridor.
+    /// @notice A consensus-anchored clearance for an ordered (payer, payee) corridor.
     struct Clearance {
         string sealId; // the backing Digital Seal
-        uint64 clearedAt; // block time of clearing
-        bool exists; // record present
+        uint64 clearedAt; // block time of clearance
+        bool exists; // record present (permanent once set)
         bool revoked; // locally revoked by governance
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // State
-    // ──────────────────────────────────────────────────────────────
-
-    // payer => payee => clearance
+    // payer => payee => clearance (ordered corridor)
     mapping(address => mapping(address => Clearance)) private _clearances;
     // a seal admits exactly one clearance (replay protection)
     mapping(string => bool) public sealUsed;
-
-    // ── ZeroID identity layer (optional; ecosystem responsibility matrix) ──
-    // ZeroID — not NoblePay — is the canonical identity authority. When the
-    // layer is on, BOTH corridor parties must hold registered, ACTIVE ZeroID
-    // identities: enforced at clearance AND re-checked live in {isCleared},
-    // so an identity suspension (e.g. a sanctions hit surfacing through
-    // ZeroID) closes the corridor instantly, exactly like seal revocation.
-    // Unlike seal/local revocation, identity REINSTATEMENT reopens the
-    // corridor — the clearance record itself is never consumed by it.
-    IZeroIDRegistry public identityRegistry;
-    bool public identityRequired;
 
     // CEAP policy every backing seal must satisfy (empty arrays = any).
     string[] private _allowedBackends;
@@ -94,14 +71,7 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     bool private _requireVendorRoot;
     string[] private _dataResidency;
 
-    // ──────────────────────────────────────────────────────────────
-    // Events
-    // ──────────────────────────────────────────────────────────────
-
-    event CorridorCleared(
-        address indexed payer, address indexed payee, string sealId, string jobId
-    );
-    event IdentityRegistrySet(address registry, bool required);
+    event CorridorCleared(address indexed payer, address indexed payee, string sealId, string jobId);
     event ClearanceRevoked(address indexed payer, address indexed payee, address indexed by);
     event CompliancePolicySet(
         string[] allowedBackends,
@@ -111,10 +81,6 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         string[] dataResidency
     );
 
-    // ──────────────────────────────────────────────────────────────
-    // Errors
-    // ──────────────────────────────────────────────────────────────
-
     error ZeroCorridor();
     error AlreadyCleared(address payer, address payee);
     error SealAlreadyUsed(string sealId);
@@ -122,25 +88,19 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     error SealNotBoundToCorridor(string expectedPurpose);
     error PolicyNotSatisfied(string reason);
     error NoSuchClearance();
-    error InvalidIdentityRegistry();
-    error IdentityNotVerified(address party);
 
     constructor(address governance) {
         _transferOwnership(governance);
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Clearing (consensus-anchored issuance)
-    // ──────────────────────────────────────────────────────────────
+    // ── clearance (consensus-anchored) ───────────────────────────────────────
 
-    /**
-     * @notice Record a consensus-anchored clearance for the payer→payee
-     *         corridor from the Digital Seal minted for `jobId`.
-     *         Permissionless: the seal's purpose binds the exact corridor, so
-     *         no caller can mis-attribute a clearance to a corridor the quorum
-     *         did not screen. Each seal admits one clearance; each corridor
-     *         admits one clearance record for its lifetime.
-     */
+    /// @notice Clear a corridor for settlement from a PoUW screening job whose
+    ///         seal binds this ordered payer → payee pair and satisfies the
+    ///         gate's CEAP policy. Permissionless: the seal is self-authorizing
+    ///         (its purpose binds the corridor), so no caller role is required —
+    ///         but each corridor admits exactly one clearance ever, and each seal
+    ///         admits exactly one clearance.
     function clear(address payer, address payee, string calldata jobId)
         external
         whenNotPaused
@@ -148,18 +108,9 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
     {
         if (payer == address(0) || payee == address(0)) revert ZeroCorridor();
 
-        // ZeroID identity layer: both corridor parties must currently hold
-        // registered, ACTIVE identities. Reverts name the failing party so
-        // integrators and UIs can route the right onboarding flow.
-        if (identityRequired) {
-            if (!_identityActive(payer)) revert IdentityNotVerified(payer);
-            if (!_identityActive(payee)) revert IdentityNotVerified(payee);
-        }
-
-        // One corridor, one clearance, forever. Without this guard a second
-        // corridor-bound seal could overwrite the record — including rewriting
-        // `revoked` back to false, silently undoing a governance revocation
-        // through a permissionless call.
+        // Clearance permanence: a corridor's clearance slot is written once and
+        // never freed. A revoked corridor reads as not-cleared (below) but its
+        // slot stays occupied, so it can never be re-opened permissionlessly.
         if (_clearances[payer][payee].exists) revert AlreadyCleared(payer, payee);
 
         // Resolve the seal for the PoUW job (reverts if the job is unsealed).
@@ -167,24 +118,18 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         if (sealUsed[sealId]) revert SealAlreadyUsed(sealId);
         if (!SEAL.verifySeal(sealId)) revert SealNotActive(sealId);
 
-        // The seal must have been minted FOR this exact corridor: the PoUW job
-        // purpose binds payer AND payee, so a clearance cannot be replayed
-        // onto a different pair or direction (payer→payee != payee→payer).
+        // The seal must have been minted FOR this exact ordered corridor: the
+        // PoUW job purpose binds payer → payee, so a clearance cannot be replayed
+        // for the reverse direction or a different corridor.
         (, , , , , , string memory purpose, , ) = SEAL.getSeal(sealId);
-        string memory expected =
-            string.concat("noblepay:", _toHexAddress(payer), ":", _toHexAddress(payee));
+        string memory expected = _expectedPurpose(payer, payee);
         if (keccak256(bytes(purpose)) != keccak256(bytes(expected))) {
             revert SealNotBoundToCorridor(expected);
         }
 
-        // CEAP policy — consensus-parity Satisfies via the precompile.
+        // CEAP policy — consensus-parity satisfaction via the precompile.
         (bool ok, string memory reason) = SEAL.requireConfidentiality(
-            sealId,
-            _allowedBackends,
-            _minVerification,
-            _allowedPlatforms,
-            _requireVendorRoot,
-            _dataResidency
+            sealId, _allowedBackends, _minVerification, _allowedPlatforms, _requireVendorRoot, _dataResidency
         );
         if (!ok) revert PolicyNotSatisfied(reason);
 
@@ -198,54 +143,36 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         emit CorridorCleared(payer, payee, sealId, jobId);
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Verification (what NoblePay's settlement path calls)
-    // ──────────────────────────────────────────────────────────────
+    // ── verification (what NoblePay / integrators call) ──────────────────────
 
-    /**
-     * @notice True iff the corridor carries a live consensus clearance:
-     *         recorded, not locally revoked, AND its backing seal is still
-     *         ACTIVE on-chain. Seal revocation (e.g. a sanctions-list update
-     *         verified by the quorum) closes the corridor instantly.
-     */
+    /// @notice True iff the corridor holds a live clearance: recorded, not
+    ///         locally revoked, AND its backing seal is still ACTIVE on-chain
+    ///         (revocation propagates from consensus instantly).
     function isCleared(address payer, address payee) public view returns (bool) {
         Clearance storage c = _clearances[payer][payee];
         if (!c.exists || c.revoked) return false;
-        // Live ZeroID check: a suspended/revoked identity closes the corridor
-        // instantly (fail-closed — a broken registry also reads as closed);
-        // reinstatement in ZeroID reopens it without touching the record.
-        if (identityRequired && (!_identityOk(payer) || !_identityOk(payee))) {
-            return false;
-        }
         return SEAL.verifySeal(c.sealId);
     }
 
-    /// @notice Reverting variant for integrators that want a hard gate.
-    function requireCleared(address payer, address payee) external view {
+    /// @notice Reverting variant for integrators that want a hard gate. An
+    ///         emergency pause halts settlement even for existing clearances.
+    function requireCleared(address payer, address payee) external view whenNotPaused {
         if (!isCleared(payer, payee)) revert NoSuchClearance();
     }
 
     /// @notice Full clearance record (sealId, clearedAt, flags).
-    function getClearance(address payer, address payee)
-        external
-        view
-        returns (Clearance memory)
-    {
+    function getClearance(address payer, address payee) external view returns (Clearance memory) {
         return _clearances[payer][payee];
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Revocation (withdrawal of trust)
-    // ──────────────────────────────────────────────────────────────
+    // ── revocation (withdrawal of trust) ─────────────────────────────────────
 
-    /**
-     * @notice Locally revoke a corridor clearance (governance only) — one-way;
-     *         combined with the AlreadyCleared guard, a revoked corridor stays
-     *         closed at this tier permanently. Note: revoking the underlying
-     *         Digital Seal on-chain already closes the corridor via the live
-     *         ISeal check in {isCleared}; this is the local, corridor-scoped
-     *         control for issues outside the seal's scope.
-     */
+    /// @notice Revoke a corridor's clearance. Governance-only (sanctions/policy
+    ///         withdrawal). Note: revoking the underlying Digital Seal on-chain
+    ///         already closes the corridor via the live ISeal check in
+    ///         {isCleared}; this is the local, corridor-scoped control. The
+    ///         clearance slot remains occupied, so the corridor is permanently
+    ///         withdrawn and cannot be re-cleared.
     function revoke(address payer, address payee) external onlyOwner {
         Clearance storage c = _clearances[payer][payee];
         if (!c.exists) revert NoSuchClearance();
@@ -253,9 +180,7 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         emit ClearanceRevoked(payer, payee, msg.sender);
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Governance
-    // ──────────────────────────────────────────────────────────────
+    // ── governance ───────────────────────────────────────────────────────────
 
     /// @notice Set the CEAP policy every backing seal must satisfy.
     function setCompliancePolicy(
@@ -284,20 +209,6 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         return (_allowedBackends, _minVerification, _allowedPlatforms, _requireVendorRoot, _dataResidency);
     }
 
-    /**
-     * @notice Wire (or unwire) the ZeroID identity registry and toggle the
-     *         identity layer. ZeroID is the ecosystem's canonical identity
-     *         authority — this gate consumes its status, it never issues or
-     *         mutates identities.
-     */
-    function setIdentityRegistry(address registry, bool required) external onlyOwner {
-        if (required && registry == address(0)) revert InvalidIdentityRegistry();
-        identityRegistry = IZeroIDRegistry(registry);
-        identityRequired = required;
-        emit IdentityRegistrySet(registry, required);
-    }
-
-    /// @notice Pause clearing (verification reads stay live).
     function pause() external onlyOwner {
         _pause();
     }
@@ -306,56 +217,27 @@ contract SealSettlementGate is Ownable2Step, Pausable, ReentrancyGuard {
         _unpause();
     }
 
-    // ──────────────────────────────────────────────────────────────
-    // Helpers
-    // ──────────────────────────────────────────────────────────────
-
-    /**
-     * @notice The exact PoUW job purpose a seal must carry to clear the
-     *         payer→payee corridor — helper for operators and UIs.
-     */
-    function expectedPurpose(address payer, address payee)
-        external
-        pure
-        returns (string memory)
-    {
-        return string.concat("noblepay:", _toHexAddress(payer), ":", _toHexAddress(payee));
+    /// @notice The exact PoUW job purpose a seal must carry to clear the ordered
+    ///         corridor (payer → payee) — helper for operators and UIs.
+    function expectedPurpose(address payer, address payee) external pure returns (string memory) {
+        return _expectedPurpose(payer, payee);
     }
 
-    /// @dev Strict check used on the CLEAR path — a reverting registry
-    ///      bubbles up (fail closed with the registry's own error).
-    function _identityActive(address party) private view returns (bool) {
-        bytes32 did = identityRegistry.resolveByController(party);
-        return did != bytes32(0) && identityRegistry.isActiveIdentity(did);
+    function _expectedPurpose(address payer, address payee) private pure returns (string memory) {
+        return string(abi.encodePacked("noblepay:", _toHexAddress(payer), ":", _toHexAddress(payee)));
     }
 
-    /// @dev Non-reverting check used on the VIEW path — any registry failure
-    ///      (broken upgrade, wrong address) reads as NOT verified, so the
-    ///      corridor fails CLOSED without bricking settlement-path reads.
-    function _identityOk(address party) private view returns (bool) {
-        try identityRegistry.resolveByController(party) returns (bytes32 did) {
-            if (did == bytes32(0)) return false;
-            try identityRegistry.isActiveIdentity(did) returns (bool active) {
-                return active;
-            } catch {
-                return false;
-            }
-        } catch {
-            return false;
-        }
-    }
-
-    // hex helper (lowercase, unchecksummed — purpose strings are canonical)
+    // ── hex helpers (lowercase, unchecksummed — purpose strings are canonical) ─
 
     function _toHexAddress(address account) private pure returns (string memory) {
-        bytes20 value = bytes20(account);
+        bytes20 raw = bytes20(account);
         bytes16 alphabet = "0123456789abcdef";
         bytes memory out = new bytes(42);
         out[0] = "0";
         out[1] = "x";
         for (uint256 i = 0; i < 20; i++) {
-            out[2 + i * 2] = alphabet[uint8(value[i]) >> 4];
-            out[3 + i * 2] = alphabet[uint8(value[i]) & 0x0f];
+            out[2 + i * 2] = alphabet[uint8(raw[i]) >> 4];
+            out[3 + i * 2] = alphabet[uint8(raw[i]) & 0x0f];
         }
         return string(out);
     }

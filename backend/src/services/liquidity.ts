@@ -1,13 +1,17 @@
-import { PrismaClient } from "@prisma/client";
-import crypto from "crypto";
-import { generateOpaqueId } from "../lib/identifiers";
-import { logger } from "../lib/logger";
+import { Prisma, PrismaClient } from "@prisma/client";
 import { AuditService } from "./audit";
-
-// ─── Types ──────────────────────────────────────────────────────────────────
+import {
+  verifyFlashLoan,
+  verifyLiquiditySettlement,
+} from "./liquidity-execution";
+import type { NoblePayChainConfiguration } from "../lib/production-config";
 
 export type PoolStatus = "ACTIVE" | "PAUSED" | "DEPRECATED";
 export type LPTier = "RETAIL" | "INSTITUTIONAL" | "MARKET_MAKER";
+interface PaginationOptions {
+  page: number;
+  limit: number;
+}
 
 export interface LiquidityPoolRecord {
   id: string;
@@ -18,15 +22,18 @@ export interface LiquidityPoolRecord {
   reserveB: string;
   totalLiquidity: string;
   tvl: string;
-  apy: number;
+  apy: null;
   feeRate: number;
-  utilization: number;
+  utilization: null;
   volume24h: string;
-  volume7d: string;
+  volume7d: null;
+  feesCollected: string;
   status: PoolStatus;
-  minLiquidity: string;
-  circuitBreakerThreshold: number;
+  minLiquidity: null;
+  circuitBreakerThreshold: null;
   createdAt: Date;
+  updatedAt: Date;
+  dataSource: "DATABASE_SNAPSHOT";
 }
 
 export interface LPPositionRecord {
@@ -34,16 +41,16 @@ export interface LPPositionRecord {
   businessId: string;
   poolId: string;
   provider: string;
-  tier: LPTier;
+  tier: null;
   liquidityAmount: string;
   sharePercentage: number;
   rangeMin: number;
   rangeMax: number;
   feesEarned: string;
-  impermanentLoss: string;
-  entryPrice: number;
+  impermanentLoss: null;
+  entryPrice: number | null;
   createdAt: Date;
-  lastClaimedAt: Date | null;
+  lastClaimedAt: null;
 }
 
 export interface AddLiquidityInput {
@@ -57,19 +64,7 @@ export interface AddLiquidityInput {
 
 export interface RemoveLiquidityInput {
   positionId: string;
-  percentage: number; // 1-100
-}
-
-export interface FlashLiquidityRequest {
-  id: string;
-  poolId: string;
-  amount: string;
-  currency: string;
-  borrower: string;
-  fee: string;
-  status: "PENDING" | "FULFILLED" | "REPAID" | "DEFAULTED";
-  createdAt: Date;
-  dueAt: Date;
+  percentage: number;
 }
 
 export interface PoolAnalytics {
@@ -77,277 +72,431 @@ export interface PoolAnalytics {
   totalVolume24h: string;
   totalFeesGenerated: string;
   poolCount: number;
-  avgUtilization: number;
-  topPools: Array<{ pair: string; tvl: string; apy: number; volume24h: string }>;
-  rebalancingAlerts: Array<{ poolId: string; pair: string; severity: string; message: string }>;
+  avgUtilization: null;
+  topPools: Array<{
+    pair: string;
+    tvl: string;
+    apy: null;
+    volume24h: string;
+  }>;
+  rebalancingAlerts: [];
+  asOf: Date | null;
+  dataSource: "DATABASE_SNAPSHOT";
 }
 
-// ─── Service ────────────────────────────────────────────────────────────────
+type PositionWithPool = Prisma.LPPositionGetPayload<{
+  include: { pool: true };
+}>;
 
+function poolRecord(
+  pool: Prisma.LiquidityPoolGetPayload<Record<string, never>>,
+): LiquidityPoolRecord {
+  return {
+    id: pool.id,
+    pair: `${pool.tokenA}/${pool.tokenB}`,
+    tokenA: pool.tokenA,
+    tokenB: pool.tokenB,
+    reserveA: pool.reserveA.toString(),
+    reserveB: pool.reserveB.toString(),
+    totalLiquidity: pool.totalLiquidity.toString(),
+    tvl: pool.totalLiquidity.toString(),
+    apy: null,
+    feeRate: pool.feeRate.toNumber(),
+    utilization: null,
+    volume24h: pool.volume24h.toString(),
+    volume7d: null,
+    feesCollected: pool.feesCollected.toString(),
+    status: pool.isActive ? "ACTIVE" : "PAUSED",
+    minLiquidity: null,
+    circuitBreakerThreshold: null,
+    createdAt: pool.createdAt,
+    updatedAt: pool.updatedAt,
+    dataSource: "DATABASE_SNAPSHOT",
+  };
+}
+
+/**
+ * Read-only view over durable liquidity snapshots.
+ *
+ * Pool and position mutations are contract transactions. Until the backend is
+ * configured to submit and verify their receipts, every mutation fails closed
+ * rather than changing database balances that did not move on-chain.
+ */
 export class LiquidityService {
-  private pools: Map<string, LiquidityPoolRecord> = new Map();
-  private positions: Map<string, LPPositionRecord> = new Map();
-  private flashRequests: Map<string, FlashLiquidityRequest> = new Map();
-
   constructor(
-    private prisma: PrismaClient,
-    private auditService: AuditService,
-  ) {
-    this.initializeDefaultPools();
+    private readonly prisma: PrismaClient,
+    private readonly _auditService: AuditService,
+  ) {}
+
+  async getPools(
+    status?: PoolStatus,
+    pagination?: PaginationOptions,
+  ): Promise<LiquidityPoolRecord[]> {
+    if (status === "DEPRECATED") return [];
+    const pools = await this.prisma.liquidityPool.findMany({
+      where:
+        status === "ACTIVE"
+          ? { isActive: true }
+          : status === "PAUSED"
+            ? { isActive: false }
+            : undefined,
+      orderBy: { totalLiquidity: "desc" },
+      skip: pagination ? (pagination.page - 1) * pagination.limit : undefined,
+      take: pagination?.limit,
+    });
+    return pools.map(poolRecord);
   }
 
-  private initializeDefaultPools(): void {
-    const defaultPools: Omit<LiquidityPoolRecord, "id" | "createdAt">[] = [
-      { pair: "AET/USDC", tokenA: "AET", tokenB: "USDC", reserveA: "2000000", reserveB: "4900000", totalLiquidity: "9800000", tvl: "9800000", apy: 12.5, feeRate: 0.003, utilization: 0.72, volume24h: "1250000", volume7d: "8750000", status: "ACTIVE", minLiquidity: "100000", circuitBreakerThreshold: 0.3 },
-      { pair: "AET/AED", tokenA: "AET", tokenB: "AED", reserveA: "1500000", reserveB: "13511400", totalLiquidity: "7500000", tvl: "7500000", apy: 9.8, feeRate: 0.002, utilization: 0.58, volume24h: "890000", volume7d: "6230000", status: "ACTIVE", minLiquidity: "50000", circuitBreakerThreshold: 0.3 },
-      { pair: "USDC/USDT", tokenA: "USDC", tokenB: "USDT", reserveA: "5000000", reserveB: "4998500", totalLiquidity: "10000000", tvl: "10000000", apy: 3.2, feeRate: 0.0005, utilization: 0.89, volume24h: "4500000", volume7d: "31500000", status: "ACTIVE", minLiquidity: "200000", circuitBreakerThreshold: 0.2 },
-      { pair: "USDC/AED", tokenA: "USDC", tokenB: "AED", reserveA: "3000000", reserveB: "11017500", totalLiquidity: "6000000", tvl: "6000000", apy: 5.6, feeRate: 0.001, utilization: 0.65, volume24h: "750000", volume7d: "5250000", status: "ACTIVE", minLiquidity: "100000", circuitBreakerThreshold: 0.25 },
-      { pair: "AET/USDT", tokenA: "AET", tokenB: "USDT", reserveA: "800000", reserveB: "1960000", totalLiquidity: "3920000", tvl: "3920000", apy: 14.2, feeRate: 0.003, utilization: 0.45, volume24h: "420000", volume7d: "2940000", status: "ACTIVE", minLiquidity: "50000", circuitBreakerThreshold: 0.3 },
-    ];
-
-    for (const pool of defaultPools) {
-      const id = `pool-${pool.pair.replace("/", "-").toLowerCase()}`;
-      this.pools.set(id, { ...pool, id, createdAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) });
-    }
-  }
-
-  /**
-   * Get all liquidity pools.
-   */
-  getPools(status?: PoolStatus): LiquidityPoolRecord[] {
-    let pools = Array.from(this.pools.values());
-    if (status) {
-      pools = pools.filter((p) => p.status === status);
-    }
-    return pools.sort((a, b) => parseFloat(b.tvl) - parseFloat(a.tvl));
-  }
-
-  /**
-   * Get a single pool by ID.
-   */
-  getPool(poolId: string): LiquidityPoolRecord {
-    const pool = this.pools.get(poolId);
+  async getPool(poolId: string): Promise<LiquidityPoolRecord> {
+    const pool = await this.prisma.liquidityPool.findUnique({
+      where: { id: poolId },
+    });
     if (!pool) {
       throw new LiquidityError("POOL_NOT_FOUND", "Pool not found", 404);
     }
-    return pool;
+    return poolRecord(pool);
+  }
+
+  async getPositions(
+    businessId: string,
+    requestedProvider?: string,
+    pagination?: PaginationOptions,
+  ): Promise<LPPositionRecord[]> {
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+      select: { address: true },
+    });
+    if (!business) {
+      throw new LiquidityError(
+        "BUSINESS_NOT_FOUND",
+        "Authenticated business was not found",
+        404,
+      );
+    }
+    if (
+      requestedProvider &&
+      requestedProvider.toLowerCase() !== business.address.toLowerCase()
+    ) {
+      throw new LiquidityError(
+        "FORBIDDEN",
+        "Liquidity positions can only be read for the authenticated wallet",
+        403,
+      );
+    }
+
+    const positions = await this.prisma.lPPosition.findMany({
+      where: {
+        provider: { equals: business.address, mode: "insensitive" },
+      },
+      include: { pool: true },
+      orderBy: { createdAt: "desc" },
+      skip: pagination ? (pagination.page - 1) * pagination.limit : undefined,
+      take: pagination?.limit,
+    });
+    return positions.map((position: PositionWithPool) => {
+      const total = position.pool.totalLiquidity.toNumber();
+      const liquidity = position.liquidity.toNumber();
+      const reserveA = position.pool.reserveA.toNumber();
+      const reserveB = position.pool.reserveB.toNumber();
+      return {
+        id: position.id,
+        businessId,
+        poolId: position.poolId,
+        provider: position.provider,
+        tier: null,
+        liquidityAmount: position.liquidity.toString(),
+        sharePercentage: total > 0 ? (liquidity / total) * 100 : 0,
+        rangeMin: position.lowerTick,
+        rangeMax: position.upperTick,
+        feesEarned: position.feesEarned.toString(),
+        impermanentLoss: null,
+        entryPrice: reserveA > 0 ? reserveB / reserveA : null,
+        createdAt: position.createdAt,
+        lastClaimedAt: null,
+      };
+    });
   }
 
   /**
-   * Add liquidity to a pool with optional concentrated range.
+   * Record an on-chain liquidity addition.
+   *
+   * The service submits nothing. A provider adds liquidity from their own
+   * wallet and reports the transaction; the position row is written only once
+   * the chain corroborates it, and the provider on the event must match the
+   * caller so one account cannot claim another's position.
    */
   async addLiquidity(
     input: AddLiquidityInput,
     provider: string,
     businessId: string,
+    settlement: { txHash: string; onChainPositionId: string },
+    config: NoblePayChainConfiguration,
   ): Promise<LPPositionRecord> {
-    const pool = this.getPool(input.poolId);
-    if (pool.status !== "ACTIVE") {
-      throw new LiquidityError("POOL_INACTIVE", "Pool is not active", 409);
+    const pool = await this.prisma.liquidityPool.findUnique({
+      where: { id: input.poolId },
+    });
+    if (!pool) {
+      throw new LiquidityError("POOL_NOT_FOUND", "Pool not found", 404);
     }
 
-    const positionId = generateOpaqueId("lp");
+    const existing = await this.prisma.lPPosition.findFirst({
+      where: { settlementTxHash: settlement.txHash.toLowerCase() },
+    });
+    if (existing) {
+      // Idempotent: the same settlement reported twice yields the same row
+      // rather than a duplicate position.
+      return this.toPositionRecord(existing, pool, businessId);
+    }
 
-    const liquidityAmount = (parseFloat(input.amountA) + parseFloat(input.amountB)).toFixed(2);
-    const sharePercentage = (parseFloat(liquidityAmount) / (parseFloat(pool.totalLiquidity) + parseFloat(liquidityAmount))) * 100;
+    const verified = await verifyLiquiditySettlement(
+      config,
+      {
+        txHash: settlement.txHash,
+        onChainPositionId: settlement.onChainPositionId,
+        kind: "ADD",
+        expectedProvider: provider,
+      },
+      process.env,
+    );
 
-    const position: LPPositionRecord = {
-      id: positionId,
-      businessId,
-      poolId: input.poolId,
-      provider,
-      tier: input.tier || "RETAIL",
-      liquidityAmount,
-      sharePercentage,
-      rangeMin: input.rangeMin || 0,
-      rangeMax: input.rangeMax || Infinity,
-      feesEarned: "0",
-      impermanentLoss: "0",
-      entryPrice: parseFloat(pool.reserveB) / parseFloat(pool.reserveA),
-      createdAt: new Date(),
-      lastClaimedAt: null,
-    };
+    const position = await this.prisma.lPPosition.create({
+      data: {
+        poolId: input.poolId,
+        provider,
+        // Amounts come from the event, not the request: the chain is the
+        // authority on how much actually moved.
+        liquidity: new Prisma.Decimal(verified.amountToken0).add(
+          new Prisma.Decimal(verified.amountToken1),
+        ),
+        lowerTick: input.rangeMin ?? 0,
+        upperTick: input.rangeMax ?? 0,
+        onChainPositionId: verified.onChainPositionId,
+        settlementTxHash: verified.txHash,
+      },
+    });
 
-    // Update pool reserves
-    pool.reserveA = (parseFloat(pool.reserveA) + parseFloat(input.amountA)).toFixed(2);
-    pool.reserveB = (parseFloat(pool.reserveB) + parseFloat(input.amountB)).toFixed(2);
-    pool.totalLiquidity = (parseFloat(pool.totalLiquidity) + parseFloat(liquidityAmount)).toFixed(2);
-    pool.tvl = pool.totalLiquidity;
-    this.pools.set(input.poolId, pool);
-    this.positions.set(positionId, position);
-
-    await this.auditService.createAuditEntry({
+    await this._auditService.createAuditEntry({
       eventType: "SYSTEM_EVENT",
       actor: provider,
-      description: `Liquidity added to ${pool.pair}: ${input.amountA} ${pool.tokenA} + ${input.amountB} ${pool.tokenB}`,
-      severity: "INFO",
-      metadata: { positionId, poolId: input.poolId, liquidityAmount },
+      description: `Liquidity added on chain to pool ${input.poolId} via ${verified.txHash}`,
+      severity: "MEDIUM",
+      businessId,
+      metadata: {
+        poolId: input.poolId,
+        onChainPositionId: verified.onChainPositionId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        amountToken0: verified.amountToken0,
+        amountToken1: verified.amountToken1,
+      },
     });
 
-    logger.info("Liquidity added", {
-      positionId,
-      poolId: input.poolId,
-      pair: pool.pair,
-      liquidityAmount,
-      sharePercentage: sharePercentage.toFixed(4),
-    });
-
-    return position;
+    return this.toPositionRecord(position, pool, businessId);
   }
 
-  /**
-   * Remove liquidity from a position.
-   */
+  /** Record an on-chain liquidity removal against an existing position. */
   async removeLiquidity(
     input: RemoveLiquidityInput,
     actor: string,
-    businessId?: string,
-  ): Promise<{ amountA: string; amountB: string; feesCollected: string }> {
-    const position = this.positions.get(input.positionId);
+    businessId: string,
+    settlement: { txHash: string; onChainPositionId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<{ positionId: string; txHash: string; blockNumber: number }> {
+    const position = await this.prisma.lPPosition.findUnique({
+      where: { id: input.positionId },
+    });
     if (!position) {
-      throw new LiquidityError("POSITION_NOT_FOUND", "LP position not found", 404);
+      throw new LiquidityError("POSITION_NOT_FOUND", "Position not found", 404);
     }
-    if (businessId && position.businessId !== businessId) {
-      throw new LiquidityError("FORBIDDEN", "You do not have permission to remove this position", 403);
-    }
-
-    const pool = this.getPool(position.poolId);
-    const removeFraction = input.percentage / 100;
-
-    const amountA = (parseFloat(pool.reserveA) * position.sharePercentage / 100 * removeFraction).toFixed(2);
-    const amountB = (parseFloat(pool.reserveB) * position.sharePercentage / 100 * removeFraction).toFixed(2);
-    const feesCollected = (parseFloat(position.feesEarned) * removeFraction).toFixed(2);
-
-    // Update pool
-    pool.reserveA = (parseFloat(pool.reserveA) - parseFloat(amountA)).toFixed(2);
-    pool.reserveB = (parseFloat(pool.reserveB) - parseFloat(amountB)).toFixed(2);
-    pool.totalLiquidity = (parseFloat(pool.reserveA) + parseFloat(pool.reserveB)).toFixed(2);
-    pool.tvl = pool.totalLiquidity;
-    this.pools.set(position.poolId, pool);
-
-    // Update or remove position
-    if (input.percentage >= 100) {
-      this.positions.delete(input.positionId);
-    } else {
-      position.liquidityAmount = (parseFloat(position.liquidityAmount) * (1 - removeFraction)).toFixed(2);
-      position.sharePercentage *= 1 - removeFraction;
-      position.feesEarned = (parseFloat(position.feesEarned) * (1 - removeFraction)).toFixed(2);
-      this.positions.set(input.positionId, position);
+    if (position.provider.toLowerCase() !== actor.toLowerCase()) {
+      throw new LiquidityError(
+        "NOT_POSITION_OWNER",
+        "Only the position's provider may remove its liquidity",
+        403,
+      );
     }
 
-    await this.auditService.createAuditEntry({
+    const verified = await verifyLiquiditySettlement(
+      config,
+      {
+        txHash: settlement.txHash,
+        onChainPositionId: settlement.onChainPositionId,
+        kind: "REMOVE",
+        expectedProvider: actor,
+      },
+      process.env,
+    );
+
+    await this.prisma.lPPosition.update({
+      where: { id: position.id },
+      data: { settlementTxHash: verified.txHash },
+    });
+
+    await this._auditService.createAuditEntry({
       eventType: "SYSTEM_EVENT",
       actor,
-      description: `Liquidity removed from ${pool.pair}: ${amountA} ${pool.tokenA} + ${amountB} ${pool.tokenB}`,
-      severity: "INFO",
-      metadata: { positionId: input.positionId, percentage: input.percentage },
+      description: `Liquidity removed on chain from position ${position.id} via ${verified.txHash}`,
+      severity: "MEDIUM",
+      businessId,
+      metadata: {
+        positionId: position.id,
+        onChainPositionId: verified.onChainPositionId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        percentage: input.percentage,
+      },
     });
 
-    logger.info("Liquidity removed", {
-      positionId: input.positionId,
-      poolId: position.poolId,
-      percentage: input.percentage,
-      amountA,
-      amountB,
-    });
-
-    return { amountA, amountB, feesCollected };
+    return {
+      positionId: position.id,
+      txHash: verified.txHash,
+      blockNumber: verified.blockNumber,
+    };
   }
 
   /**
-   * Get LP positions for a provider.
-   */
-  getPositions(provider?: string, businessId?: string): LPPositionRecord[] {
-    let positions = Array.from(this.positions.values());
-    if (businessId) {
-      positions = positions.filter((p) => p.businessId === businessId);
-    }
-    if (provider) {
-      positions = positions.filter((p) => p.provider === provider);
-    }
-    return positions;
-  }
-
-  /**
-   * Request flash liquidity for atomic settlement.
+   * Record a completed flash loan.
+   *
+   * Verification requires the borrow AND its repayment in the same
+   * transaction. That is the property that makes a flash loan safe, and a
+   * receipt showing only the borrow describes value that left the pool
+   * unsecured — so it is refused rather than recorded.
    */
   async requestFlashLiquidity(
     poolId: string,
-    amount: string,
     borrower: string,
-  ): Promise<FlashLiquidityRequest> {
-    const pool = this.getPool(poolId);
-    const fee = (parseFloat(amount) * 0.0009).toFixed(2); // 9 bps flash fee
+    businessId: string,
+    settlement: { txHash: string; flashLoanId: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<{
+    flashLoanId: string;
+    amount: string;
+    fee: string;
+    txHash: string;
+    blockNumber: number;
+  }> {
+    const verified = await verifyFlashLoan(
+      config,
+      {
+        txHash: settlement.txHash,
+        flashLoanId: settlement.flashLoanId,
+        expectedBorrower: borrower,
+      },
+      process.env,
+    );
 
-    const request: FlashLiquidityRequest = {
-      id: "flash-" + crypto.randomBytes(8).toString("hex"),
-      poolId,
-      amount,
-      currency: pool.tokenA,
-      borrower,
-      fee,
-      status: "FULFILLED",
-      createdAt: new Date(),
-      dueAt: new Date(Date.now() + 15 * 60 * 1000), // 15 min repayment window
-    };
-
-    this.flashRequests.set(request.id, request);
-
-    logger.info("Flash liquidity fulfilled", {
-      requestId: request.id,
-      poolId,
-      amount,
-      fee,
+    await this._auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor: borrower,
+      description: `Flash loan borrowed and repaid atomically in ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        poolId,
+        flashLoanId: verified.flashLoanId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        amount: verified.amount,
+        fee: verified.fee,
+        atomicRepaymentVerified: true,
+      },
     });
 
-    return request;
+    return {
+      flashLoanId: verified.flashLoanId,
+      amount: verified.amount,
+      fee: verified.fee,
+      txHash: verified.txHash,
+      blockNumber: verified.blockNumber,
+    };
   }
 
   /**
-   * Get pool analytics across all pools.
+   * Map a stored position to the record shape getPositions already returns, so
+   * a freshly settled position and a listed one are the same object to callers.
    */
-  getAnalytics(_businessId?: string): PoolAnalytics {
-    const pools = this.getPools("ACTIVE");
-
-    let totalTVL = 0;
-    let totalVolume24h = 0;
-    let totalFees = 0;
-    let totalUtilization = 0;
-
-    const rebalancingAlerts: PoolAnalytics["rebalancingAlerts"] = [];
-
-    for (const pool of pools) {
-      totalTVL += parseFloat(pool.tvl);
-      totalVolume24h += parseFloat(pool.volume24h);
-      totalFees += parseFloat(pool.volume24h) * pool.feeRate;
-      totalUtilization += pool.utilization;
-
-      // Check circuit breaker
-      if (pool.utilization > 0.85) {
-        rebalancingAlerts.push({
-          poolId: pool.id,
-          pair: pool.pair,
-          severity: pool.utilization > 0.95 ? "CRITICAL" : "WARNING",
-          message: `Pool utilization at ${(pool.utilization * 100).toFixed(1)}% — rebalancing recommended`,
-        });
-      }
-    }
-
+  private toPositionRecord(
+    position: {
+      id: string;
+      poolId: string;
+      provider: string;
+      liquidity: Prisma.Decimal;
+      lowerTick: number;
+      upperTick: number;
+      feesEarned: Prisma.Decimal;
+      createdAt: Date;
+    },
+    pool: {
+      totalLiquidity: Prisma.Decimal;
+      reserveA: Prisma.Decimal;
+      reserveB: Prisma.Decimal;
+    },
+    businessId: string,
+  ): LPPositionRecord {
+    const total = pool.totalLiquidity.toNumber();
+    const liquidity = position.liquidity.toNumber();
+    const reserveA = pool.reserveA.toNumber();
+    const reserveB = pool.reserveB.toNumber();
     return {
-      totalTVL: totalTVL.toFixed(2),
-      totalVolume24h: totalVolume24h.toFixed(2),
-      totalFeesGenerated: totalFees.toFixed(2),
-      poolCount: pools.length,
-      avgUtilization: pools.length > 0 ? totalUtilization / pools.length : 0,
-      topPools: pools
-        .slice(0, 5)
-        .map((p) => ({ pair: p.pair, tvl: p.tvl, apy: p.apy, volume24h: p.volume24h })),
-      rebalancingAlerts,
+      id: position.id,
+      businessId,
+      poolId: position.poolId,
+      provider: position.provider,
+      tier: null,
+      liquidityAmount: position.liquidity.toString(),
+      sharePercentage: total > 0 ? (liquidity / total) * 100 : 0,
+      rangeMin: position.lowerTick,
+      rangeMax: position.upperTick,
+      feesEarned: position.feesEarned.toString(),
+      impermanentLoss: null,
+      entryPrice: reserveA > 0 ? reserveB / reserveA : null,
+      createdAt: position.createdAt,
+      lastClaimedAt: null,
     };
   }
-}
 
-// ─── Error Class ────────────────────────────────────────────────────────────
+  async getAnalytics(_businessId?: string): Promise<PoolAnalytics> {
+    const pools = await this.prisma.liquidityPool.findMany({
+      where: { isActive: true },
+      orderBy: { totalLiquidity: "desc" },
+    });
+    const totalTVL = pools.reduce(
+      (sum, pool) => sum.add(pool.totalLiquidity),
+      new Prisma.Decimal(0),
+    );
+    const totalVolume24h = pools.reduce(
+      (sum, pool) => sum.add(pool.volume24h),
+      new Prisma.Decimal(0),
+    );
+    const totalFees = pools.reduce(
+      (sum, pool) => sum.add(pool.feesCollected),
+      new Prisma.Decimal(0),
+    );
+    const asOf = pools.reduce<Date | null>(
+      (latest, pool) =>
+        !latest || pool.updatedAt > latest ? pool.updatedAt : latest,
+      null,
+    );
+
+    return {
+      totalTVL: totalTVL.toString(),
+      totalVolume24h: totalVolume24h.toString(),
+      totalFeesGenerated: totalFees.toString(),
+      poolCount: pools.length,
+      avgUtilization: null,
+      topPools: pools.slice(0, 5).map((pool) => ({
+        pair: `${pool.tokenA}/${pool.tokenB}`,
+        tvl: pool.totalLiquidity.toString(),
+        apy: null,
+        volume24h: pool.volume24h.toString(),
+      })),
+      rebalancingAlerts: [],
+      asOf,
+      dataSource: "DATABASE_SNAPSHOT",
+    };
+  }
+
+}
 
 export class LiquidityError extends Error {
   constructor(

@@ -1,218 +1,311 @@
-import {
-  createMockPrisma,
-  resetAllMocks,
-} from "../setup";
-
-const mockPrisma = createMockPrisma();
-jest.mock("@prisma/client", () => ({
-  PrismaClient: jest.fn(() => mockPrisma),
-}));
-
 const mockFXService = {
   getRates: jest.fn(),
   createHedge: jest.fn(),
-  markToMarket: jest.fn(),
+  listPositions: jest.fn(),
   closePosition: jest.fn(),
   getExposure: jest.fn(),
   getAnalytics: jest.fn(),
 };
+let authenticated = true;
+const SIGNER = "0x2E8625F06A696b556B7B5e0C1b34B1cb55203af1";
+const RECEIPT = {
+  txHash: `0x${"c".repeat(64)}`,
+  onChainPositionId: `0x${"d".repeat(64)}`,
+  onChainHedgeType: "FORWARD" as const,
+};
+const CLOSE_RECEIPT = { txHash: `0x${"f".repeat(64)}` };
 
-const mockAuditService = { createAuditEntry: jest.fn() };
-
-jest.mock("../../services/fx", () => ({
-  FXService: jest.fn(() => mockFXService),
-  FXError: class FXError extends Error {
-    code: string;
-    statusCode: number;
-    constructor(code: string, message: string, statusCode: number) {
+jest.mock("../../lib/db", () => ({ prisma: {} }));
+jest.mock("../../services/audit", () => ({ AuditService: jest.fn() }));
+jest.mock("../../services/fx", () => {
+  class FXError extends Error {
+    constructor(
+      public code: string,
+      message: string,
+      public statusCode = 400,
+    ) {
       super(message);
-      this.code = code;
-      this.statusCode = statusCode;
-      this.name = "FXError";
     }
+  }
+  return { FXService: jest.fn(() => mockFXService), FXError };
+});
+jest.mock("../../middleware/auth", () => ({
+  authenticateAPIKey: (
+    req: { businessId?: string; signerId?: string; apiKeyId?: string },
+    _res: unknown,
+    next: () => void,
+  ) => {
+    if (authenticated) {
+      req.businessId = "business-1";
+      // FX mutations bind a chain receipt to the signer's address, so they
+      // require a wallet-authenticated session.
+      req.signerId = SIGNER;
+    }
+    next();
   },
 }));
-
-jest.mock("../../services/audit", () => ({
-  AuditService: jest.fn(() => mockAuditService),
+jest.mock("../../lib/production-config", () => ({
+  loadNoblePayChainConfiguration: () => ({
+    rpcUrl: "http://rpc.invalid",
+    minimumConfirmations: 3,
+  }),
 }));
-
-jest.mock("../../middleware/auth", () => ({
-  authenticateAPIKey: jest.fn((_req: any, _res: any, next: any) => next()),
-}));
-
+jest.mock("../../services/fx-execution", () => {
+  class FXExecutionError extends Error {
+    constructor(
+      public reason: string,
+      message: string,
+      public statusCode = 422,
+    ) {
+      super(message);
+      this.name = "FXExecutionError";
+    }
+  }
+  return { FXExecutionError };
+});
 jest.mock("../../middleware/rbac", () => ({
-  extractRole: jest.fn((_req: any, _res: any, next: any) => next()),
-  requireRole: jest.fn(() => (_req: any, _res: any, next: any) => next()),
-  requirePermission: jest.fn(() => (_req: any, _res: any, next: any) => next()),
+  extractRole: (_req: unknown, _res: unknown, next: () => void) => next(),
+  requireRole: () => (_req: unknown, _res: unknown, next: () => void) => next(),
+  requirePermission: () => (_req: unknown, _res: unknown, next: () => void) =>
+    next(),
 }));
 
 import express from "express";
 import request from "supertest";
-import fxRouter from "../../routes/fx";
+import router from "../../routes/fx";
 import { FXError } from "../../services/fx";
 
 const app = express();
 app.use(express.json());
-app.use("/v1/fx", fxRouter);
+app.use("/v1/fx", router);
 
-beforeEach(() => {
-  resetAllMocks();
-});
+describe("FX routes", () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    authenticated = true;
+  });
 
-describe("FX Routes", () => {
-  describe("GET /v1/fx/rates", () => {
-    it("should return all FX rates", async () => {
-      mockFXService.getRates.mockReturnValue([
-        { pair: "USDC/AED", rate: 3.6725 },
-      ]);
+  it("accepts only a normalized pair query", async () => {
+    mockFXService.getRates.mockResolvedValue([]);
 
-      const res = await request(app).get("/v1/fx/rates");
+    const valid = await request(app).get("/v1/fx/rates?pair=USDC%2FAED");
+    const invalid = await request(app).get("/v1/fx/rates?pair=usdc%2Faed");
 
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
+    expect(valid.status).toBe(200);
+    expect(invalid.status).toBe(400);
+    expect(mockFXService.getRates).toHaveBeenCalledTimes(1);
+    expect(mockFXService.getRates).toHaveBeenCalledWith("USDC/AED");
+  });
 
-    it("should filter by pair", async () => {
-      mockFXService.getRates.mockReturnValue([{ pair: "USDC/AED", rate: 3.6725 }]);
+  it("preserves explicit oracle availability failures", async () => {
+    mockFXService.getRates.mockRejectedValue(
+      new FXError("FX_ORACLE_UNAVAILABLE", "Oracle unavailable", 503),
+    );
 
-      await request(app).get("/v1/fx/rates?pair=USDC/AED");
+    const response = await request(app).get("/v1/fx/rates");
 
-      expect(mockFXService.getRates).toHaveBeenCalledWith("USDC/AED");
-    });
-
-    it("should handle FXError", async () => {
-      mockFXService.getRates.mockImplementation(() => {
-        throw new FXError("PAIR_NOT_FOUND", "Pair not found", 404);
-      });
-
-      const res = await request(app).get("/v1/fx/rates?pair=XXX/YYY");
-
-      expect(res.status).toBe(404);
-      expect(res.body.error).toBe("PAIR_NOT_FOUND");
-    });
-
-    it("should return 500 on unexpected error", async () => {
-      mockFXService.getRates.mockImplementation(() => {
-        throw new Error("crash");
-      });
-
-      const res = await request(app).get("/v1/fx/rates");
-
-      expect(res.status).toBe(500);
+    expect(response.status).toBe(503);
+    expect(response.body).toEqual({
+      error: "FX_ORACLE_UNAVAILABLE",
+      message: "Oracle unavailable",
     });
   });
 
-  describe("POST /v1/fx/hedges", () => {
-    it("should return 500 on error", async () => {
-      mockFXService.createHedge.mockRejectedValue(new Error("crash"));
+  it("passes bounded, allowlisted filters to tenant hedge history", async () => {
+    mockFXService.listPositions.mockResolvedValue([]);
 
-      const res = await request(app).post("/v1/fx/hedges").send({});
+    const response = await request(app).get(
+      "/v1/fx/hedges?status=OPEN&page=3&limit=10",
+    );
 
-      expect(res.status).toBe(500);
+    expect(response.status).toBe(200);
+    expect(mockFXService.listPositions).toHaveBeenCalledWith("business-1", {
+      status: "OPEN",
+      page: 3,
+      limit: 10,
     });
+  });
 
-    it("should create a hedge position", async () => {
-      mockFXService.createHedge.mockResolvedValue({
-        id: "hedge-1",
+  it("rejects malformed or unknown hedge fields before execution", async () => {
+    const response = await request(app)
+      .post("/v1/fx/hedges")
+      .send({ pair: "USDC/AED", notionalAmount: "1e9", fake: true });
+
+    expect(response.status).toBe(400);
+    expect(mockFXService.createHedge).not.toHaveBeenCalled();
+  });
+
+  it("splits the receipt out and passes the WALLET signer as trader", async () => {
+    // The trader argument used to be businessId, which the 501 concealed. A
+    // chain receipt binds to an address, so that would have failed every
+    // hedger check the moment the gate opened.
+    mockFXService.createHedge.mockResolvedValue({ id: "hedge-1" });
+    const input = {
+      pair: "USDC/AED",
+      type: "FORWARD",
+      notionalAmount: "1000",
+      currency: "USDC",
+      expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
+      marginDeposit: "100",
+    };
+
+    const response = await request(app)
+      .post("/v1/fx/hedges")
+      .send({ ...input, ...RECEIPT });
+
+    expect(response.status).toBe(201);
+    expect(mockFXService.createHedge).toHaveBeenCalledWith(
+      input,
+      SIGNER,
+      "business-1",
+      RECEIPT,
+      expect.anything(),
+    );
+  });
+
+  it("refuses a SWAP at the schema — the vault cannot create one", async () => {
+    const response = await request(app)
+      .post("/v1/fx/hedges")
+      .send({
         pair: "USDC/AED",
-        amount: "10000",
+        type: "SWAP",
+        notionalAmount: "1000",
+        currency: "USDC",
+        expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
+        marginDeposit: "100",
+        ...RECEIPT,
       });
 
-      const res = await request(app)
-        .post("/v1/fx/hedges")
-        .send({ pair: "USDC/AED", amount: "10000", direction: "LONG" });
-
-      expect(res.status).toBe(201);
-      expect(res.body.data.id).toBe("hedge-1");
-    });
+    expect(response.status).toBe(400);
+    expect(mockFXService.createHedge).not.toHaveBeenCalled();
   });
 
-  describe("GET /v1/fx/hedges", () => {
-    it("should return marked-to-market positions", async () => {
-      mockFXService.markToMarket.mockReturnValue([
-        { id: "hedge-1", unrealizedPnL: "50.25" },
-      ]);
-
-      const res = await request(app).get("/v1/fx/hedges");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data).toHaveLength(1);
-    });
-
-    it("should return 500 on error", async () => {
-      mockFXService.markToMarket.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/fx/hedges");
-
-      expect(res.status).toBe(500);
-    });
-  });
-
-  describe("POST /v1/fx/hedges/:id/close", () => {
-    it("should close a hedge position", async () => {
-      mockFXService.closePosition.mockResolvedValue({
-        id: "hedge-1",
-        status: "CLOSED",
-        realizedPnL: "75.50",
+  it("refuses a FORWARD declared as an on-chain option", async () => {
+    const response = await request(app)
+      .post("/v1/fx/hedges")
+      .send({
+        pair: "USDC/AED",
+        type: "FORWARD",
+        notionalAmount: "1000",
+        currency: "USDC",
+        expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
+        marginDeposit: "100",
+        ...RECEIPT,
+        onChainHedgeType: "OPTION_CALL",
       });
 
-      const res = await request(app).post("/v1/fx/hedges/hedge-1/close");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.status).toBe("CLOSED");
-    });
-
-    it("should return 500 on error", async () => {
-      mockFXService.closePosition.mockRejectedValue(new Error("crash"));
-
-      const res = await request(app).post("/v1/fx/hedges/hedge-1/close");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(400);
+    expect(mockFXService.createHedge).not.toHaveBeenCalled();
   });
 
-  describe("GET /v1/fx/exposure", () => {
-    it("should return FX exposure", async () => {
-      mockFXService.getExposure.mockReturnValue({
-        totalExposure: "50000",
-        byPair: { "USDC/AED": "30000" },
-      });
-
-      const res = await request(app).get("/v1/fx/exposure");
-
-      expect(res.status).toBe(200);
-      expect(res.body.data.totalExposure).toBe("50000");
+  it("refuses a hedge with no receipt", async () => {
+    const response = await request(app).post("/v1/fx/hedges").send({
+      pair: "USDC/AED",
+      type: "FORWARD",
+      notionalAmount: "1000",
+      currency: "USDC",
+      expiryDate: new Date(Date.now() + 86_400_000).toISOString(),
+      marginDeposit: "100",
     });
 
-    it("should return 500 on error", async () => {
-      mockFXService.getExposure.mockImplementation(() => { throw new Error("crash"); });
-
-      const res = await request(app).get("/v1/fx/exposure");
-
-      expect(res.status).toBe(500);
-    });
+    expect(response.status).toBe(400);
+    expect(mockFXService.createHedge).not.toHaveBeenCalled();
   });
 
-  describe("GET /v1/fx/analytics", () => {
-    it("should return FX analytics", async () => {
-      mockFXService.getAnalytics.mockReturnValue({
-        totalVolume: "1000000",
-        activePairs: 5,
-      });
+  it("rejects unknown payload fields on the close endpoint", async () => {
+    const response = await request(app)
+      .post("/v1/fx/hedges/hedge-1/close")
+      .send({ ...CLOSE_RECEIPT, settlementRate: 3.7 });
 
-      const res = await request(app).get("/v1/fx/analytics");
+    expect(response.status).toBe(400);
+    expect(mockFXService.closePosition).not.toHaveBeenCalled();
+  });
 
-      expect(res.status).toBe(200);
-      expect(res.body.data.totalVolume).toBe("1000000");
+  it("rejects a close with no receipt", async () => {
+    const response = await request(app)
+      .post("/v1/fx/hedges/hedge-1/close")
+      .send({});
+
+    expect(response.status).toBe(400);
+    expect(mockFXService.closePosition).not.toHaveBeenCalled();
+  });
+
+  it("passes the close receipt and the WALLET signer to the service", async () => {
+    mockFXService.closePosition.mockResolvedValue({
+      id: "hedge-1",
+      status: "CLOSED",
+      onChainStatus: "LIQUIDATED",
     });
 
-    it("should return 500 on error", async () => {
-      mockFXService.getAnalytics.mockImplementation(() => { throw new Error("crash"); });
+    const response = await request(app)
+      .post("/v1/fx/hedges/hedge-1/close")
+      .send(CLOSE_RECEIPT);
 
-      const res = await request(app).get("/v1/fx/analytics");
+    expect(response.status).toBe(200);
+    expect(mockFXService.closePosition).toHaveBeenCalledWith(
+      "hedge-1",
+      SIGNER,
+      "business-1",
+      CLOSE_RECEIPT,
+      expect.anything(),
+    );
+    // The response must carry the true chain status even though the database
+    // enum flattened it to CLOSED.
+    expect(response.body.data.onChainStatus).toBe("LIQUIDATED");
+  });
 
-      expect(res.status).toBe(500);
-    });
+  it.each([
+    ["exposure", "getExposure", { totalExposure: "100" }],
+    ["analytics", "getAnalytics", { totalPositions: 1 }],
+  ])("returns tenant-scoped %s snapshots", async (path, method, result) => {
+    (mockFXService as any)[method].mockResolvedValue(result);
+
+    const response = await request(app).get(`/v1/fx/${path}`);
+
+    expect(response.status).toBe(200);
+    expect((mockFXService as any)[method]).toHaveBeenCalledWith("business-1");
+  });
+
+  it.each([
+    [
+      "create",
+      "post",
+      "/v1/fx/hedges",
+      {
+        pair: "USDC/AED",
+        type: "FORWARD",
+        notionalAmount: "1000",
+        currency: "USDC",
+        expiryDate: "2027-08-01T00:00:00.000Z",
+        marginDeposit: "100",
+        ...RECEIPT,
+      },
+    ],
+    ["history", "get", "/v1/fx/hedges", undefined],
+    ["close", "post", "/v1/fx/hedges/hedge-1/close", CLOSE_RECEIPT],
+    ["exposure", "get", "/v1/fx/exposure", undefined],
+    ["analytics", "get", "/v1/fx/analytics", undefined],
+  ])(
+    "rejects %s without tenant identity",
+    async (_name, method, path, body) => {
+      authenticated = false;
+      const operation = request(app)[method as "get" | "post"](path);
+      if (body) operation.send(body);
+
+      const response = await operation;
+
+      expect(response.status).toBe(401);
+      expect(response.body.error).toBe("UNAUTHORIZED");
+    },
+  );
+
+  it("maps unexpected service errors to a redacted response", async () => {
+    mockFXService.getRates.mockRejectedValue(new Error("oracle secret-value"));
+
+    const response = await request(app).get("/v1/fx/rates");
+
+    expect(response.status).toBe(500);
+    expect(response.body.error).toBe("INTERNAL_ERROR");
+    expect(JSON.stringify(response.body)).not.toContain("secret-value");
   });
 });

@@ -1,585 +1,479 @@
-import {
-  createMockPrisma,
-  resetAllMocks,
-  mockHistogram,
-  mockGauge,
-} from "../setup";
-import { ComplianceService, ComplianceError } from "../../services/compliance";
-import { AuditService } from "../../services/audit";
+import { ComplianceError, ComplianceService } from "../../services/compliance";
+import { createMockPrisma, resetAllMocks } from "../setup";
 
-let prisma: ReturnType<typeof createMockPrisma>;
-let auditService: AuditService;
-let complianceService: ComplianceService;
+const PAYMENT_ID = `0x${"a".repeat(64)}`;
+const TX_HASH = `0x${"b".repeat(64)}`;
 
-beforeEach(() => {
-  resetAllMocks();
-  prisma = createMockPrisma();
-  auditService = new AuditService(prisma);
-  jest.spyOn(auditService, "createAuditEntry").mockResolvedValue({} as any);
-  complianceService = new ComplianceService(prisma, auditService);
-});
+function payment(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "11111111-1111-4111-8111-111111111111",
+    paymentId: PAYMENT_ID,
+    businessId: "biz-1",
+    sender: "0x1111111111111111111111111111111111111111",
+    recipient: "0x2222222222222222222222222222222222222222",
+    amount: { toString: () => "100" },
+    currency: "USDC",
+    purposeHash: null,
+    status: "PENDING",
+    initiatedAt: new Date("2026-07-21T00:00:00.000Z"),
+    ...overrides,
+  };
+}
 
 describe("ComplianceService", () => {
-  // ─── submitForScreening ──────────────────────────────────────────────────
+  const originalUrl = process.env.COMPLIANCE_API_URL;
+  const originalKey = process.env.COMPLIANCE_API_KEY;
+  let prisma: ReturnType<typeof createMockPrisma>;
+  let audit: {
+    createAuditEntry: jest.Mock;
+    createAuditEntryInTransaction: jest.Mock;
+  };
+  let service: ComplianceService;
+
+  beforeEach(() => {
+    resetAllMocks();
+    delete process.env.COMPLIANCE_API_URL;
+    delete process.env.COMPLIANCE_API_KEY;
+    prisma = createMockPrisma();
+    prisma.$transaction.mockImplementation(
+      async (callback: (transaction: typeof prisma) => unknown) =>
+        callback(prisma),
+    );
+    prisma.complianceSubmissionIntent.upsert.mockImplementation(
+      ({ create }: { create: Record<string, unknown> }) => ({
+        ...create,
+        state: "PENDING",
+      }),
+    );
+    prisma.complianceSubmissionIntent.updateMany.mockResolvedValue({
+      count: 1,
+    });
+    audit = {
+      createAuditEntry: jest.fn().mockResolvedValue({}),
+      createAuditEntryInTransaction: jest.fn().mockResolvedValue({}),
+    };
+    service = new ComplianceService(
+      prisma,
+      audit as never,
+      {
+        verify: jest.fn(),
+      } as never,
+    );
+  });
+
+  afterAll(() => {
+    if (originalUrl === undefined) delete process.env.COMPLIANCE_API_URL;
+    else process.env.COMPLIANCE_API_URL = originalUrl;
+    if (originalKey === undefined) delete process.env.COMPLIANCE_API_KEY;
+    else process.env.COMPLIANCE_API_KEY = originalKey;
+  });
 
   describe("submitForScreening", () => {
-    it("should screen a PENDING payment and return result", async () => {
-      const payment = {
-        id: "pay-1",
-        paymentId: "0xabc",
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        amount: { toString: () => "500" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({
-        address: "0xteenode",
-      });
-      prisma.complianceScreening.create.mockResolvedValue({
-        id: "screen-1",
-      });
-      prisma.complianceScreening.count.mockResolvedValue(10);
-
-      const result = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      expect(result.paymentId).toBe("0xabc");
-      expect(result.screenedBy).toBeDefined();
-      expect(result.screeningDuration).toBeGreaterThanOrEqual(0);
-      expect(prisma.payment.update).toHaveBeenCalled();
-      expect(prisma.complianceScreening.create).toHaveBeenCalled();
-    });
-
-    it("should throw PAYMENT_NOT_FOUND when payment does not exist", async () => {
-      prisma.payment.findUnique.mockResolvedValue(null);
+    it("tenant-scopes payment lookup and conceals missing payments", async () => {
+      prisma.payment.findFirst.mockResolvedValue(null);
 
       await expect(
-        complianceService.submitForScreening({
-          paymentId: "nonexistent",
-          priority: "normal",
-        }),
-      ).rejects.toMatchObject({
-        code: "PAYMENT_NOT_FOUND",
-        statusCode: 404,
-      });
-    });
-
-    it("should throw INVALID_STATE when payment is not PENDING", async () => {
-      prisma.payment.findUnique.mockResolvedValue({
-        id: "1",
-        status: "SETTLED",
-      });
-
-      await expect(
-        complianceService.submitForScreening({
-          paymentId: "1",
-          priority: "normal",
-        }),
-      ).rejects.toMatchObject({
-        code: "INVALID_STATE",
-        statusCode: 409,
-      });
-    });
-
-    it("should use fallback TEE node address when no active node exists", async () => {
-      const payment = {
-        id: "pay-1",
-        paymentId: "0xabc",
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        amount: { toString: () => "100" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue(null);
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.count.mockResolvedValue(0);
-
-      const result = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      expect(result.screenedBy).toBe(
-        "0x0000000000000000000000000000000000000001",
-      );
-    });
-  });
-
-  // ─── getScreeningResult ────────────────────────────────────────────────────
-
-  describe("getScreeningResult", () => {
-    it("should return screenings for a payment", async () => {
-      const screenings = [
-        { id: "s-1", paymentId: "0xabc", status: "PASSED" },
-      ];
-      prisma.complianceScreening.findMany.mockResolvedValue(screenings);
-
-      const result = await complianceService.getScreeningResult("0xabc");
-      expect(result).toEqual(screenings);
-    });
-
-    it("should throw SCREENING_NOT_FOUND when no screenings exist", async () => {
-      prisma.complianceScreening.findMany.mockResolvedValue([]);
-
-      await expect(
-        complianceService.getScreeningResult("0xabc"),
-      ).rejects.toMatchObject({
-        code: "SCREENING_NOT_FOUND",
-        statusCode: 404,
-      });
-    });
-  });
-
-  // ─── getComplianceMetrics ──────────────────────────────────────────────────
-
-  describe("getComplianceMetrics", () => {
-    it("should aggregate compliance metrics", async () => {
-      prisma.complianceScreening.count
-        .mockResolvedValueOnce(100) // total
-        .mockResolvedValueOnce(90) // passed
-        .mockResolvedValueOnce(8) // failed
-        .mockResolvedValueOnce(2); // under_review
-      prisma.complianceScreening.aggregate
-        .mockResolvedValueOnce({ _avg: { amlRiskScore: 25 } })
-        .mockResolvedValueOnce({ _avg: { screeningDuration: 150 } });
-      prisma.payment.count.mockResolvedValue(5);
-
-      const metrics = await complianceService.getComplianceMetrics();
-
-      expect(metrics.totalScreenings).toBe(100);
-      expect(metrics.passedScreenings).toBe(90);
-      expect(metrics.failedScreenings).toBe(8);
-      expect(metrics.passRate).toBeCloseTo(0.9);
-      expect(metrics.averageRiskScore).toBe(25);
-      expect(metrics.flaggedCount).toBe(5);
-    });
-
-    it("should handle zero screenings", async () => {
-      prisma.complianceScreening.count.mockResolvedValue(0);
-      prisma.complianceScreening.aggregate.mockResolvedValue({
-        _avg: { amlRiskScore: null, screeningDuration: null },
-      });
-      prisma.payment.count.mockResolvedValue(0);
-
-      const metrics = await complianceService.getComplianceMetrics();
-
-      expect(metrics.passRate).toBe(0);
-      expect(metrics.averageRiskScore).toBe(0);
-    });
-  });
-
-  // ─── submitForScreening (branch coverage) ────────────────────────────────
-
-  describe("submitForScreening (deterministic screening)", () => {
-    it("should produce deterministic screening results based on payment data", async () => {
-      const payment = {
-        id: "pay-1",
-        paymentId: "0xabc",
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        amount: { toString: () => "500" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({ address: "0xteenode" });
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.count.mockResolvedValue(10);
-
-      const result1 = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      // Reset mocks for second call
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({ address: "0xteenode" });
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-2" });
-      prisma.complianceScreening.count.mockResolvedValue(11);
-
-      const result2 = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      // Same payment data should produce same risk score (deterministic)
-      expect(result1.amlRiskScore).toBe(result2.amlRiskScore);
-      expect(result1.status).toBe(result2.status);
-    });
-
-    it("should screen with valid result status", async () => {
-      const payment = {
-        id: "pay-1",
-        paymentId: "0xabc",
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        amount: { toString: () => "500" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({ address: "0xteenode" });
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.count.mockResolvedValue(10);
-
-      const result = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      expect(["PASSED", "FAILED", "UNDER_REVIEW"]).toContain(result.status);
-      expect(result.amlRiskScore).toBeGreaterThanOrEqual(0);
-      expect(result.amlRiskScore).toBeLessThan(100);
-    });
-
-    it("should not use Math.random for risk scoring (NP-10)", async () => {
-      const randomSpy = jest.spyOn(Math, "random");
-      const payment = {
-        id: "pay-1",
-        paymentId: "0xabc",
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        amount: { toString: () => "500" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({ address: "0xteenode" });
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.count.mockResolvedValue(10);
-
-      await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      expect(randomSpy).not.toHaveBeenCalled();
-      randomSpy.mockRestore();
-    });
-  });
-
-  // ─── updateSanctionsList ───────────────────────────────────────────────────
-
-  describe("updateSanctionsList", () => {
-    it("should return started status", async () => {
-      jest.useFakeTimers();
-      const result = await complianceService.updateSanctionsList();
-      expect(result.status).toBe("started");
-      expect(result.message).toContain("initiated");
-      expect(auditService.createAuditEntry).toHaveBeenCalledWith(
-        expect.objectContaining({ eventType: "SANCTIONS_UPDATED" }),
-      );
-      // Clean up: advance past setTimeout to reset module-level sanctionsUpdating flag
-      jest.advanceTimersByTime(2100);
-      jest.useRealTimers();
-    });
-
-    it("should return in_progress when already updating", async () => {
-      jest.useFakeTimers();
-      await complianceService.updateSanctionsList();
-      const result2 = await complianceService.updateSanctionsList();
-      expect(result2.status).toBe("in_progress");
-      // Clean up: advance past setTimeout to reset module-level sanctionsUpdating flag
-      jest.advanceTimersByTime(2100);
-      jest.useRealTimers();
-    });
-  });
-
-  // ─── getSanctionsStatus (branch coverage) ─────────────────────────────────
-
-  describe("getSanctionsStatus (branch coverage)", () => {
-    it("should return 'updating' when sanctions update is in progress", async () => {
-      jest.useFakeTimers();
-      await complianceService.updateSanctionsList();
-      // The sanctionsUpdating flag is now true
-      const status = complianceService.getSanctionsStatus();
-      expect(status.status).toBe("updating");
-      // Clean up: advance past setTimeout to reset module-level sanctionsUpdating flag
-      jest.advanceTimersByTime(2100);
-      jest.useRealTimers();
-    });
-
-    it("should return 'fresh' after sanctions update completes", async () => {
-      jest.useFakeTimers();
-      await complianceService.updateSanctionsList();
-      // Fast-forward 2 seconds to complete the setTimeout
-      jest.advanceTimersByTime(2100);
-      const status = complianceService.getSanctionsStatus();
-      expect(status.status).toBe("fresh");
-      jest.useRealTimers();
-    });
-  });
-
-  // ─── getSanctionsStatus ────────────────────────────────────────────────────
-
-  describe("getSanctionsStatus", () => {
-    it("should return status with lists", () => {
-      const status = complianceService.getSanctionsStatus();
-      expect(status.listsLoaded).toContain("OFAC-SDN");
-      expect(status.listsLoaded).toContain("EU-CONSOLIDATED");
-      expect(status.totalEntries).toBe(12847);
-      expect(["fresh", "stale", "updating"]).toContain(status.status);
-    });
-  });
-
-  // ─── getFlaggedPayments ────────────────────────────────────────────────────
-
-  describe("getFlaggedPayments", () => {
-    it("should return paginated flagged payments", async () => {
-      prisma.payment.findMany.mockResolvedValue([
-        { id: "1", status: "FLAGGED" },
-      ]);
-      prisma.payment.count.mockResolvedValue(1);
-
-      const result = await complianceService.getFlaggedPayments(1, 20);
-
-      expect(result.data).toHaveLength(1);
-      expect(result.pagination.total).toBe(1);
-      expect(mockGauge.set).toHaveBeenCalledWith(1);
-    });
-
-    it("should use default pagination values", async () => {
-      prisma.payment.findMany.mockResolvedValue([]);
-      prisma.payment.count.mockResolvedValue(0);
-
-      await complianceService.getFlaggedPayments();
-
-      expect(prisma.payment.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({
-          skip: 0,
-          take: 20,
-        }),
-      );
-    });
-  });
-
-  // ─── reviewFlaggedPayment ──────────────────────────────────────────────────
-
-  describe("reviewFlaggedPayment", () => {
-    const flaggedPayment = {
-      id: "pay-1",
-      paymentId: "0xabc",
-      status: "FLAGGED",
-    };
-
-    it("should approve a flagged payment", async () => {
-      prisma.payment.findUnique.mockResolvedValue(flaggedPayment);
-      prisma.payment.update.mockResolvedValue({
-        ...flaggedPayment,
-        status: "APPROVED",
-      });
-      prisma.complianceScreening.findFirst.mockResolvedValue({
-        id: "s-1",
-      });
-      prisma.complianceScreening.update.mockResolvedValue({});
-
-      const result = await complianceService.reviewFlaggedPayment(
-        "pay-1",
-        "approve",
-        "Cleared after investigation",
-        "0xreviewer",
-      );
-
-      expect(result.decision).toBe("approve");
-      expect(result.newStatus).toBe("APPROVED");
-      expect(result.reviewedBy).toBe("0xreviewer");
-    });
-
-    it("should reject a flagged payment", async () => {
-      prisma.payment.findUnique.mockResolvedValue(flaggedPayment);
-      prisma.payment.update.mockResolvedValue({
-        ...flaggedPayment,
-        status: "REJECTED",
-      });
-      prisma.complianceScreening.findFirst.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.update.mockResolvedValue({});
-
-      const result = await complianceService.reviewFlaggedPayment(
-        "pay-1",
-        "reject",
-        "Sanctions match confirmed",
-        "0xreviewer",
-      );
-
-      expect(result.newStatus).toBe("REJECTED");
-    });
-
-    it("should escalate a flagged payment", async () => {
-      prisma.payment.findUnique.mockResolvedValue(flaggedPayment);
-      prisma.payment.update.mockResolvedValue(flaggedPayment);
-      prisma.complianceScreening.findFirst.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.update.mockResolvedValue({});
-
-      const result = await complianceService.reviewFlaggedPayment(
-        "pay-1",
-        "escalate",
-        "Needs senior review",
-        "0xreviewer",
-      );
-
-      expect(result.newStatus).toBe("FLAGGED");
-    });
-
-    it("should throw PAYMENT_NOT_FOUND when payment does not exist", async () => {
-      prisma.payment.findUnique.mockResolvedValue(null);
-
-      await expect(
-        complianceService.reviewFlaggedPayment(
-          "nonexistent",
-          "approve",
-          "reason",
-          "0xreviewer",
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "normal",
+          },
+          "biz-1",
         ),
       ).rejects.toMatchObject({ code: "PAYMENT_NOT_FOUND", statusCode: 404 });
+      expect(prisma.payment.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: "11111111-1111-4111-8111-111111111111",
+          businessId: "biz-1",
+        },
+      });
     });
 
-    it("should throw INVALID_STATE when payment is not FLAGGED", async () => {
-      prisma.payment.findUnique.mockResolvedValue({
-        id: "1",
-        status: "PENDING",
-      });
+    it("rejects a non-pending payment without verified screening evidence", async () => {
+      prisma.payment.findFirst.mockResolvedValue(
+        payment({ status: "SETTLED" }),
+      );
+      prisma.complianceScreening.findFirst.mockResolvedValue(null);
+      prisma.complianceSubmissionIntent.findUnique.mockResolvedValue(null);
 
       await expect(
-        complianceService.reviewFlaggedPayment(
-          "1",
-          "approve",
-          "reason",
-          "0xreviewer",
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "high",
+          },
+          "biz-1",
         ),
       ).rejects.toMatchObject({ code: "INVALID_STATE", statusCode: 409 });
     });
 
-    it("should handle missing screening gracefully", async () => {
-      prisma.payment.findUnique.mockResolvedValue(flaggedPayment);
-      prisma.payment.update.mockResolvedValue({
-        ...flaggedPayment,
-        status: "APPROVED",
-      });
-      prisma.complianceScreening.findFirst.mockResolvedValue(null);
-
-      const result = await complianceService.reviewFlaggedPayment(
-        "pay-1",
-        "approve",
-        "Cleared",
-        "0xreviewer",
+    it("replays only an existing screening backed by a submission transaction", async () => {
+      prisma.payment.findFirst.mockResolvedValue(
+        payment({ status: "APPROVED" }),
       );
+      prisma.complianceScreening.findFirst.mockResolvedValue({
+        id: "screen-1",
+        sanctionsClear: true,
+        amlRiskScore: 10,
+        travelRuleCompliant: true,
+        status: "PASSED",
+        flagReason: null,
+        screenedBy: "0x3333333333333333333333333333333333333333",
+        screeningDuration: 25,
+        submissionTxHash: TX_HASH,
+        submissionBlockNumber: 90n,
+      });
+      prisma.complianceSubmissionIntent.findUnique.mockResolvedValue({
+        paymentId: "11111111-1111-4111-8111-111111111111",
+        requestId: "11111111-1111-4111-8111-111111111111",
+        state: "COMPLETED",
+        submissionTxHash: TX_HASH,
+        confirmations: 4,
+      });
 
-      expect(result.decision).toBe("approve");
-      expect(prisma.complianceScreening.update).not.toHaveBeenCalled();
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "normal",
+          },
+          "biz-1",
+        ),
+      ).resolves.toMatchObject({
+        paymentId: PAYMENT_ID,
+        status: "PASSED",
+        submissionTxHash: TX_HASH,
+        submissionBlockNumber: "90",
+        confirmations: 4,
+      });
+
+      prisma.complianceSubmissionIntent.findUnique.mockResolvedValue({
+        paymentId: "11111111-1111-4111-8111-111111111111",
+        requestId: "11111111-1111-4111-8111-111111111111",
+        state: "COMPLETED",
+        submissionTxHash: `0x${"c".repeat(64)}`,
+        confirmations: 7,
+      });
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "normal",
+          },
+          "biz-1",
+        ),
+      ).resolves.toMatchObject({ confirmations: 0 });
+
+      prisma.complianceSubmissionIntent.findUnique.mockResolvedValue({
+        paymentId: "11111111-1111-4111-8111-111111111111",
+        requestId: "11111111-1111-4111-8111-111111111111",
+        state: "COMPLETED",
+        submissionTxHash: TX_HASH,
+        confirmations: null,
+      });
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "normal",
+          },
+          "biz-1",
+        ),
+      ).resolves.toMatchObject({ confirmations: 0 });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("fails closed when the audited submission service is not configured", async () => {
+      prisma.payment.findFirst.mockResolvedValue(payment());
+
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "urgent",
+          },
+          "biz-1",
+        ),
+      ).rejects.toMatchObject({
+        code: "COMPLIANCE_SUBMISSION_NOT_CONFIGURED",
+        statusCode: 501,
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a durable intent whose request identity does not match the payment", async () => {
+      process.env.COMPLIANCE_API_URL = "https://compliance.aethelred.network";
+      process.env.COMPLIANCE_API_KEY = "k".repeat(32);
+      prisma.payment.findFirst.mockResolvedValue(payment());
+      prisma.complianceSubmissionIntent.upsert.mockResolvedValue({
+        paymentId: "11111111-1111-4111-8111-111111111111",
+        requestId: "22222222-2222-4222-8222-222222222222",
+        state: "PENDING",
+      });
+
+      await expect(
+        service.submitForScreening(
+          {
+            paymentId: "11111111-1111-4111-8111-111111111111",
+            priority: "urgent",
+          },
+          "biz-1",
+        ),
+      ).rejects.toMatchObject({
+        code: "COMPLIANCE_INTENT_CORRUPT",
+        statusCode: 503,
+      });
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 
-  // ─── NP-10: Compliance service failure test ─────────────────────────────────
+  it("returns screening history only through a tenant relation", async () => {
+    prisma.complianceScreening.findMany.mockResolvedValue([{ id: "screen-1" }]);
 
-  describe("Compliance service failure handling (NP-10)", () => {
-    it("should reject payment when compliance service is unavailable (fail-closed)", async () => {
-      // Save original env
-      const origUrl = process.env.COMPLIANCE_SERVICE_URL;
-      const origNodeEnv = process.env.NODE_ENV;
-
-      // Set COMPLIANCE_SERVICE_URL to a non-existent service
-      process.env.COMPLIANCE_SERVICE_URL = "http://localhost:99999";
-      process.env.NODE_ENV = "production";
-
-      // Re-create service to pick up env change (the module already read the env)
-      // We need to test the callComplianceService path via accessing private method
-      const payment = {
-        id: "pay-1",
-        paymentId: "0xabc",
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        amount: { toString: () => "500" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({ address: "0xteenode" });
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.count.mockResolvedValue(10);
-
-      // In test mode the mock path is used, but we verify the design principle:
-      // The mock screening is deterministic and never uses Math.random()
-      const result = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      // Should have a valid (non-random) result
-      expect(result.amlRiskScore).toBeGreaterThanOrEqual(0);
-      expect(typeof result.sanctionsClear).toBe("boolean");
-
-      // Restore env
-      process.env.COMPLIANCE_SERVICE_URL = origUrl;
-      process.env.NODE_ENV = origNodeEnv;
-    });
-
-    it("should use deterministic risk scoring instead of Math.random()", async () => {
-      const payment = {
-        id: "pay-1",
-        paymentId: "0xabc",
-        sender: "0x1234567890abcdef1234567890abcdef12345678",
-        recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-        amount: { toString: () => "500" },
-        currency: "USDC",
-        status: "PENDING",
-      };
-
-      // Two screenings with identical payment data should produce identical risk scores
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({ address: "0xteenode" });
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-1" });
-      prisma.complianceScreening.count.mockResolvedValue(10);
-
-      const result1 = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      prisma.payment.findUnique.mockResolvedValue(payment);
-      prisma.payment.update.mockResolvedValue(payment);
-      prisma.tEENode.findFirst.mockResolvedValue({ address: "0xteenode" });
-      prisma.complianceScreening.create.mockResolvedValue({ id: "s-2" });
-      prisma.complianceScreening.count.mockResolvedValue(11);
-
-      const result2 = await complianceService.submitForScreening({
-        paymentId: "pay-1",
-        priority: "normal",
-      });
-
-      expect(result1.amlRiskScore).toBe(result2.amlRiskScore);
-      expect(result1.sanctionsClear).toBe(result2.sanctionsClear);
+    await expect(
+      service.getScreeningResult(PAYMENT_ID, "biz-1"),
+    ).resolves.toEqual([{ id: "screen-1" }]);
+    expect(prisma.complianceScreening.findMany).toHaveBeenCalledWith({
+      where: { paymentId: PAYMENT_ID, payment: { businessId: "biz-1" } },
+      orderBy: { createdAt: "desc" },
     });
   });
 
-  // ─── ComplianceError ───────────────────────────────────────────────────────
-
-  describe("ComplianceError", () => {
-    it("should create error with correct properties", () => {
-      const err = new ComplianceError("TEST", "message", 422);
-      expect(err.code).toBe("TEST");
-      expect(err.message).toBe("message");
-      expect(err.statusCode).toBe(422);
-      expect(err.name).toBe("ComplianceError");
-      expect(err).toBeInstanceOf(Error);
+  it("returns 404 when a tenant has no screening history", async () => {
+    prisma.complianceScreening.findMany.mockResolvedValue([]);
+    await expect(
+      service.getScreeningResult(PAYMENT_ID, "biz-1"),
+    ).rejects.toMatchObject({
+      code: "SCREENING_NOT_FOUND",
+      statusCode: 404,
     });
+  });
 
-    it("should default statusCode to 400", () => {
-      const err = new ComplianceError("CODE", "msg");
-      expect(err.statusCode).toBe(400);
+  it("defaults screening history to the unauthenticated tenant scope", async () => {
+    prisma.complianceScreening.findMany.mockResolvedValue([{ id: "screen-1" }]);
+
+    await service.getScreeningResult(PAYMENT_ID);
+
+    expect(prisma.complianceScreening.findMany).toHaveBeenCalledWith({
+      where: {
+        paymentId: PAYMENT_ID,
+        payment: { businessId: "__unauthenticated__" },
+      },
+      orderBy: { createdAt: "desc" },
     });
+  });
+
+  it("computes tenant-scoped compliance metrics", async () => {
+    prisma.complianceScreening.count
+      .mockResolvedValueOnce(10)
+      .mockResolvedValueOnce(8)
+      .mockResolvedValueOnce(1)
+      .mockResolvedValueOnce(1);
+    prisma.complianceScreening.aggregate
+      .mockResolvedValueOnce({ _avg: { amlRiskScore: 17 } })
+      .mockResolvedValueOnce({ _avg: { screeningDuration: 42 } });
+    prisma.payment.count.mockResolvedValue(2);
+
+    await expect(service.getComplianceMetrics("biz-1")).resolves.toEqual({
+      totalScreenings: 10,
+      passedScreenings: 8,
+      failedScreenings: 1,
+      averageRiskScore: 17,
+      averageScreeningDuration: 42,
+      passRate: 0.8,
+      flaggedCount: 2,
+      underReviewCount: 1,
+    });
+  });
+
+  it("returns zero-safe metrics when no screenings have been recorded", async () => {
+    prisma.complianceScreening.count.mockResolvedValue(0);
+    prisma.complianceScreening.aggregate
+      .mockResolvedValueOnce({ _avg: { amlRiskScore: null } })
+      .mockResolvedValueOnce({ _avg: { screeningDuration: null } });
+    prisma.payment.count.mockResolvedValue(0);
+
+    await expect(service.getComplianceMetrics()).resolves.toEqual({
+      totalScreenings: 0,
+      passedScreenings: 0,
+      failedScreenings: 0,
+      averageRiskScore: 0,
+      averageScreeningDuration: 0,
+      passRate: 0,
+      flaggedCount: 0,
+      underReviewCount: 0,
+    });
+  });
+
+  it("tenant-scopes and paginates the flagged queue", async () => {
+    prisma.payment.findMany.mockResolvedValue([payment({ status: "FLAGGED" })]);
+    prisma.payment.count.mockResolvedValue(21);
+
+    const result = await service.getFlaggedPayments("biz-1", 2, 20);
+
+    expect(result.pagination).toEqual({
+      page: 2,
+      limit: 20,
+      total: 21,
+      totalPages: 2,
+    });
+    expect(prisma.payment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { businessId: "biz-1", status: "FLAGGED" },
+        skip: 20,
+        take: 20,
+      }),
+    );
+  });
+
+  it("supports the legacy numeric flagged-queue pagination without granting a tenant", async () => {
+    prisma.payment.findMany.mockResolvedValue([]);
+    prisma.payment.count.mockResolvedValue(0);
+    const result = await service.getFlaggedPayments(2, 5);
+    expect(result.pagination).toEqual({
+      page: 2,
+      limit: 5,
+      total: 0,
+      totalPages: 0,
+    });
+    expect(prisma.payment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { businessId: "__unauthenticated__", status: "FLAGGED" },
+        skip: 5,
+        take: 5,
+      }),
+    );
+  });
+
+  it("uses safe flagged-queue defaults when pagination and tenant are omitted", async () => {
+    prisma.payment.findMany.mockResolvedValue([]);
+    prisma.payment.count.mockResolvedValue(0);
+
+    await expect(service.getFlaggedPayments()).resolves.toMatchObject({
+      pagination: { page: 1, limit: 20, total: 0, totalPages: 0 },
+    });
+    expect(prisma.payment.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { businessId: "__unauthenticated__", status: "FLAGGED" },
+        skip: 0,
+        take: 20,
+      }),
+    );
+  });
+
+  it("rejects review when the tenant payment is not flagged", async () => {
+    prisma.payment.findFirst.mockResolvedValue(payment({ status: "PENDING" }));
+    await expect(
+      service.reviewFlaggedPayment(
+        "11111111-1111-4111-8111-111111111111",
+        "escalate",
+        "reason",
+        "reviewer",
+        "biz-1",
+      ),
+    ).rejects.toMatchObject({ code: "INVALID_STATE", statusCode: 409 });
+  });
+
+  it("conceals a missing payment from the review workflow", async () => {
+    prisma.payment.findFirst.mockResolvedValue(null);
+    await expect(
+      service.reviewFlaggedPayment(
+        "11111111-1111-4111-8111-111111111111",
+        "escalate",
+        "reason",
+        "reviewer",
+        "biz-1",
+      ),
+    ).rejects.toMatchObject({ code: "PAYMENT_NOT_FOUND", statusCode: 404 });
+  });
+
+  it("requires a verified screening before escalating a flagged payment", async () => {
+    prisma.payment.findFirst.mockResolvedValue(payment({ status: "FLAGGED" }));
+    prisma.complianceScreening.findFirst.mockResolvedValue(null);
+    await expect(
+      service.reviewFlaggedPayment(
+        "11111111-1111-4111-8111-111111111111",
+        "escalate",
+        "reason",
+        "reviewer",
+        "biz-1",
+      ),
+    ).rejects.toMatchObject({ code: "SCREENING_NOT_FOUND", statusCode: 404 });
+  });
+
+  it("persists a tenant escalation and its audit atomically", async () => {
+    prisma.payment.findFirst.mockResolvedValue(payment({ status: "FLAGGED" }));
+    prisma.complianceScreening.findFirst.mockResolvedValue({ id: "screen-1" });
+    prisma.complianceScreening.update.mockResolvedValue({ id: "screen-1" });
+
+    const result = await service.reviewFlaggedPayment(
+      "11111111-1111-4111-8111-111111111111",
+      "escalate",
+      "manual resolution needed",
+      "reviewer",
+      "biz-1",
+    );
+
+    expect(prisma.complianceScreening.update).toHaveBeenCalledWith({
+      where: { id: "screen-1" },
+      data: { status: "ESCALATED", flagReason: "manual resolution needed" },
+    });
+    expect(audit.createAuditEntryInTransaction).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({
+        businessId: "biz-1",
+        eventType: "COMPLIANCE_ESCALATED",
+      }),
+    );
+    expect(result).toMatchObject({
+      decision: "escalate",
+      newStatus: "FLAGGED",
+    });
+  });
+
+  it("defaults flagged review to the unauthenticated tenant scope", async () => {
+    prisma.payment.findFirst.mockResolvedValue(payment({ status: "FLAGGED" }));
+    prisma.complianceScreening.findFirst.mockResolvedValue({ id: "screen-1" });
+    prisma.complianceScreening.update.mockResolvedValue({ id: "screen-1" });
+
+    await service.reviewFlaggedPayment(
+      "11111111-1111-4111-8111-111111111111",
+      "escalate",
+      "manual resolution needed",
+      "reviewer",
+    );
+
+    expect(prisma.payment.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: "11111111-1111-4111-8111-111111111111",
+        businessId: "__unauthenticated__",
+      },
+    });
+    expect(audit.createAuditEntryInTransaction).toHaveBeenCalledWith(
+      prisma,
+      expect.objectContaining({ businessId: "__unauthenticated__" }),
+    );
+  });
+
+  it("fails sanctions health closed when the external service is not configured", async () => {
+    await expect(service.getSanctionsStatus()).rejects.toMatchObject({
+      code: "SANCTIONS_SERVICE_UNAVAILABLE",
+      statusCode: 503,
+    });
+  });
+
+  it("treats an invalid external compliance origin as unconfigured", async () => {
+    process.env.COMPLIANCE_API_URL = "http://localhost:3000";
+    await expect(service.getSanctionsStatus()).rejects.toMatchObject({
+      code: "SANCTIONS_SERVICE_UNAVAILABLE",
+      statusCode: 503,
+    });
+  });
+
+  it("fails sanctions refresh closed without both URL and credential", async () => {
+    await expect(service.updateSanctionsList("admin")).rejects.toBeInstanceOf(
+      ComplianceError,
+    );
+    expect(audit.createAuditEntry).not.toHaveBeenCalled();
   });
 });

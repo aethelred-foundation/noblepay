@@ -1,11 +1,14 @@
-import { PrismaClient, Prisma } from "@prisma/client";
-import { generateOpaqueId } from "../lib/identifiers";
-import { logger, maskIdentifier } from "../lib/logger";
+import { Prisma, PrismaClient, type PaymentStream } from "@prisma/client";
 import { AuditService } from "./audit";
+import {
+  verifyStreamCreation,
+  verifyStreamTransition,
+  verifyWithdrawal,
+  type StreamEventKind,
+} from "./streaming-execution";
+import type { NoblePayChainConfiguration } from "../lib/production-config";
 
-// ─── Types ──────────────────────────────────────────────────────────────────
-
-export type StreamStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED" | "PENDING";
+export type StreamStatus = "ACTIVE" | "PAUSED" | "COMPLETED" | "CANCELLED";
 
 export interface CreateStreamInput {
   sender: string;
@@ -14,7 +17,7 @@ export interface CreateStreamInput {
   currency: string;
   startTime?: string;
   endTime: string;
-  cliffDuration?: number; // seconds
+  cliffDuration?: number;
   ratePerSecond?: string;
   autoCompound?: boolean;
   metadata?: Record<string, unknown>;
@@ -34,6 +37,8 @@ export interface StreamBalance {
   percentComplete: number;
   elapsedSeconds: number;
   totalSeconds: number;
+  calculatedAt: Date;
+  dataSource: "DATABASE_TERMS";
 }
 
 export interface StreamRecord {
@@ -51,10 +56,11 @@ export interface StreamRecord {
   endTime: Date;
   cliffEnd: Date | null;
   status: StreamStatus;
-  autoCompound: boolean;
-  lastWithdrawAt: Date | null;
+  autoCompound: null;
+  lastWithdrawAt: null;
   createdAt: Date;
-  metadata: Record<string, unknown>;
+  metadata: Record<string, never>;
+  dataSource: "DATABASE_TERMS";
 }
 
 export interface StreamAnalytics {
@@ -65,406 +71,544 @@ export interface StreamAnalytics {
   weeklyOutflow: string;
   monthlyOutflow: string;
   byCurrency: Record<string, { count: number; volume: string }>;
-  upcomingMilestones: Array<{ streamId: string; event: string; date: Date }>;
+  upcomingMilestones: Array<{
+    streamId: string;
+    event: string;
+    date: Date;
+  }>;
+  calculatedAt: Date;
+  dataSource: "DATABASE_TERMS";
 }
 
-const MAX_BATCH_STREAMS = 100;
+interface StreamFilters {
+  sender?: string;
+  recipient?: string;
+  status?: StreamStatus;
+  currency?: string;
+  businessId: string;
+  page?: number;
+  limit?: number;
+}
 
-// ─── Service ────────────────────────────────────────────────────────────────
+function effectiveTime(stream: PaymentStream, now: Date): Date {
+  if (stream.status === "PAUSED" && stream.pausedAt) return stream.pausedAt;
+  if (stream.status === "CANCELLED" && stream.pausedAt) return stream.pausedAt;
+  return now < stream.endTime ? now : stream.endTime;
+}
 
+function calculateBalance(
+  stream: PaymentStream,
+  now = new Date(),
+): StreamBalance {
+  // Pause time is excluded from BOTH figures, exactly as the contract does it
+  // (StreamingPayments._effectiveElapsed and the totalDuration it compares
+  // against). Subtracting it from only one — or from neither, as this did
+  // before — makes the API report a stream as further along than the contract
+  // will pay out. See docs/audit/NP-STREAM-01.
+  const pausedSeconds = Math.max(0, stream.totalPausedSeconds ?? 0);
+  const totalSeconds = Math.max(
+    0,
+    Math.floor(
+      (stream.endTime.getTime() - stream.startTime.getTime()) / 1000,
+    ) - pausedSeconds,
+  );
+  const effective = effectiveTime(stream, now);
+  const rawElapsed = Math.floor(
+    (effective.getTime() - stream.startTime.getTime()) / 1000,
+  );
+  const elapsedSeconds = Math.max(
+    0,
+    Math.min(totalSeconds, rawElapsed - pausedSeconds),
+  );
+  const streamed = Prisma.Decimal.min(
+    stream.totalAmount,
+    stream.ratePerSecond.mul(elapsedSeconds),
+  );
+  const remaining = Prisma.Decimal.max(
+    new Prisma.Decimal(0),
+    stream.totalAmount.minus(streamed),
+  );
+  const cliffActive = Boolean(stream.cliffEnd && now < stream.cliffEnd);
+  const withdrawable = cliffActive
+    ? new Prisma.Decimal(0)
+    : Prisma.Decimal.max(
+        new Prisma.Decimal(0),
+        streamed.minus(stream.withdrawn),
+      );
+
+  return {
+    streamId: stream.id,
+    withdrawable: withdrawable.toString(),
+    streamed: streamed.toString(),
+    remaining: remaining.toString(),
+    percentComplete:
+      totalSeconds > 0
+        ? Math.min(100, (elapsedSeconds / totalSeconds) * 100)
+        : 0,
+    elapsedSeconds,
+    totalSeconds,
+    calculatedAt: now,
+    dataSource: "DATABASE_TERMS",
+  };
+}
+
+function streamRecord(
+  stream: PaymentStream,
+  businessId: string,
+  now = new Date(),
+): StreamRecord {
+  const balance = calculateBalance(stream, now);
+  return {
+    id: stream.id,
+    streamId: stream.id,
+    businessId,
+    sender: stream.sender,
+    recipient: stream.recipient,
+    totalAmount: stream.totalAmount.toString(),
+    streamedAmount: balance.streamed,
+    withdrawnAmount: stream.withdrawn.toString(),
+    currency: stream.currency,
+    ratePerSecond: stream.ratePerSecond.toString(),
+    startTime: stream.startTime,
+    endTime: stream.endTime,
+    cliffEnd: stream.cliffEnd,
+    status: stream.status,
+    autoCompound: null,
+    lastWithdrawAt: null,
+    createdAt: stream.createdAt,
+    metadata: {},
+    dataSource: "DATABASE_TERMS",
+  };
+}
+
+/**
+ * Durable, tenant-scoped stream reads. Contract-changing operations are
+ * intentionally disabled until a transaction receipt verifier is available.
+ */
 export class StreamingService {
-  private streams: Map<string, StreamRecord> = new Map();
-
   constructor(
-    private prisma: PrismaClient,
-    private auditService: AuditService,
+    private readonly prisma: PrismaClient,
+    private readonly auditService: AuditService,
   ) {}
 
   /**
-   * Create a new payment stream with per-second settlement.
+   * Record a stream that has already been created on chain.
+   *
+   * The rate, amounts and timestamps come from the receipt rather than the
+   * request, because they are what the contract will actually pay against. A
+   * record built from the request could differ from the escrow it describes.
    */
   async createStream(
     input: CreateStreamInput,
     businessId: string,
+    creation: { txHash: string; onChainStreamId: string },
+    config: NoblePayChainConfiguration,
   ): Promise<StreamRecord> {
-    const streamId = generateOpaqueId("stream");
+    const wallet = await this.businessWallet(businessId);
 
-    const startTime = input.startTime ? new Date(input.startTime) : new Date();
-    const endTime = new Date(input.endTime);
-    const totalSeconds = Math.floor((endTime.getTime() - startTime.getTime()) / 1000);
-
-    if (totalSeconds <= 0) {
-      throw new StreamError("INVALID_DURATION", "End time must be after start time");
-    }
-
-    const totalAmount = parseFloat(input.totalAmount);
-    const ratePerSecond = input.ratePerSecond
-      ? input.ratePerSecond
-      : (totalAmount / totalSeconds).toFixed(18);
-
-    const cliffEnd = input.cliffDuration
-      ? new Date(startTime.getTime() + input.cliffDuration * 1000)
-      : null;
-
-    const stream: StreamRecord = {
-      id: streamId,
-      streamId,
-      businessId,
-      sender: input.sender,
-      recipient: input.recipient,
-      totalAmount: input.totalAmount,
-      streamedAmount: "0",
-      withdrawnAmount: "0",
-      currency: input.currency,
-      ratePerSecond,
-      startTime,
-      endTime,
-      cliffEnd,
-      status: "ACTIVE",
-      autoCompound: input.autoCompound || false,
-      lastWithdrawAt: null,
-      createdAt: new Date(),
-      metadata: input.metadata || {},
-    };
-
-    this.streams.set(streamId, stream);
-
-    await this.auditService.createAuditEntry({
-      eventType: "SYSTEM_EVENT",
-      actor: input.sender,
-      description: `Payment stream created: ${input.totalAmount} ${input.currency} to ${input.recipient} over ${totalSeconds}s`,
-      severity: "INFO",
-      metadata: { streamId, totalAmount: input.totalAmount, ratePerSecond },
+    const existing = await this.prisma.paymentStream.findFirst({
+      where: { onChainStreamId: creation.onChainStreamId.toLowerCase() },
     });
-
-    logger.info("Payment stream created", {
-      streamId,
-      sender: input.sender,
-      recipient: input.recipient,
-      totalAmount: input.totalAmount,
-      currency: input.currency,
-      ratePerSecond,
-      durationSeconds: totalSeconds,
-    });
-
-    return stream;
-  }
-
-  /**
-   * Create multiple streams in a batch (e.g., payroll).
-   */
-  async createBatchStreams(
-    input: BatchStreamInput,
-  ): Promise<{ succeeded: StreamRecord[]; failed: Array<{ index: number; error: string }> }> {
-    if (input.streams.length > MAX_BATCH_STREAMS) {
+    if (existing) {
+      if (existing.createTxHash === creation.txHash.toLowerCase()) {
+        return streamRecord(existing, businessId);
+      }
       throw new StreamError(
-        "BATCH_TOO_LARGE",
-        `Batch stream creation is limited to ${MAX_BATCH_STREAMS} streams per request`,
-        400,
+        "STREAM_ALREADY_RECORDED",
+        `This on-chain stream is already recorded under ${existing.createTxHash ?? "an unrecorded transaction"}`,
+        409,
       );
     }
 
-    const succeeded: StreamRecord[] = [];
-    const failed: Array<{ index: number; error: string }> = [];
-
-    for (let i = 0; i < input.streams.length; i++) {
-      try {
-        const stream = await this.createStream(input.streams[i], input.businessId);
-        succeeded.push(stream);
-      } catch (error) {
-        failed.push({ index: i, error: (error as Error).message });
-      }
-    }
-
-    logger.info("Batch stream creation complete", {
-      label: input.label,
-      total: input.streams.length,
-      succeeded: succeeded.length,
-      failed: failed.length,
+    const verified = await verifyStreamCreation(config, {
+      txHash: creation.txHash,
+      onChainStreamId: creation.onChainStreamId,
+      expectedSender: wallet,
+      expectedRecipient: input.recipient,
     });
 
-    return { succeeded, failed };
-  }
-
-  /**
-   * Calculate the real-time balance of a stream.
-   */
-  getStreamBalance(streamId: string): StreamBalance {
-    const stream = this.streams.get(streamId);
-    if (!stream) {
-      throw new StreamError("STREAM_NOT_FOUND", "Stream not found", 404);
-    }
-
-    const now = Date.now();
-    const startMs = stream.startTime.getTime();
-    const endMs = stream.endTime.getTime();
-    const totalSeconds = Math.floor((endMs - startMs) / 1000);
-
-    if (now < startMs || stream.status === "PENDING") {
-      return {
-        streamId,
-        withdrawable: "0",
-        streamed: "0",
-        remaining: stream.totalAmount,
-        percentComplete: 0,
-        elapsedSeconds: 0,
-        totalSeconds,
-      };
-    }
-
-    // Check cliff period
-    if (stream.cliffEnd && now < stream.cliffEnd.getTime()) {
-      const elapsedSeconds = Math.floor((now - startMs) / 1000);
-      const streamed = (parseFloat(stream.ratePerSecond) * elapsedSeconds).toFixed(18);
-      return {
-        streamId,
-        withdrawable: "0", // Cliff not reached yet
-        streamed,
-        remaining: (parseFloat(stream.totalAmount) - parseFloat(streamed)).toFixed(18),
-        percentComplete: (elapsedSeconds / totalSeconds) * 100,
-        elapsedSeconds,
-        totalSeconds,
-      };
-    }
-
-    const effectiveNow = Math.min(now, endMs);
-    const elapsedSeconds = Math.floor((effectiveNow - startMs) / 1000);
-    const rate = parseFloat(stream.ratePerSecond);
-    const streamedAmount = Math.min(rate * elapsedSeconds, parseFloat(stream.totalAmount));
-    const withdrawable = streamedAmount - parseFloat(stream.withdrawnAmount);
-
-    return {
-      streamId,
-      withdrawable: withdrawable.toFixed(18),
-      streamed: streamedAmount.toFixed(18),
-      remaining: (parseFloat(stream.totalAmount) - streamedAmount).toFixed(18),
-      percentComplete: Math.min((elapsedSeconds / totalSeconds) * 100, 100),
-      elapsedSeconds,
-      totalSeconds,
-    };
-  }
-
-  /**
-   * Get a single stream by ID.
-   */
-  getStream(streamId: string): StreamRecord | undefined {
-    return this.streams.get(streamId);
-  }
-
-  /**
-   * Pause an active stream.
-   */
-  async pauseStream(streamId: string, actor: string, businessId?: string): Promise<StreamRecord> {
-    const stream = this.streams.get(streamId);
-    if (!stream) {
-      throw new StreamError("STREAM_NOT_FOUND", "Stream not found", 404);
-    }
-    if (businessId && stream.businessId !== businessId) {
-      throw new StreamError("FORBIDDEN", "You do not have permission to pause this stream", 403);
-    }
-    if (stream.status !== "ACTIVE") {
-      throw new StreamError("INVALID_STATE", `Cannot pause stream in ${stream.status} state`, 409);
-    }
-
-    stream.status = "PAUSED";
-    this.streams.set(streamId, stream);
+    const created = await this.prisma.paymentStream.create({
+      data: {
+        sender: verified.sender,
+        recipient: verified.recipient,
+        // The caller's decimal figures stay in the columns that have always
+        // held them; the chain's raw units would need token decimals to
+        // convert, and guessing those is NP-TREASURY-01.
+        totalAmount: new Prisma.Decimal(input.totalAmount),
+        ratePerSecond: new Prisma.Decimal(input.ratePerSecond ?? 0),
+        currency: input.currency,
+        // Timings come from the chain: they drive every balance from here on.
+        startTime: verified.startTime,
+        endTime: verified.endTime,
+        cliffEnd: verified.cliffEndTime,
+        status: "ACTIVE",
+        totalPausedSeconds: 0,
+        onChainStreamId: verified.onChainStreamId,
+        createTxHash: verified.txHash,
+        lastEventTxHash: verified.txHash,
+      },
+    });
 
     await this.auditService.createAuditEntry({
       eventType: "SYSTEM_EVENT",
-      actor,
-      description: `Payment stream ${streamId} paused`,
-      severity: "LOW",
-      metadata: { streamId },
+      actor: verified.sender,
+      description: `Payment stream created on chain: ${verified.recipient} via ${verified.txHash}`,
+      severity: "HIGH",
+      businessId,
+      metadata: {
+        streamId: created.id,
+        onChainStreamId: verified.onChainStreamId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        amountBasis: "RAW_CONTRACT_UNITS",
+      },
     });
 
-    logger.info("Stream paused", { streamRef: maskIdentifier(streamId), actorRef: maskIdentifier(actor) });
-    return stream;
+    return streamRecord(created, businessId);
   }
 
   /**
-   * Resume a paused stream.
+   * Still closed, and not for want of a verifier.
+   *
+   * BatchStreamsCreated reports only a count and a total — it does not name the
+   * individual stream ids. Each stream in a batch does emit its own
+   * StreamCreated, so a batch can be recorded as N calls to createStream with
+   * their own receipts. Adding a batch path that verified only the aggregate
+   * would record N streams on the strength of evidence about none of them.
    */
-  async resumeStream(streamId: string, actor: string, businessId?: string): Promise<StreamRecord> {
-    const stream = this.streams.get(streamId);
-    if (!stream) {
-      throw new StreamError("STREAM_NOT_FOUND", "Stream not found", 404);
-    }
-    if (businessId && stream.businessId !== businessId) {
-      throw new StreamError("FORBIDDEN", "You do not have permission to resume this stream", 403);
-    }
-    if (stream.status !== "PAUSED") {
-      throw new StreamError("INVALID_STATE", `Cannot resume stream in ${stream.status} state`, 409);
-    }
-
-    stream.status = "ACTIVE";
-    this.streams.set(streamId, stream);
-
-    await this.auditService.createAuditEntry({
-      eventType: "SYSTEM_EVENT",
-      actor,
-      description: `Payment stream ${streamId} resumed`,
-      severity: "LOW",
-      metadata: { streamId },
-    });
-
-    logger.info("Stream resumed", { streamRef: maskIdentifier(streamId), actorRef: maskIdentifier(actor) });
-    return stream;
+  async createBatchStreams(_input: BatchStreamInput): Promise<never> {
+    throw new StreamError(
+      "BATCH_STREAM_UNVERIFIABLE",
+      "BatchStreamsCreated does not identify the streams it created; record each stream individually with its own StreamCreated receipt",
+      501,
+    );
   }
 
-  /**
-   * Cancel a stream and settle the accrued amount.
-   */
+  async getStreamBalance(
+    streamId: string,
+    businessId: string,
+  ): Promise<StreamBalance> {
+    const stream = await this.findTenantStream(streamId, businessId);
+    return calculateBalance(stream);
+  }
+
+  async getStream(streamId: string, businessId: string): Promise<StreamRecord> {
+    return streamRecord(
+      await this.findTenantStream(streamId, businessId),
+      businessId,
+    );
+  }
+
+  async pauseStream(
+    streamId: string,
+    actor: string,
+    businessId: string,
+    transition: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<StreamRecord> {
+    return this.applyTransition(streamId, actor, businessId, "PAUSED", transition, config);
+  }
+
+  async resumeStream(
+    streamId: string,
+    actor: string,
+    businessId: string,
+    transition: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<StreamRecord> {
+    return this.applyTransition(streamId, actor, businessId, "RESUMED", transition, config);
+  }
+
   async cancelStream(
     streamId: string,
     actor: string,
-    businessId?: string,
-  ): Promise<{ stream: StreamRecord; settledAmount: string; refundedAmount: string }> {
-    const stream = this.streams.get(streamId);
-    if (!stream) {
-      throw new StreamError("STREAM_NOT_FOUND", "Stream not found", 404);
-    }
-    if (businessId && stream.businessId !== businessId) {
-      throw new StreamError("FORBIDDEN", "You do not have permission to cancel this stream", 403);
-    }
-    if (stream.status === "COMPLETED" || stream.status === "CANCELLED") {
-      throw new StreamError("INVALID_STATE", `Stream already ${stream.status}`, 409);
-    }
+    businessId: string,
+    transition: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<StreamRecord> {
+    return this.applyTransition(streamId, actor, businessId, "CANCELLED", transition, config);
+  }
 
-    const balance = this.getStreamBalance(streamId);
-    const settledAmount = balance.streamed;
-    const refundedAmount = balance.remaining;
-
-    stream.status = "CANCELLED";
-    stream.streamedAmount = settledAmount;
-    this.streams.set(streamId, stream);
-
-    await this.auditService.createAuditEntry({
-      eventType: "SYSTEM_EVENT",
-      actor,
-      description: `Payment stream ${streamId} cancelled. Settled: ${settledAmount} ${stream.currency}, Refunded: ${refundedAmount} ${stream.currency}`,
-      severity: "MEDIUM",
-      metadata: { streamId, settledAmount, refundedAmount },
-    });
-
-    logger.info("Stream cancelled", {
-      streamRef: maskIdentifier(streamId),
-      actorRef: maskIdentifier(actor),
-      settledAmount,
-      refundedAmount,
-    });
-    return { stream, settledAmount, refundedAmount };
+  async completeStream(
+    streamId: string,
+    actor: string,
+    businessId: string,
+    transition: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<StreamRecord> {
+    return this.applyTransition(streamId, actor, businessId, "COMPLETED", transition, config);
   }
 
   /**
-   * Adjust the rate of an active stream.
+   * Permanently refused, not gated.
+   *
+   * StreamingPayments has no rate-adjustment function and no event for one. A
+   * stream's ratePerSecond is fixed at creation by design: the recipient's
+   * entitlement depends on it, so a sender able to lower it could renege after
+   * the fact. There is no receipt to wait for, so this does not belong behind a
+   * verifier gate. See docs/audit/NP-STREAM-01.
    */
   async adjustRate(
+    _streamId: string,
+    _newRatePerSecond: string,
+    _actor: string,
+    _businessId?: string,
+  ): Promise<never> {
+    throw new StreamError(
+      "STREAM_RATE_IMMUTABLE",
+      "A stream's rate is fixed at creation and cannot be changed; cancel the stream and create a new one",
+      422,
+    );
+  }
+
+  /**
+   * Record a withdrawal so `withdrawable` stops over-reporting.
+   *
+   * `withdrawable` is `streamed - withdrawn`, and nothing advanced `withdrawn`
+   * before this, so any stream drawn against reported more available than it
+   * had. The contract's running total is stored rather than an increment, so a
+   * replayed receipt cannot double-count.
+   */
+  async recordWithdrawal(
     streamId: string,
-    newRatePerSecond: string,
     actor: string,
-    businessId?: string,
+    businessId: string,
+    withdrawal: { txHash: string },
+    config: NoblePayChainConfiguration,
   ): Promise<StreamRecord> {
-    const stream = this.streams.get(streamId);
-    if (!stream) {
-      throw new StreamError("STREAM_NOT_FOUND", "Stream not found", 404);
-    }
-    if (businessId && stream.businessId !== businessId) {
-      throw new StreamError("FORBIDDEN", "You do not have permission to adjust this stream", 403);
-    }
-    if (stream.status !== "ACTIVE" && stream.status !== "PAUSED") {
-      throw new StreamError("INVALID_STATE", `Cannot adjust rate for ${stream.status} stream`, 409);
+    const stream = await this.findTenantStream(streamId, businessId);
+    if (!stream.onChainStreamId) {
+      throw new StreamError(
+        "STREAM_NOT_ON_CHAIN",
+        "This stream has no on-chain id, so a withdrawal receipt cannot be matched to it",
+        409,
+      );
     }
 
-    const oldRate = stream.ratePerSecond;
-    stream.ratePerSecond = newRatePerSecond;
-    this.streams.set(streamId, stream);
+    const verified = await verifyWithdrawal(config, {
+      txHash: withdrawal.txHash,
+      onChainStreamId: stream.onChainStreamId,
+      expectedRecipient: stream.recipient,
+    });
+
+    const updated = await this.prisma.paymentStream.update({
+      where: { id: stream.id },
+      data: {
+        withdrawn: new Prisma.Decimal(verified.withdrawnTotal),
+        lastEventTxHash: verified.txHash,
+      },
+    });
 
     await this.auditService.createAuditEntry({
       eventType: "SYSTEM_EVENT",
       actor,
-      description: `Stream ${streamId} rate adjusted from ${oldRate} to ${newRatePerSecond} per second`,
-      severity: "LOW",
-      metadata: { streamId, oldRate, newRate: newRatePerSecond },
+      description: `Stream withdrawal recorded on chain: ${stream.id} via ${verified.txHash}`,
+      severity: "MEDIUM",
+      businessId,
+      metadata: {
+        streamId: stream.id,
+        onChainStreamId: verified.onChainStreamId,
+        txHash: verified.txHash,
+        amount: verified.amount,
+        withdrawnTotal: verified.withdrawnTotal,
+        amountBasis: "RAW_CONTRACT_UNITS",
+      },
     });
 
-    logger.info("Stream rate adjusted", { streamId, oldRate, newRate: newRatePerSecond });
-    return stream;
+    return streamRecord(updated, businessId);
   }
 
   /**
-   * List all streams with optional filters.
+   * Shared path for the four lifecycle transitions.
+   *
+   * totalPausedSeconds is written from the contract's running total on EVERY
+   * transition, not only on resume. If a resume receipt were never recorded
+   * here, the next transition still repairs the figure — which matters because
+   * a lost pause interval silently inflates every balance from that point on.
    */
-  listStreams(filters?: {
-    sender?: string;
-    recipient?: string;
-    status?: StreamStatus;
-    currency?: string;
-    businessId?: string;
-  }): StreamRecord[] {
-    let streams = Array.from(this.streams.values());
-
-    if (filters?.businessId) streams = streams.filter((s) => s.businessId === filters.businessId);
-    if (filters?.sender) streams = streams.filter((s) => s.sender === filters.sender);
-    if (filters?.recipient) streams = streams.filter((s) => s.recipient === filters.recipient);
-    if (filters?.status) streams = streams.filter((s) => s.status === filters.status);
-    if (filters?.currency) streams = streams.filter((s) => s.currency === filters.currency);
-
-    return streams.sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
-  }
-
-  /**
-   * Get streaming analytics.
-   */
-  getAnalytics(businessId?: string): StreamAnalytics {
-    let allStreams = Array.from(this.streams.values());
-    if (businessId) {
-      allStreams = allStreams.filter((s) => s.businessId === businessId);
+  private async applyTransition(
+    streamId: string,
+    actor: string,
+    businessId: string,
+    kind: StreamEventKind,
+    transition: { txHash: string },
+    config: NoblePayChainConfiguration,
+  ): Promise<StreamRecord> {
+    const stream = await this.findTenantStream(streamId, businessId);
+    if (!stream.onChainStreamId) {
+      throw new StreamError(
+        "STREAM_NOT_ON_CHAIN",
+        "This stream has no on-chain id, so a receipt cannot be matched to it",
+        409,
+      );
     }
-    const activeStreams = allStreams.filter(
-      (s) => s.status === "ACTIVE",
+
+    const verified = await verifyStreamTransition(config, {
+      txHash: transition.txHash,
+      onChainStreamId: stream.onChainStreamId,
+      kind,
+      expectedSender: stream.sender,
+    });
+
+    const updated = await this.prisma.paymentStream.update({
+      where: { id: stream.id },
+      data: {
+        status: verified.chainStatus as StreamStatus,
+        pausedAt: kind === "PAUSED" ? verified.at : null,
+        totalPausedSeconds: verified.totalPausedSeconds,
+        lastEventTxHash: verified.txHash,
+      },
+    });
+
+    await this.auditService.createAuditEntry({
+      eventType: "SYSTEM_EVENT",
+      actor,
+      description: `Payment stream ${kind.toLowerCase()} on chain: ${stream.id} via ${verified.txHash}`,
+      severity: kind === "CANCELLED" ? "HIGH" : "MEDIUM",
+      businessId,
+      metadata: {
+        streamId: stream.id,
+        onChainStreamId: verified.onChainStreamId,
+        txHash: verified.txHash,
+        blockNumber: verified.blockNumber,
+        chainStatus: verified.chainStatus,
+        totalPausedSeconds: verified.totalPausedSeconds,
+        recipientAmount: verified.recipientAmount,
+        senderRefund: verified.senderRefund,
+        amountBasis: "RAW_CONTRACT_UNITS",
+      },
+    });
+
+    return streamRecord(updated, businessId);
+  }
+
+  async listStreams(filters: StreamFilters): Promise<StreamRecord[]> {
+    const wallet = await this.businessWallet(filters.businessId);
+    const streams = await this.prisma.paymentStream.findMany({
+      where: {
+        AND: [
+          {
+            OR: [
+              { sender: { equals: wallet, mode: "insensitive" } },
+              { recipient: { equals: wallet, mode: "insensitive" } },
+            ],
+          },
+          filters.sender
+            ? { sender: { equals: filters.sender, mode: "insensitive" } }
+            : {},
+          filters.recipient
+            ? {
+                recipient: {
+                  equals: filters.recipient,
+                  mode: "insensitive",
+                },
+              }
+            : {},
+          filters.status ? { status: filters.status } : {},
+          filters.currency ? { currency: filters.currency } : {},
+        ],
+      },
+      orderBy: { createdAt: "desc" },
+      skip:
+        filters.page && filters.limit
+          ? (filters.page - 1) * filters.limit
+          : undefined,
+      take: filters.limit,
+    });
+    const now = new Date();
+    return streams.map((stream) =>
+      streamRecord(stream, filters.businessId, now),
     );
+  }
 
-    const byCurrency: Record<string, { count: number; volume: string }> = {};
-    let totalStreamedVolume = 0;
-    let totalWithdrawn = 0;
-    let dailyOutflow = 0;
+  async getAnalytics(businessId: string): Promise<StreamAnalytics> {
+    const streams = await this.listStreams({ businessId });
+    const activeStreams = streams.filter(
+      (stream) => stream.status === "ACTIVE",
+    );
+    const now = new Date();
+    const byCurrency: StreamAnalytics["byCurrency"] = {};
+    let totalStreamed = new Prisma.Decimal(0);
+    let totalWithdrawn = new Prisma.Decimal(0);
+    let dailyOutflow = new Prisma.Decimal(0);
 
+    for (const stream of streams) {
+      totalStreamed = totalStreamed.add(stream.streamedAmount);
+      totalWithdrawn = totalWithdrawn.add(stream.withdrawnAmount);
+      const existing = byCurrency[stream.currency] ?? {
+        count: 0,
+        volume: "0",
+      };
+      existing.count += 1;
+      existing.volume = new Prisma.Decimal(existing.volume)
+        .add(stream.totalAmount)
+        .toString();
+      byCurrency[stream.currency] = existing;
+    }
     for (const stream of activeStreams) {
-      const balance = this.getStreamBalance(stream.streamId);
-      totalStreamedVolume += parseFloat(balance.streamed);
-      totalWithdrawn += parseFloat(stream.withdrawnAmount);
-      dailyOutflow += parseFloat(stream.ratePerSecond) * 86400;
-
-      if (!byCurrency[stream.currency]) {
-        byCurrency[stream.currency] = { count: 0, volume: "0" };
-      }
-      byCurrency[stream.currency].count++;
-      byCurrency[stream.currency].volume = (
-        parseFloat(byCurrency[stream.currency].volume) + parseFloat(stream.totalAmount)
-      ).toFixed(2);
+      dailyOutflow = dailyOutflow.add(
+        new Prisma.Decimal(stream.ratePerSecond).mul(86_400),
+      );
     }
 
     return {
       totalActiveStreams: activeStreams.length,
-      totalStreamedVolume: totalStreamedVolume.toFixed(2),
-      totalWithdrawn: totalWithdrawn.toFixed(2),
-      dailyOutflow: dailyOutflow.toFixed(2),
-      weeklyOutflow: (dailyOutflow * 7).toFixed(2),
-      monthlyOutflow: (dailyOutflow * 30).toFixed(2),
+      totalStreamedVolume: totalStreamed.toString(),
+      totalWithdrawn: totalWithdrawn.toString(),
+      dailyOutflow: dailyOutflow.toString(),
+      weeklyOutflow: dailyOutflow.mul(7).toString(),
+      monthlyOutflow: dailyOutflow.mul(30).toString(),
       byCurrency,
       upcomingMilestones: activeStreams
-        .filter((s) => s.cliffEnd && s.cliffEnd > new Date())
-        .map((s) => ({
-          streamId: s.streamId,
+        .filter((stream) => stream.cliffEnd && stream.cliffEnd > now)
+        .map((stream) => ({
+          streamId: stream.streamId,
           event: "cliff_end",
-          date: s.cliffEnd!,
+          date: stream.cliffEnd as Date,
         }))
+        .sort((a, b) => a.date.getTime() - b.date.getTime())
         .slice(0, 10),
+      calculatedAt: now,
+      dataSource: "DATABASE_TERMS",
     };
   }
-}
 
-// ─── Error Class ────────────────────────────────────────────────────────────
+  private async businessWallet(businessId: string): Promise<string> {
+    const business = await this.prisma.business.findUnique({
+      where: { id: businessId },
+      select: { address: true },
+    });
+    if (!business) {
+      throw new StreamError(
+        "BUSINESS_NOT_FOUND",
+        "Authenticated business was not found",
+        404,
+      );
+    }
+    return business.address;
+  }
+
+  private async findTenantStream(
+    streamId: string,
+    businessId: string,
+  ): Promise<PaymentStream> {
+    const wallet = await this.businessWallet(businessId);
+    const stream = await this.prisma.paymentStream.findFirst({
+      where: {
+        id: streamId,
+        OR: [
+          { sender: { equals: wallet, mode: "insensitive" } },
+          { recipient: { equals: wallet, mode: "insensitive" } },
+        ],
+      },
+    });
+    if (!stream) {
+      throw new StreamError("STREAM_NOT_FOUND", "Stream not found", 404);
+    }
+    return stream;
+  }
+
+}
 
 export class StreamError extends Error {
   constructor(

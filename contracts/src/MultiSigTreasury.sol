@@ -100,6 +100,14 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
         QUARTERLY
     }
 
+    /// @notice Governance state for an exact recurring-payment authorization.
+    enum RecurringAuthorizationStatus {
+        NONE,
+        PENDING,
+        APPROVED,
+        CONSUMED
+    }
+
     // ──────────────────────────────────────────────────────────────
     // Structs
     // ──────────────────────────────────────────────────────────────
@@ -166,6 +174,19 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
         uint256 maxExecutions;       // 0 = unlimited
         bool active;
         bytes32 budgetId;
+    }
+
+    /// @notice Multi-sig authorization for one exact recurring-payment mandate.
+    struct RecurringAuthorization {
+        bytes32 authorizationId;
+        bytes32 termsHash;
+        address proposer;
+        uint256 approvalCount;
+        uint256 requiredApprovals;
+        uint256 createdAt;
+        uint256 timelockExpiry;
+        uint256 expiresAt;
+        RecurringAuthorizationStatus status;
     }
 
     /// @notice Signer delegation record.
@@ -254,7 +275,16 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Active recurring payment IDs.
     bytes32[] public activeRecurringPaymentIds;
 
-    /// @notice Delegation records keyed by delegator address.
+    /// @notice Recurring-payment authorizations keyed by authorization ID.
+    mapping(bytes32 => RecurringAuthorization) public recurringAuthorizations;
+
+    /// @notice Most recent authorization ID for an exact set of recurring terms.
+    mapping(bytes32 => bytes32) public latestRecurringAuthorization;
+
+    /// @notice Canonical signer votes for each recurring-payment authorization.
+    mapping(bytes32 => mapping(address => bool)) public recurringAuthorizationApprovals;
+
+    /// @notice Delegation records keyed by delegate address.
     mapping(address => Delegation) public delegations;
 
     /// @notice Approved yield protocols keyed by protocol address.
@@ -280,6 +310,9 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
 
     /// @notice Recurring payment nonce.
     uint256 public recurringNonce;
+
+    /// @notice Recurring authorization nonce.
+    uint256 public recurringAuthorizationNonce;
 
     /// @notice NoblePay core contract reference.
     address public noblePayContract;
@@ -341,6 +374,26 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
         PaymentFrequency frequency
     );
 
+    event RecurringAuthorizationProposed(
+        bytes32 indexed authorizationId,
+        bytes32 indexed termsHash,
+        address indexed proposer,
+        uint256 requiredApprovals,
+        uint256 timelockExpiry
+    );
+
+    event RecurringAuthorizationApproved(
+        bytes32 indexed authorizationId,
+        address indexed signer,
+        uint256 approvalCount,
+        uint256 requiredApprovals
+    );
+
+    event RecurringAuthorizationConsumed(
+        bytes32 indexed authorizationId,
+        bytes32 indexed paymentId
+    );
+
     event RecurringPaymentExecuted(
         bytes32 indexed paymentId,
         uint256 executionNumber,
@@ -391,6 +444,9 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
     error MonthlyLimitExceeded(uint256 requested, uint256 remaining);
     error RecurringPaymentNotFound();
     error RecurringPaymentNotDue();
+    error RecurringAuthorizationNotFound();
+    error RecurringAuthorizationPending();
+    error RecurringAuthorizationUnavailable();
     error MaxExecutionsReached();
     error DelegationNotActive();
     error DelegationTooLong();
@@ -500,28 +556,8 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
         if (_amount == 0) revert ZeroAmount();
         if (_token != address(0) && !supportedTokens[_token]) revert UnsupportedToken();
 
-        // Determine tier and requirements
-        TxTier tier;
-        uint256 requiredApprovals;
-        uint256 timelock;
-
-        if (_isEmergency) {
-            tier = TxTier.EMERGENCY;
-            requiredApprovals = signerConfig.emergencyThreshold;
-            timelock = EMERGENCY_TIMELOCK;
-        } else if (_amount <= SMALL_TX_THRESHOLD) {
-            tier = TxTier.SMALL;
-            requiredApprovals = signerConfig.smallThreshold;
-            timelock = STANDARD_TIMELOCK;
-        } else if (_amount <= LARGE_TX_THRESHOLD) {
-            tier = TxTier.MEDIUM;
-            requiredApprovals = signerConfig.mediumThreshold;
-            timelock = STANDARD_TIMELOCK;
-        } else {
-            tier = TxTier.LARGE;
-            requiredApprovals = signerConfig.largeThreshold;
-            timelock = LARGE_TIMELOCK;
-        }
+        (TxTier tier, uint256 requiredApprovals, uint256 timelock) =
+            _approvalRequirements(_amount, _isEmergency);
 
         // Validate budget if specified
         if (_budgetId != bytes32(0)) {
@@ -738,16 +774,118 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * @notice Creates a recurring payment authorization (standing order).
-     * @param _recipient      Payment recipient.
-     * @param _token          ERC20 token; address(0) for native.
-     * @param _amount         Payment amount per execution.
-     * @param _frequency      Payment frequency.
-     * @param _category       Spending category.
-     * @param _description    Payment description.
-     * @param _maxExecutions  Maximum number of executions (0 = unlimited).
-     * @param _budgetId       Associated budget ID.
-     * @return paymentId      Unique payment identifier.
+     * @notice Proposes one exact recurring-payment mandate for signer approval.
+     * @dev Every payment term is bound to the proposal. Approval thresholds and
+     *      timelocks are identical to one-time transfers of the same amount.
+     * @return authorizationId Unique authorization identifier.
+     */
+    function proposeRecurringPayment(
+        address _recipient,
+        address _token,
+        uint256 _amount,
+        PaymentFrequency _frequency,
+        SpendingCategory _category,
+        string calldata _description,
+        uint256 _maxExecutions,
+        bytes32 _budgetId
+    ) external whenNotPaused onlySignerOrDelegate returns (bytes32 authorizationId) {
+        _validateRecurringPayment(_recipient, _token, _amount, _budgetId);
+
+        bytes32 termsHash = hashRecurringPaymentTerms(
+            _recipient,
+            _token,
+            _amount,
+            _frequency,
+            _category,
+            _description,
+            _maxExecutions,
+            _budgetId
+        );
+        bytes32 existingId = latestRecurringAuthorization[termsHash];
+        RecurringAuthorization storage existing = recurringAuthorizations[existingId];
+        if (
+            (existing.status == RecurringAuthorizationStatus.PENDING ||
+                existing.status == RecurringAuthorizationStatus.APPROVED) &&
+            block.timestamp <= existing.expiresAt
+        ) revert RecurringAuthorizationPending();
+
+        (, uint256 requiredApprovals, uint256 timelock) = _approvalRequirements(_amount, false);
+        address approver = _resolveApprover(msg.sender);
+        authorizationId = keccak256(
+            abi.encode(
+                address(this),
+                block.chainid,
+                termsHash,
+                approver,
+                recurringAuthorizationNonce++
+            )
+        );
+
+        RecurringAuthorizationStatus status = requiredApprovals == 1
+            ? RecurringAuthorizationStatus.APPROVED
+            : RecurringAuthorizationStatus.PENDING;
+        recurringAuthorizations[authorizationId] = RecurringAuthorization({
+            authorizationId: authorizationId,
+            termsHash: termsHash,
+            proposer: approver,
+            approvalCount: 1,
+            requiredApprovals: requiredApprovals,
+            createdAt: block.timestamp,
+            timelockExpiry: block.timestamp + timelock,
+            expiresAt: block.timestamp + PROPOSAL_EXPIRY,
+            status: status
+        });
+        latestRecurringAuthorization[termsHash] = authorizationId;
+        recurringAuthorizationApprovals[authorizationId][approver] = true;
+
+        emit RecurringAuthorizationProposed(
+            authorizationId,
+            termsHash,
+            approver,
+            requiredApprovals,
+            block.timestamp + timelock
+        );
+        emit RecurringAuthorizationApproved(authorizationId, approver, 1, requiredApprovals);
+    }
+
+    /**
+     * @notice Approves a pending recurring-payment mandate.
+     * @param _authorizationId Authorization to approve.
+     */
+    function approveRecurringPayment(
+        bytes32 _authorizationId
+    ) external whenNotPaused onlySignerOrDelegate {
+        RecurringAuthorization storage authorization = recurringAuthorizations[_authorizationId];
+        if (authorization.status == RecurringAuthorizationStatus.NONE) {
+            revert RecurringAuthorizationNotFound();
+        }
+        if (authorization.status != RecurringAuthorizationStatus.PENDING) {
+            revert RecurringAuthorizationUnavailable();
+        }
+        if (block.timestamp > authorization.expiresAt) revert ProposalExpiredError();
+
+        address approver = _resolveApprover(msg.sender);
+        if (recurringAuthorizationApprovals[_authorizationId][approver]) revert AlreadyApproved();
+
+        recurringAuthorizationApprovals[_authorizationId][approver] = true;
+        authorization.approvalCount++;
+        if (authorization.approvalCount >= authorization.requiredApprovals) {
+            authorization.status = RecurringAuthorizationStatus.APPROVED;
+        }
+
+        emit RecurringAuthorizationApproved(
+            _authorizationId,
+            approver,
+            authorization.approvalCount,
+            authorization.requiredApprovals
+        );
+    }
+
+    /**
+     * @notice Activates a signer-approved recurring payment after its timelock.
+     * @dev `ADMIN_ROLE` executes, but cannot alter or bypass the exact terms that
+     *      the configured signer threshold approved.
+     * @return paymentId Unique payment identifier.
      */
     function createRecurringPayment(
         address _recipient,
@@ -759,13 +897,38 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
         uint256 _maxExecutions,
         bytes32 _budgetId
     ) external whenNotPaused onlyRole(ADMIN_ROLE) returns (bytes32 paymentId) {
-        if (_recipient == address(0)) revert ZeroAddress();
-        if (_amount == 0) revert ZeroAmount();
+        _validateRecurringPayment(_recipient, _token, _amount, _budgetId);
+
+        bytes32 termsHash = hashRecurringPaymentTerms(
+            _recipient,
+            _token,
+            _amount,
+            _frequency,
+            _category,
+            _description,
+            _maxExecutions,
+            _budgetId
+        );
+        bytes32 authorizationId = latestRecurringAuthorization[termsHash];
+        RecurringAuthorization storage authorization = recurringAuthorizations[authorizationId];
+        if (authorization.status == RecurringAuthorizationStatus.NONE) {
+            revert RecurringAuthorizationNotFound();
+        }
+        if (authorization.status != RecurringAuthorizationStatus.APPROVED) {
+            revert RecurringAuthorizationUnavailable();
+        }
+        if (block.timestamp < authorization.timelockExpiry) {
+            revert TimelockNotExpired(authorization.timelockExpiry, block.timestamp);
+        }
+        if (block.timestamp > authorization.expiresAt) revert ProposalExpiredError();
+
+        // Consume before the mandate can be activated to prevent replay.
+        authorization.status = RecurringAuthorizationStatus.CONSUMED;
 
         uint256 nextExec = block.timestamp + _frequencyToSeconds(_frequency);
 
         paymentId = keccak256(
-            abi.encodePacked(msg.sender, _recipient, _amount, block.timestamp, recurringNonce++)
+            abi.encode(address(this), block.chainid, authorizationId, recurringNonce++)
         );
 
         recurringPayments[paymentId] = RecurringPayment({
@@ -786,6 +949,7 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
 
         activeRecurringPaymentIds.push(paymentId);
 
+        emit RecurringAuthorizationConsumed(authorizationId, paymentId);
         emit RecurringPaymentCreated(paymentId, _recipient, _amount, _frequency);
     }
 
@@ -1028,6 +1192,35 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
         return recurringPayments[_paymentId];
     }
 
+    /**
+     * @notice Computes the governance commitment for exact recurring-payment terms.
+     * @dev Uses `abi.encode` and hashes the dynamic description independently to
+     *      avoid ambiguous packed encodings.
+     */
+    function hashRecurringPaymentTerms(
+        address _recipient,
+        address _token,
+        uint256 _amount,
+        PaymentFrequency _frequency,
+        SpendingCategory _category,
+        string memory _description,
+        uint256 _maxExecutions,
+        bytes32 _budgetId
+    ) public pure returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                _recipient,
+                _token,
+                _amount,
+                _frequency,
+                _category,
+                keccak256(bytes(_description)),
+                _maxExecutions,
+                _budgetId
+            )
+        );
+    }
+
     /// @notice Returns the current signer list.
     function getSigners() external view returns (address[] memory) {
         return signers;
@@ -1096,6 +1289,41 @@ contract MultiSigTreasury is AccessControl, Pausable, ReentrancyGuard {
         // caller must be a delegate (onlySignerOrDelegate already validated)
         Delegation storage del = delegations[caller];
         return del.delegator;
+    }
+
+    /// @dev Returns the tiered approval threshold and timelock for an amount.
+    function _approvalRequirements(
+        uint256 amount,
+        bool isEmergency
+    ) internal view returns (TxTier tier, uint256 requiredApprovals, uint256 timelock) {
+        if (isEmergency) {
+            return (TxTier.EMERGENCY, signerConfig.emergencyThreshold, EMERGENCY_TIMELOCK);
+        }
+        if (amount <= SMALL_TX_THRESHOLD) {
+            return (TxTier.SMALL, signerConfig.smallThreshold, STANDARD_TIMELOCK);
+        }
+        if (amount <= LARGE_TX_THRESHOLD) {
+            return (TxTier.MEDIUM, signerConfig.mediumThreshold, STANDARD_TIMELOCK);
+        }
+        return (TxTier.LARGE, signerConfig.largeThreshold, LARGE_TIMELOCK);
+    }
+
+    /// @dev Applies the same asset and budget validation before proposal and activation.
+    function _validateRecurringPayment(
+        address recipient,
+        address token,
+        uint256 amount,
+        bytes32 budgetId
+    ) internal view {
+        if (recipient == address(0)) revert ZeroAddress();
+        if (amount == 0) revert ZeroAmount();
+        if (token != address(0) && !supportedTokens[token]) revert UnsupportedToken();
+        if (budgetId != bytes32(0)) {
+            Budget storage budget = budgets[budgetId];
+            if (!budget.active) revert BudgetNotFound();
+            uint256 remaining = budget.totalAllocation - budget.spent;
+            if (amount > remaining) revert BudgetExceeded(amount, remaining);
+        }
     }
 
     /**

@@ -1,226 +1,285 @@
-/**
- * Treasury Hooks — Custom React hooks for NoblePay treasury management.
- *
- * Provides typed hooks for treasury proposals, spending policies,
- * yield strategies, and treasury overview data.
- */
-
-import { useState, useEffect, useCallback } from 'react';
+import { useCallback, useMemo } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { ApiError, apiRequest } from "@/lib/api";
 import type {
-  TreasuryProposal,
-  SpendingPolicy,
-  YieldStrategy,
-  TreasuryOverview,
   ApprovalThreshold,
-} from '@/types/treasury';
+  SpendingPolicy,
+  TreasuryOverview,
+  TreasuryProposal,
+  YieldStrategy,
+} from "@/types/treasury";
 
-// ---------------------------------------------------------------------------
-// Mock Data
-// ---------------------------------------------------------------------------
+interface ApiOverview {
+  totalAUM: string;
+  allocations: Record<string, string>;
+  yieldEarned: string;
+  pendingProposals: number;
+  activeStrategies: number;
+  signerCount: number;
+  monthlySpend: Record<string, string>;
+  valuationScope: "RECORDED_YIELD_ALLOCATIONS_ONLY";
+}
 
-const MOCK_OVERVIEW: TreasuryOverview = {
-  totalBalance: 12_450_000,
-  tokenBalances: [
-    { symbol: 'USDC', amount: 8_200_000, valueUsd: 8_200_000 },
-    { symbol: 'AETHEL', amount: 2_500_000, valueUsd: 3_750_000 },
-    { symbol: 'USDT', amount: 500_000, valueUsd: 500_000 },
-  ],
-  activeProposals: 3,
-  monthlyYield: 42_500,
-  deployedInYield: 5_000_000,
-  monthlySpend: 320_000,
-  pendingApprovals: 2,
-};
+interface ApiPolicy {
+  id: string;
+  category: string;
+  dailyLimit: string;
+  monthlyLimit: string;
+  requiresApproval: boolean;
+  minApprovals: number;
+  active: boolean;
+  updatedAt: string;
+}
 
-const MOCK_PROPOSALS: TreasuryProposal[] = [
-  {
-    id: '0xprop001',
-    title: 'Fund MENA Compliance Node Expansion',
-    description: 'Allocate 500,000 USDC to deploy three additional TEE compliance nodes in the UAE and Saudi Arabia regions.',
-    proposer: '0x1234567890abcdef1234567890abcdef12345678',
-    recipient: '0xabcdef1234567890abcdef1234567890abcdef12',
-    amount: 500_000,
-    tokenSymbol: 'USDC',
-    status: 'Active',
-    votesFor: 1_250_000,
-    votesAgainst: 320_000,
-    quorum: 2_000_000,
-    createdAt: Date.now() - 3 * 86_400_000,
-    votingDeadline: Date.now() + 4 * 86_400_000,
-    executedAt: 0,
-  },
-  {
-    id: '0xprop002',
-    title: 'Q2 Marketing Budget Allocation',
-    description: 'Allocate 150,000 USDC for Q2 marketing and partnership initiatives across GCC markets.',
-    proposer: '0x2345678901abcdef2345678901abcdef23456789',
-    recipient: '0xbcdef1234567890abcdef1234567890abcdef1234',
-    amount: 150_000,
-    tokenSymbol: 'USDC',
-    status: 'Active',
-    votesFor: 800_000,
-    votesAgainst: 150_000,
-    quorum: 2_000_000,
-    createdAt: Date.now() - 2 * 86_400_000,
-    votingDeadline: Date.now() + 5 * 86_400_000,
-    executedAt: 0,
-  },
-  {
-    id: '0xprop003',
-    title: 'Security Audit — Annual Retainer',
-    description: 'Annual security audit retainer with Trail of Bits for continuous smart contract review.',
-    proposer: '0x3456789012abcdef3456789012abcdef34567890',
-    recipient: '0xcdef1234567890abcdef1234567890abcdef12345',
-    amount: 200_000,
-    tokenSymbol: 'USDC',
-    status: 'Queued',
-    votesFor: 2_100_000,
-    votesAgainst: 180_000,
-    quorum: 2_000_000,
-    createdAt: Date.now() - 10 * 86_400_000,
-    votingDeadline: Date.now() - 3 * 86_400_000,
-    executedAt: 0,
-  },
-];
+interface ApiYieldStrategy {
+  id: string;
+  protocol: string;
+  name: string;
+  allocation: string;
+  currency: string;
+  currentAPY: number;
+  riskLevel: "LOW" | "MEDIUM" | "HIGH";
+  active: boolean;
+  totalYieldEarned: string;
+  lastHarvestAt: string | null;
+}
 
-const MOCK_POLICIES: SpendingPolicy[] = [
-  {
-    id: 'pol-001',
-    name: 'Operational Expenses',
-    description: 'Day-to-day operational spending policy for approved vendors.',
-    maxSingleTx: 25_000,
-    dailyLimit: 50_000,
-    monthlyLimit: 500_000,
-    requiredApprovals: 2,
-    enforcement: 'Strict',
-    active: true,
-    updatedAt: Date.now() - 30 * 86_400_000,
-  },
-  {
-    id: 'pol-002',
-    name: 'Strategic Investments',
-    description: 'Policy for yield deployment and strategic protocol investments.',
-    maxSingleTx: 500_000,
-    dailyLimit: 1_000_000,
-    monthlyLimit: 5_000_000,
-    requiredApprovals: 4,
-    enforcement: 'Strict',
-    active: true,
-    updatedAt: Date.now() - 15 * 86_400_000,
-  },
-];
+interface ApiProposal {
+  id: string;
+  title: string;
+  description: string;
+  type: "TRANSFER" | "POLICY_CHANGE" | "YIELD_ALLOCATION" | "EMERGENCY";
+  amount: string | null;
+  currency: string | null;
+  recipient: string | null;
+  category: string | null;
+  status: "PENDING" | "APPROVED" | "EXECUTED" | "REJECTED" | "EXPIRED";
+  proposer: string;
+  requiredApprovals: number;
+  currentApprovals: number;
+  createdAt: string;
+  expiresAt: string;
+  executedAt: string | null;
+}
 
-const MOCK_STRATEGIES: YieldStrategy[] = [
-  {
-    id: 'strat-001',
-    name: 'USDC Lending',
-    description: 'Lend USDC on Aave V3 for stable yield.',
-    protocol: 'Aave',
-    allocated: 3_000_000,
-    apy: 4.2,
-    risk: 'Conservative',
-    active: true,
-    earnedToDate: 126_000,
-    lastRebalance: Date.now() - 7 * 86_400_000,
-  },
-  {
-    id: 'strat-002',
-    name: 'AETHEL Staking',
-    description: 'Stake AETHEL tokens for network security rewards.',
-    protocol: 'Aethelred Staking',
-    allocated: 1_500_000,
-    apy: 8.5,
-    risk: 'Moderate',
-    active: true,
-    earnedToDate: 95_000,
-    lastRebalance: Date.now() - 3 * 86_400_000,
-  },
-  {
-    id: 'strat-003',
-    name: 'Liquidity Provision',
-    description: 'Provide USDC/AETHEL liquidity on NoblePay DEX pools.',
-    protocol: 'NoblePay LP',
-    allocated: 500_000,
-    apy: 12.3,
-    risk: 'Aggressive',
-    active: true,
-    earnedToDate: 48_000,
-    lastRebalance: Date.now() - 1 * 86_400_000,
-  },
-];
-
-const MOCK_THRESHOLDS: ApprovalThreshold[] = [
-  { tier: 'Low', minAmount: 0, maxAmount: 10_000, requiredSignatures: 1, timelockDelay: 0 },
-  { tier: 'Medium', minAmount: 10_000, maxAmount: 100_000, requiredSignatures: 2, timelockDelay: 3600 },
-  { tier: 'High', minAmount: 100_000, maxAmount: 1_000_000, requiredSignatures: 3, timelockDelay: 86_400 },
-  { tier: 'Critical', minAmount: 1_000_000, maxAmount: Infinity, requiredSignatures: 5, timelockDelay: 172_800 },
-];
-
-// ---------------------------------------------------------------------------
-// useTreasury — treasury overview, proposals, policies, yield strategies
-// ---------------------------------------------------------------------------
+export interface CreateTreasuryProposalInput {
+  title: string;
+  description: string;
+  recipient: string;
+  amount: number;
+  tokenSymbol: string;
+  category: string;
+}
 
 export function useTreasury() {
-  const [overview, setOverview] = useState<TreasuryOverview | null>(null);
-  const [proposals, setProposals] = useState<TreasuryProposal[]>([]);
-  const [policies, setPolicies] = useState<SpendingPolicy[]>([]);
-  const [strategies, setStrategies] = useState<YieldStrategy[]>([]);
-  const [thresholds, setThresholds] = useState<ApprovalThreshold[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const overviewQuery = useQuery({
+    queryKey: ["treasury", "overview"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiOverview>("/v1/treasury/overview", { signal }),
+  });
+  const policiesQuery = useQuery({
+    queryKey: ["treasury", "policies"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiPolicy[]>("/v1/treasury/policies", { signal }),
+  });
+  const strategiesQuery = useQuery({
+    queryKey: ["treasury", "yield"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiYieldStrategy[]>("/v1/treasury/yield", { signal }),
+  });
+  const proposalsQuery = useQuery({
+    queryKey: ["treasury", "proposals"],
+    queryFn: ({ signal }) =>
+      apiRequest<ApiProposal[]>("/v1/treasury/proposals", { signal }),
+  });
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      setOverview(MOCK_OVERVIEW);
-      setProposals(MOCK_PROPOSALS);
-      setPolicies(MOCK_POLICIES);
-      setStrategies(MOCK_STRATEGIES);
-      setThresholds(MOCK_THRESHOLDS);
-      setIsLoading(false);
-    }, 600);
-    return () => clearTimeout(timer);
-  }, []);
+  const createMutation = useMutation({
+    mutationFn: (proposal: CreateTreasuryProposalInput) =>
+      apiRequest("/v1/treasury/proposals", {
+        method: "POST",
+        json: {
+          title: proposal.title,
+          description: proposal.description,
+          type: "TRANSFER",
+          amount: String(proposal.amount),
+          currency: proposal.tokenSymbol,
+          recipient: proposal.recipient,
+          category: proposal.category,
+        },
+      }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["treasury", "overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["treasury", "proposals"] }),
+      ]);
+    },
+  });
+  const approveMutation = useMutation({
+    mutationFn: (proposalId: string) =>
+      apiRequest(
+        `/v1/treasury/proposals/${encodeURIComponent(proposalId)}/approve`,
+        { method: "POST" },
+      ),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["treasury", "overview"] }),
+        queryClient.invalidateQueries({ queryKey: ["treasury", "proposals"] }),
+      ]);
+    },
+  });
+
+  const overview: TreasuryOverview | null = overviewQuery.data
+    ? {
+        totalBalance: Number(overviewQuery.data.totalAUM),
+        tokenBalances: Object.entries(overviewQuery.data.allocations).map(
+          ([symbol, amount]) => ({
+            symbol,
+            amount: Number(amount),
+            valueUsd: null,
+          }),
+        ),
+        activeProposals: overviewQuery.data.pendingProposals,
+        monthlyYield: Number(overviewQuery.data.yieldEarned),
+        deployedInYield: Object.values(overviewQuery.data.allocations).reduce(
+          (sum, value) => sum + Number(value),
+          0,
+        ),
+        monthlySpend: Object.values(overviewQuery.data.monthlySpend).reduce(
+          (sum, value) => sum + Number(value),
+          0,
+        ),
+        pendingApprovals: overviewQuery.data.pendingProposals,
+        activeStrategies: overviewQuery.data.activeStrategies,
+        signerCount: overviewQuery.data.signerCount,
+        valuationScope: overviewQuery.data.valuationScope,
+      }
+    : null;
+  const policies = useMemo<SpendingPolicy[]>(
+    () =>
+      (policiesQuery.data || []).map((policy) => ({
+        id: policy.id,
+        name: policy.category,
+        description: "",
+        maxSingleTx: null,
+        dailyLimit: Number(policy.dailyLimit),
+        monthlyLimit: Number(policy.monthlyLimit),
+        requiredApprovals: policy.minApprovals,
+        enforcement: policy.requiresApproval ? "Strict" : "Advisory",
+        active: policy.active,
+        updatedAt: Date.parse(policy.updatedAt),
+      })),
+    [policiesQuery.data],
+  );
+  const strategies = useMemo<YieldStrategy[]>(
+    () =>
+      (strategiesQuery.data || []).map((strategy) => ({
+        id: strategy.id,
+        name: strategy.name,
+        description: "",
+        protocol: strategy.protocol,
+        allocated: Number(strategy.allocation),
+        apy: strategy.currentAPY,
+        risk:
+          strategy.riskLevel === "LOW"
+            ? "Conservative"
+            : strategy.riskLevel === "MEDIUM"
+              ? "Moderate"
+              : "Aggressive",
+        active: strategy.active,
+        earnedToDate: Number(strategy.totalYieldEarned),
+        lastRebalance: strategy.lastHarvestAt
+          ? Date.parse(strategy.lastHarvestAt)
+          : null,
+      })),
+    [strategiesQuery.data],
+  );
+  const proposals = useMemo<TreasuryProposal[]>(
+    () =>
+      (proposalsQuery.data || []).map((proposal) => ({
+        id: proposal.id,
+        title: proposal.title,
+        description: proposal.description,
+        proposer: proposal.proposer,
+        recipient: proposal.recipient,
+        amount: proposal.amount === null ? null : Number(proposal.amount),
+        tokenSymbol: proposal.currency,
+        category: proposal.category,
+        status:
+          proposal.status === "PENDING"
+            ? "Active"
+            : proposal.status === "APPROVED"
+              ? "Queued"
+              : proposal.status === "EXECUTED"
+                ? "Executed"
+                : proposal.status === "REJECTED"
+                  ? "Defeated"
+                  : "Expired",
+        votesFor: proposal.currentApprovals,
+        votesAgainst: null,
+        quorum: proposal.requiredApprovals,
+        createdAt: Date.parse(proposal.createdAt),
+        votingDeadline: Date.parse(proposal.expiresAt),
+        executedAt: proposal.executedAt
+          ? Date.parse(proposal.executedAt)
+          : null,
+      })),
+    [proposalsQuery.data],
+  );
 
   const voteOnProposal = useCallback(
     (proposalId: string, support: boolean) => {
-      setProposals((prev) =>
-        prev.map((p) =>
-          p.id === proposalId
-            ? {
-                ...p,
-                votesFor: support ? p.votesFor + 100_000 : p.votesFor,
-                votesAgainst: support ? p.votesAgainst : p.votesAgainst + 100_000,
-              }
-            : p,
-        ),
-      );
+      if (!support) {
+        return Promise.reject(
+          new ApiError("Proposal rejection is not available on the API", {
+            status: 501,
+            code: "TREASURY_REJECTION_UNAVAILABLE",
+          }),
+        );
+      }
+      return approveMutation.mutateAsync(proposalId);
     },
-    [],
+    [approveMutation],
   );
-
-  const createProposal = useCallback(
-    (proposal: Omit<TreasuryProposal, 'id' | 'status' | 'votesFor' | 'votesAgainst' | 'createdAt' | 'executedAt'>) => {
-      const newProposal: TreasuryProposal = {
-        ...proposal,
-        id: `0xprop${String(Date.now()).slice(-6)}`,
-        status: 'Draft',
-        votesFor: 0,
-        votesAgainst: 0,
-        createdAt: Date.now(),
-        executedAt: 0,
-      };
-      setProposals((prev) => [newProposal, ...prev]);
-    },
-    [],
-  );
+  const refetch = useCallback(async () => {
+    createMutation.reset();
+    approveMutation.reset();
+    await Promise.all([
+      overviewQuery.refetch(),
+      policiesQuery.refetch(),
+      strategiesQuery.refetch(),
+      proposalsQuery.refetch(),
+    ]);
+  }, [
+    approveMutation,
+    createMutation,
+    overviewQuery,
+    policiesQuery,
+    proposalsQuery,
+    strategiesQuery,
+  ]);
 
   return {
     overview,
     proposals,
     policies,
     strategies,
-    thresholds,
-    isLoading,
+    thresholds: [] as ApprovalThreshold[],
+    isLoading:
+      overviewQuery.isLoading ||
+      policiesQuery.isLoading ||
+      strategiesQuery.isLoading ||
+      proposalsQuery.isLoading,
+    isMutating: createMutation.isPending || approveMutation.isPending,
+    error:
+      overviewQuery.error ||
+      policiesQuery.error ||
+      strategiesQuery.error ||
+      proposalsQuery.error ||
+      null,
+    actionError: createMutation.error || approveMutation.error || null,
+    refetch,
     voteOnProposal,
-    createProposal,
+    createProposal: createMutation.mutateAsync,
   };
 }

@@ -1,8 +1,13 @@
-import { expect } from "chai";
-import { network } from "hardhat";
-
-const { ethers, networkHelpers } = await network.connect();
-const { loadFixture, time } = networkHelpers;
+const { expect } = require("chai");
+const { ethers } = require("hardhat");
+const {
+  loadFixture,
+  time,
+} = require("@nomicfoundation/hardhat-toolbox/network-helpers");
+const {
+  signChannelState,
+  configureMockBusinessRegistry,
+} = require("./helpers/paymentChannels");
 
 // ================================================================
 // PaymentChannels - HTLC branch coverage
@@ -17,8 +22,7 @@ describe("PaymentChannels - HTLC Coverage", function () {
     const pc = await PC.deploy(admin.address, treasury.address, 100);
 
     await pc.connect(admin).setSupportedToken(usdc.target, true);
-    await pc.connect(admin).setKYCStatus(partyA.address, true);
-    await pc.connect(admin).setKYCStatus(partyB.address, true);
+    await configureMockBusinessRegistry(pc, admin, [partyA, partyB]);
 
     const mintAmount = ethers.parseUnits("10000000", 6);
     await usdc.mint(partyA.address, mintAmount);
@@ -35,9 +39,13 @@ describe("PaymentChannels - HTLC Coverage", function () {
   async function activeChannelFixture() {
     const fixture = await loadFixture(deployFixture);
     const { pc, usdc, partyA, partyB } = fixture;
-    const tx = await pc.connect(partyA).openChannel(partyB.address, usdc.target, DEPOSIT, CHALLENGE_PERIOD, 100);
+    const tx = await pc
+      .connect(partyA)
+      .openChannel(partyB.address, usdc.target, DEPOSIT, CHALLENGE_PERIOD);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "ChannelOpened");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "ChannelOpened",
+    );
     const channelId = event.args[0];
     // Fund channel by partyB to make it ACTIVE
     await pc.connect(partyB).fundChannel(channelId, DEPOSIT);
@@ -48,19 +56,29 @@ describe("PaymentChannels - HTLC Coverage", function () {
     it("should create an HTLC by partyA", async function () {
       const { pc, partyA, channelId } = await activeChannelFixture();
       const secret = ethers.keccak256(ethers.toUtf8Bytes("secret"));
-      const hashLock = ethers.keccak256(ethers.solidityPacked(["bytes32"], [secret]));
+      const hashLock = ethers.keccak256(
+        ethers.solidityPacked(["bytes32"], [secret]),
+      );
       const timelock = BigInt(await time.latest()) + 7200n;
-      await expect(pc.connect(partyA).createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock))
-        .to.emit(pc, "HTLCCreated");
+      await expect(
+        pc
+          .connect(partyA)
+          .createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock),
+      ).to.emit(pc, "HTLCCreated");
     });
 
     it("should create an HTLC by partyB (covers balanceB branch)", async function () {
       const { pc, partyB, channelId } = await activeChannelFixture();
       const secret = ethers.keccak256(ethers.toUtf8Bytes("secret2"));
-      const hashLock = ethers.keccak256(ethers.solidityPacked(["bytes32"], [secret]));
+      const hashLock = ethers.keccak256(
+        ethers.solidityPacked(["bytes32"], [secret]),
+      );
       const timelock = BigInt(await time.latest()) + 7200n;
-      await expect(pc.connect(partyB).createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock))
-        .to.emit(pc, "HTLCCreated");
+      await expect(
+        pc
+          .connect(partyB)
+          .createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock),
+      ).to.emit(pc, "HTLCCreated");
     });
   });
 
@@ -68,31 +86,47 @@ describe("PaymentChannels - HTLC Coverage", function () {
     it("should claim HTLC (receiver is partyB)", async function () {
       const { pc, partyA, partyB, channelId } = await activeChannelFixture();
       const secret = ethers.keccak256(ethers.toUtf8Bytes("claimsecret"));
-      const hashLock = ethers.keccak256(ethers.solidityPacked(["bytes32"], [secret]));
+      const hashLock = ethers.keccak256(
+        ethers.solidityPacked(["bytes32"], [secret]),
+      );
       const timelock = BigInt(await time.latest()) + 7200n;
-      const tx = await pc.connect(partyA).createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
+      const tx = await pc
+        .connect(partyA)
+        .createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
       const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "HTLCCreated");
+      const event = receipt.logs.find(
+        (l) => l.fragment && l.fragment.name === "HTLCCreated",
+      );
       const htlcId = event.args[0];
 
       // Receiver (partyB) claims with preimage
-      await expect(pc.connect(partyB).claimHTLC(htlcId, secret))
-        .to.emit(pc, "HTLCClaimed");
+      await expect(pc.connect(partyB).claimHTLC(htlcId, secret)).to.emit(
+        pc,
+        "HTLCClaimed",
+      );
     });
 
     it("should claim HTLC (receiver is partyA - created by partyB)", async function () {
       const { pc, partyA, partyB, channelId } = await activeChannelFixture();
       const secret = ethers.keccak256(ethers.toUtf8Bytes("claimsecretB"));
-      const hashLock = ethers.keccak256(ethers.solidityPacked(["bytes32"], [secret]));
+      const hashLock = ethers.keccak256(
+        ethers.solidityPacked(["bytes32"], [secret]),
+      );
       const timelock = BigInt(await time.latest()) + 7200n;
-      const tx = await pc.connect(partyB).createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
+      const tx = await pc
+        .connect(partyB)
+        .createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
       const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "HTLCCreated");
+      const event = receipt.logs.find(
+        (l) => l.fragment && l.fragment.name === "HTLCCreated",
+      );
       const htlcId = event.args[0];
 
       // Receiver (partyA) claims
-      await expect(pc.connect(partyA).claimHTLC(htlcId, secret))
-        .to.emit(pc, "HTLCClaimed");
+      await expect(pc.connect(partyA).claimHTLC(htlcId, secret)).to.emit(
+        pc,
+        "HTLCClaimed",
+      );
     });
   });
 
@@ -100,32 +134,42 @@ describe("PaymentChannels - HTLC Coverage", function () {
     it("should refund expired HTLC (sender is partyA)", async function () {
       const { pc, partyA, channelId } = await activeChannelFixture();
       const secret = ethers.keccak256(ethers.toUtf8Bytes("refundsecret"));
-      const hashLock = ethers.keccak256(ethers.solidityPacked(["bytes32"], [secret]));
+      const hashLock = ethers.keccak256(
+        ethers.solidityPacked(["bytes32"], [secret]),
+      );
       const timelock = BigInt(await time.latest()) + 3601n;
-      const tx = await pc.connect(partyA).createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
+      const tx = await pc
+        .connect(partyA)
+        .createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
       const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "HTLCCreated");
+      const event = receipt.logs.find(
+        (l) => l.fragment && l.fragment.name === "HTLCCreated",
+      );
       const htlcId = event.args[0];
 
       // Wait for timelock expiry
       await time.increase(3602);
-      await expect(pc.refundHTLC(htlcId))
-        .to.emit(pc, "HTLCRefunded");
+      await expect(pc.refundHTLC(htlcId)).to.emit(pc, "HTLCRefunded");
     });
 
     it("should refund expired HTLC (sender is partyB)", async function () {
       const { pc, partyB, channelId } = await activeChannelFixture();
       const secret = ethers.keccak256(ethers.toUtf8Bytes("refundsecretB"));
-      const hashLock = ethers.keccak256(ethers.solidityPacked(["bytes32"], [secret]));
+      const hashLock = ethers.keccak256(
+        ethers.solidityPacked(["bytes32"], [secret]),
+      );
       const timelock = BigInt(await time.latest()) + 3601n;
-      const tx = await pc.connect(partyB).createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
+      const tx = await pc
+        .connect(partyB)
+        .createHTLC(channelId, DEPOSIT / 10n, hashLock, timelock);
       const receipt = await tx.wait();
-      const event = receipt.logs.find(l => l.fragment && l.fragment.name === "HTLCCreated");
+      const event = receipt.logs.find(
+        (l) => l.fragment && l.fragment.name === "HTLCCreated",
+      );
       const htlcId = event.args[0];
 
       await time.increase(3602);
-      await expect(pc.refundHTLC(htlcId))
-        .to.emit(pc, "HTLCRefunded");
+      await expect(pc.refundHTLC(htlcId)).to.emit(pc, "HTLCRefunded");
     });
   });
 
@@ -135,19 +179,30 @@ describe("PaymentChannels - HTLC Coverage", function () {
       const finalBalA = DEPOSIT;
       const finalBalB = DEPOSIT;
       const nonce = 1;
-      // Both parties agree - compute state hash
-      const stateHash = ethers.keccak256(
-        ethers.solidityPacked(
-          ["bytes32", "uint256", "uint256", "uint256", "string"],
-          [channelId, finalBalA, finalBalB, nonce, "CLOSE"]
-        )
+      const sigA = await signChannelState(
+        pc,
+        partyA,
+        channelId,
+        finalBalA,
+        finalBalB,
+        nonce,
+        "CLOSE",
       );
-      const sigA = await partyA.signMessage(ethers.getBytes(stateHash));
-      const sigB = await partyB.signMessage(ethers.getBytes(stateHash));
+      const sigB = await signChannelState(
+        pc,
+        partyB,
+        channelId,
+        finalBalA,
+        finalBalB,
+        nonce,
+        "CLOSE",
+      );
 
-      await expect(pc.connect(partyA).cooperativeClose(
-        channelId, finalBalA, finalBalB, nonce, sigA, sigB
-      )).to.emit(pc, "ChannelCooperativeClose");
+      await expect(
+        pc
+          .connect(partyA)
+          .cooperativeClose(channelId, finalBalA, finalBalB, nonce, sigA, sigB),
+      ).to.emit(pc, "ChannelCooperativeClose");
     });
   });
 });
@@ -164,9 +219,11 @@ describe("LiquidityPool - Flash Loan Repay Coverage", function () {
 
     let token0, token1;
     if (BigInt(tokenA.target) < BigInt(tokenB.target)) {
-      token0 = tokenA; token1 = tokenB;
+      token0 = tokenA;
+      token1 = tokenB;
     } else {
-      token0 = tokenB; token1 = tokenA;
+      token0 = tokenB;
+      token1 = tokenA;
     }
 
     const LP = await ethers.getContractFactory("LiquidityPool");
@@ -175,9 +232,13 @@ describe("LiquidityPool - Flash Loan Repay Coverage", function () {
     const LP_ROLE = await pool.LIQUIDITY_PROVIDER_ROLE();
     await pool.connect(admin).grantRole(LP_ROLE, provider.address);
 
-    const poolTx = await pool.connect(admin).createPool(token0.target, token1.target, 30, 10, 8000);
+    const poolTx = await pool
+      .connect(admin)
+      .createPool(token0.target, token1.target, 30, 10, 8000);
     const poolReceipt = await poolTx.wait();
-    const poolEvent = poolReceipt.logs.find(l => l.fragment && l.fragment.name === "PoolCreated");
+    const poolEvent = poolReceipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "PoolCreated",
+    );
     const poolId = poolEvent.args[0];
 
     const mintAmount = ethers.parseEther("10000000");
@@ -187,7 +248,15 @@ describe("LiquidityPool - Flash Loan Repay Coverage", function () {
     await token1.connect(provider).approve(pool.target, ethers.MaxUint256);
 
     // Add liquidity
-    await pool.connect(provider).addLiquidity(poolId, ethers.parseEther("10000"), ethers.parseEther("10000"), -1000, 1000);
+    await pool
+      .connect(provider)
+      .addLiquidity(
+        poolId,
+        ethers.parseEther("10000"),
+        ethers.parseEther("10000"),
+        -1000,
+        1000,
+      );
 
     // Mint for borrower
     await token0.mint(borrower.address, mintAmount);
@@ -195,19 +264,32 @@ describe("LiquidityPool - Flash Loan Repay Coverage", function () {
     await token0.connect(borrower).approve(pool.target, ethers.MaxUint256);
     await token1.connect(borrower).approve(pool.target, ethers.MaxUint256);
 
-    return { pool, token0, token1, admin, provider, borrower, treasuryAddr, poolId };
+    return {
+      pool,
+      token0,
+      token1,
+      admin,
+      provider,
+      borrower,
+      treasuryAddr,
+      poolId,
+    };
   }
 
   it("should revert flash loan when pool doesn't exist", async function () {
     const { pool, token0, borrower } = await loadFixture(deployFixture);
-    await expect(pool.connect(borrower).flashLoan(ethers.ZeroHash, token0.target, 100, "0x"))
-      .to.be.revert(ethers);
+    await expect(
+      pool
+        .connect(borrower)
+        .flashLoan(ethers.ZeroHash, token0.target, 100, "0x"),
+    ).to.be.reverted;
   });
 
   it("should revert addLiquidity with zero amounts", async function () {
     const { pool, provider, poolId } = await loadFixture(deployFixture);
-    await expect(pool.connect(provider).addLiquidity(poolId, 0, 0, -1000, 1000))
-      .to.be.revertedWithCustomError(pool, "ZeroAmount");
+    await expect(
+      pool.connect(provider).addLiquidity(poolId, 0, 0, -1000, 1000),
+    ).to.be.revertedWithCustomError(pool, "ZeroAmount");
   });
 });
 
@@ -216,7 +298,16 @@ describe("LiquidityPool - Flash Loan Repay Coverage", function () {
 // ================================================================
 describe("InvoiceFinancing - Branch Coverage Push", function () {
   async function deployFixture() {
-    const [admin, factor, analyst, arbiter, creditor, debtor, other, treasuryAddr] = await ethers.getSigners();
+    const [
+      admin,
+      factor,
+      analyst,
+      arbiter,
+      creditor,
+      debtor,
+      other,
+      treasuryAddr,
+    ] = await ethers.getSigners();
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const token = await MockERC20.deploy("USDC", "USDC", 6);
 
@@ -237,39 +328,73 @@ describe("InvoiceFinancing - Branch Coverage Push", function () {
     await token.connect(debtor).approve(invoicing.target, ethers.MaxUint256);
     await token.connect(factor).approve(invoicing.target, ethers.MaxUint256);
 
-    return { invoicing, token, admin, factor, analyst, arbiter, creditor, debtor, other, treasuryAddr };
+    return {
+      invoicing,
+      token,
+      admin,
+      factor,
+      analyst,
+      arbiter,
+      creditor,
+      debtor,
+      other,
+      treasuryAddr,
+    };
   }
 
   it("should repay a financed invoice with pro-rata distribution to factor", async function () {
-    const { invoicing, factor, debtor, creditor, token } = await loadFixture(deployFixture);
+    const { invoicing, factor, debtor, creditor, token } =
+      await loadFixture(deployFixture);
     const faceValue = ethers.parseUnits("100000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const docHash = ethers.keccak256(ethers.toUtf8Bytes("financed-inv"));
-    const tx = await invoicing.connect(creditor).createInvoice(
-      debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-    );
+    const tx = await invoicing
+      .connect(creditor)
+      .createInvoice(
+        debtor.address,
+        faceValue,
+        token.target,
+        maturity,
+        docHash,
+        7,
+        200,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+    );
     const invoiceId = event.args[0];
 
     // Finance the full invoice
     await invoicing.connect(factor).financeInvoice(invoiceId, faceValue, 300);
 
     // Repay the full invoice as debtor
-    await expect(invoicing.connect(debtor).repayInvoice(invoiceId, faceValue))
-      .to.emit(invoicing, "InvoiceSettled");
+    await expect(
+      invoicing.connect(debtor).repayInvoice(invoiceId, faceValue),
+    ).to.emit(invoicing, "InvoiceSettled");
   });
 
   it("should handle invoice with excessive discount (expected return capped)", async function () {
-    const { invoicing, factor, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, factor, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const faceValue = ethers.parseUnits("100000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const docHash = ethers.keccak256(ethers.toUtf8Bytes("cap-inv"));
-    const tx = await invoicing.connect(creditor).createInvoice(
-      debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-    );
+    const tx = await invoicing
+      .connect(creditor)
+      .createInvoice(
+        debtor.address,
+        faceValue,
+        token.target,
+        maturity,
+        docHash,
+        7,
+        200,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+    );
     const invoiceId = event.args[0];
 
     // High discount rate to potentially cap expectedReturn
@@ -277,108 +402,194 @@ describe("InvoiceFinancing - Branch Coverage Push", function () {
   });
 
   it("should revert finance of cancelled invoice", async function () {
-    const { invoicing, factor, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, factor, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const faceValue = ethers.parseUnits("100000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const docHash = ethers.keccak256(ethers.toUtf8Bytes("cancel-inv"));
-    const tx = await invoicing.connect(creditor).createInvoice(
-      debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-    );
+    const tx = await invoicing
+      .connect(creditor)
+      .createInvoice(
+        debtor.address,
+        faceValue,
+        token.target,
+        maturity,
+        docHash,
+        7,
+        200,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+    );
     const invoiceId = event.args[0];
 
     await invoicing.connect(creditor).cancelInvoice(invoiceId);
 
-    await expect(invoicing.connect(factor).financeInvoice(invoiceId, faceValue, 300))
-      .to.be.revertedWithCustomError(invoicing, "InvalidInvoiceStatus");
+    await expect(
+      invoicing.connect(factor).financeInvoice(invoiceId, faceValue, 300),
+    ).to.be.revertedWithCustomError(invoicing, "InvalidInvoiceStatus");
   });
 
   it("should revert dispute on already disputed invoice", async function () {
-    const { invoicing, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const faceValue = ethers.parseUnits("100000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const docHash = ethers.keccak256(ethers.toUtf8Bytes("double-dispute"));
-    const tx = await invoicing.connect(creditor).createInvoice(
-      debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-    );
+    const tx = await invoicing
+      .connect(creditor)
+      .createInvoice(
+        debtor.address,
+        faceValue,
+        token.target,
+        maturity,
+        docHash,
+        7,
+        200,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+    );
     const invoiceId = event.args[0];
 
     await invoicing.connect(debtor).initiateDispute(invoiceId, "first dispute");
-    await expect(invoicing.connect(creditor).initiateDispute(invoiceId, "second dispute"))
-      .to.be.revertedWithCustomError(invoicing, "DisputeAlreadyActive");
+    await expect(
+      invoicing.connect(creditor).initiateDispute(invoiceId, "second dispute"),
+    ).to.be.revertedWithCustomError(invoicing, "DisputeAlreadyActive");
   });
 
   it("should revert cancel on non-CREATED invoice", async function () {
-    const { invoicing, factor, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, factor, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const faceValue = ethers.parseUnits("100000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const docHash = ethers.keccak256(ethers.toUtf8Bytes("financed-cancel"));
-    const tx = await invoicing.connect(creditor).createInvoice(
-      debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-    );
+    const tx = await invoicing
+      .connect(creditor)
+      .createInvoice(
+        debtor.address,
+        faceValue,
+        token.target,
+        maturity,
+        docHash,
+        7,
+        200,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+    );
     const invoiceId = event.args[0];
 
     // Finance changes status to PARTIALLY_FINANCED
-    await invoicing.connect(factor).financeInvoice(invoiceId, faceValue / 2n, 300);
+    await invoicing
+      .connect(factor)
+      .financeInvoice(invoiceId, faceValue / 2n, 300);
 
-    await expect(invoicing.connect(creditor).cancelInvoice(invoiceId))
-      .to.be.revertedWithCustomError(invoicing, "InvalidInvoiceStatus");
+    await expect(
+      invoicing.connect(creditor).cancelInvoice(invoiceId),
+    ).to.be.revertedWithCustomError(invoicing, "InvalidInvoiceStatus");
   });
 
   it("should revert dispute by non-party", async function () {
-    const { invoicing, other, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, other, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const faceValue = ethers.parseUnits("100000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const docHash = ethers.keccak256(ethers.toUtf8Bytes("non-party-dispute"));
-    const tx = await invoicing.connect(creditor).createInvoice(
-      debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-    );
+    const tx = await invoicing
+      .connect(creditor)
+      .createInvoice(
+        debtor.address,
+        faceValue,
+        token.target,
+        maturity,
+        docHash,
+        7,
+        200,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+    );
     const invoiceId = event.args[0];
 
-    await expect(invoicing.connect(other).initiateDispute(invoiceId, "not party"))
-      .to.be.revertedWithCustomError(invoicing, "NotInvoiceParty");
+    await expect(
+      invoicing.connect(other).initiateDispute(invoiceId, "not party"),
+    ).to.be.revertedWithCustomError(invoicing, "NotInvoiceParty");
   });
 
   it("should revert invalid discount rate", async function () {
-    const { invoicing, factor, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, factor, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const faceValue = ethers.parseUnits("100000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const docHash = ethers.keccak256(ethers.toUtf8Bytes("bad-discount"));
-    const tx = await invoicing.connect(creditor).createInvoice(
-      debtor.address, faceValue, token.target, maturity, docHash, 7, 200
-    );
+    const tx = await invoicing
+      .connect(creditor)
+      .createInvoice(
+        debtor.address,
+        faceValue,
+        token.target,
+        maturity,
+        docHash,
+        7,
+        200,
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "InvoiceCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "InvoiceCreated",
+    );
     const invoiceId = event.args[0];
 
     const MAX_DISCOUNT = await invoicing.MAX_DISCOUNT_BPS();
-    await expect(invoicing.connect(factor).financeInvoice(invoiceId, faceValue, MAX_DISCOUNT + 1n))
-      .to.be.revertedWithCustomError(invoicing, "InvalidDiscountRate");
+    await expect(
+      invoicing
+        .connect(factor)
+        .financeInvoice(invoiceId, faceValue, MAX_DISCOUNT + 1n),
+    ).to.be.revertedWithCustomError(invoicing, "InvalidDiscountRate");
   });
 
   it("should revert invalid grace period", async function () {
-    const { invoicing, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const MAX_GRACE = await invoicing.MAX_GRACE_PERIOD();
-    await expect(invoicing.connect(creditor).createInvoice(
-      debtor.address, ethers.parseUnits("100000", 6), token.target, maturity, ethers.ZeroHash, Number(MAX_GRACE) + 1, 200
-    )).to.be.revertedWithCustomError(invoicing, "InvalidGracePeriod");
+    await expect(
+      invoicing
+        .connect(creditor)
+        .createInvoice(
+          debtor.address,
+          ethers.parseUnits("100000", 6),
+          token.target,
+          maturity,
+          ethers.ZeroHash,
+          Number(MAX_GRACE) + 1,
+          200,
+        ),
+    ).to.be.revertedWithCustomError(invoicing, "InvalidGracePeriod");
   });
 
   it("should revert invalid penalty rate", async function () {
-    const { invoicing, creditor, debtor, token } = await loadFixture(deployFixture);
+    const { invoicing, creditor, debtor, token } =
+      await loadFixture(deployFixture);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
     const MAX_PENALTY = await invoicing.MAX_LATE_PENALTY_BPS();
-    await expect(invoicing.connect(creditor).createInvoice(
-      debtor.address, ethers.parseUnits("100000", 6), token.target, maturity, ethers.ZeroHash, 7, Number(MAX_PENALTY) + 1
-    )).to.be.revertedWithCustomError(invoicing, "InvalidPenaltyRate");
+    await expect(
+      invoicing
+        .connect(creditor)
+        .createInvoice(
+          debtor.address,
+          ethers.parseUnits("100000", 6),
+          token.target,
+          maturity,
+          ethers.ZeroHash,
+          7,
+          Number(MAX_PENALTY) + 1,
+        ),
+    ).to.be.revertedWithCustomError(invoicing, "InvalidPenaltyRate");
   });
 });
 
@@ -387,7 +598,15 @@ describe("InvoiceFinancing - Branch Coverage Push", function () {
 // ================================================================
 describe("FXHedgingVault - Option & MtM Coverage", function () {
   async function deployFixture() {
-    const [admin, hedger, oracle, riskManager, liquidator, other, treasuryAddr] = await ethers.getSigners();
+    const [
+      admin,
+      hedger,
+      oracle,
+      riskManager,
+      liquidator,
+      other,
+      treasuryAddr,
+    ] = await ethers.getSigners();
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const collateral = await MockERC20.deploy("USDC", "USDC", 6);
 
@@ -398,15 +617,19 @@ describe("FXHedgingVault - Option & MtM Coverage", function () {
     const RISK_MANAGER_ROLE = await vault.RISK_MANAGER_ROLE();
     const LIQUIDATOR_ROLE = await vault.LIQUIDATOR_ROLE();
     await vault.connect(admin).grantRole(ORACLE_ROLE, oracle.address);
-    await vault.connect(admin).grantRole(RISK_MANAGER_ROLE, riskManager.address);
+    await vault
+      .connect(admin)
+      .grantRole(RISK_MANAGER_ROLE, riskManager.address);
     await vault.connect(admin).grantRole(LIQUIDATOR_ROLE, liquidator.address);
     await vault.connect(admin).setSupportedCollateral(collateral.target, true);
 
-    const pairTx = await vault.connect(admin).addCurrencyPair(
-      "0x555344", "0x455552", 10000, 1000, 500
-    );
+    const pairTx = await vault
+      .connect(admin)
+      .addCurrencyPair("0x555344", "0x455552", 10000, 1000, 500);
     const pairReceipt = await pairTx.wait();
-    const pairEvent = pairReceipt.logs.find(l => l.fragment && l.fragment.name === "CurrencyPairAdded");
+    const pairEvent = pairReceipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "CurrencyPairAdded",
+    );
     const pairId = pairEvent.args[0];
 
     await vault.connect(oracle).submitFXRate(pairId, 367250000n);
@@ -415,28 +638,54 @@ describe("FXHedgingVault - Option & MtM Coverage", function () {
     await collateral.mint(hedger.address, mintAmount);
     await collateral.connect(hedger).approve(vault.target, ethers.MaxUint256);
 
-    return { vault, collateral, admin, hedger, oracle, riskManager, liquidator, other, treasuryAddr, pairId };
+    return {
+      vault,
+      collateral,
+      admin,
+      hedger,
+      oracle,
+      riskManager,
+      liquidator,
+      other,
+      treasuryAddr,
+      pairId,
+    };
   }
 
   it("should assess hedge effectiveness", async function () {
-    const { vault, collateral, hedger, oracle, riskManager, pairId } = await loadFixture(deployFixture);
+    const { vault, collateral, hedger, oracle, riskManager, pairId } =
+      await loadFixture(deployFixture);
     const notional = ethers.parseUnits("100000", 6);
     const coll = ethers.parseUnits("15000", 6);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
-    const tx = await vault.connect(hedger).createForward(pairId, notional, maturity, collateral.target, coll);
+    const tx = await vault
+      .connect(hedger)
+      .createForward(pairId, notional, maturity, collateral.target, coll);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "ForwardCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "ForwardCreated",
+    );
     const positionId = event.args[0];
 
-    await vault.connect(riskManager).assessHedgeEffectiveness(positionId, ethers.parseUnits("1000", 6));
+    await vault
+      .connect(riskManager)
+      .assessHedgeEffectiveness(positionId, ethers.parseUnits("1000", 6));
   });
 
   it("should revert createForward with non-existent pair", async function () {
     const { vault, collateral, hedger } = await loadFixture(deployFixture);
     const maturity = BigInt(await time.latest()) + 86400n * 90n;
-    await expect(vault.connect(hedger).createForward(
-      ethers.ZeroHash, ethers.parseUnits("1000", 6), maturity, collateral.target, ethers.parseUnits("200", 6)
-    )).to.be.revertedWithCustomError(vault, "PairNotFound");
+    await expect(
+      vault
+        .connect(hedger)
+        .createForward(
+          ethers.ZeroHash,
+          ethers.parseUnits("1000", 6),
+          maturity,
+          collateral.target,
+          ethers.parseUnits("200", 6),
+        ),
+    ).to.be.revertedWithCustomError(vault, "PairNotFound");
   });
 });
 
@@ -445,7 +694,8 @@ describe("FXHedgingVault - Option & MtM Coverage", function () {
 // ================================================================
 describe("CrossChainRouter - Branch Push", function () {
   async function deployFixture() {
-    const [admin, relay1, sender, recipient, other, treasuryAddr] = await ethers.getSigners();
+    const [admin, relay1, sender, recipient, other, treasuryAddr] =
+      await ethers.getSigners();
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const token = await MockERC20.deploy("USDC", "USDC", 6);
 
@@ -453,41 +703,69 @@ describe("CrossChainRouter - Branch Push", function () {
     const router = await CCR.deploy(admin.address, treasuryAddr.address);
 
     await router.connect(admin).setTokenSupport(token.target, true);
-    await router.connect(admin).addChain(
-      1, "Ethereum", ethers.parseUnits("1", 6), 50, 12, 86400,
-      ethers.parseUnits("10", 6), ethers.parseUnits("1000000", 6)
-    );
+    await router
+      .connect(admin)
+      .addChain(
+        1,
+        "Ethereum",
+        ethers.parseUnits("1", 6),
+        50,
+        12,
+        86400,
+        ethers.parseUnits("10", 6),
+        ethers.parseUnits("1000000", 6),
+      );
 
     const mintAmount = ethers.parseUnits("10000000", 6);
     await token.mint(sender.address, mintAmount);
     await token.connect(sender).approve(router.target, ethers.MaxUint256);
 
-    return { router, token, admin, relay1, sender, recipient, other, treasuryAddr };
+    return {
+      router,
+      token,
+      admin,
+      relay1,
+      sender,
+      recipient,
+      other,
+      treasuryAddr,
+    };
   }
 
   it("should initiate a cross-chain transfer", async function () {
     const { router, token, sender } = await loadFixture(deployFixture);
     const amount = ethers.parseUnits("1000", 6);
     const recipientHash = ethers.keccak256(ethers.toUtf8Bytes("recipient"));
-    await expect(router.connect(sender).initiateTransfer(
-      token.target, amount, 1, recipientHash
-    )).to.emit(router, "TransferInitiated");
+    await expect(
+      router
+        .connect(sender)
+        .initiateTransfer(token.target, amount, 1, recipientHash),
+    ).to.emit(router, "TransferInitiated");
   });
 
   it("should revert transfer to unsupported chain", async function () {
     const { router, token, sender } = await loadFixture(deployFixture);
     const recipientHash = ethers.keccak256(ethers.toUtf8Bytes("recipient"));
-    await expect(router.connect(sender).initiateTransfer(
-      token.target, ethers.parseUnits("100", 6), 999, recipientHash
-    )).to.be.revertedWithCustomError(router, "UnsupportedChain");
+    await expect(
+      router
+        .connect(sender)
+        .initiateTransfer(
+          token.target,
+          ethers.parseUnits("100", 6),
+          999,
+          recipientHash,
+        ),
+    ).to.be.revertedWithCustomError(router, "UnsupportedChain");
   });
 
   it("should revert transfer below minimum", async function () {
     const { router, token, sender } = await loadFixture(deployFixture);
     const recipientHash = ethers.keccak256(ethers.toUtf8Bytes("recipient"));
-    await expect(router.connect(sender).initiateTransfer(
-      token.target, 1, 1, recipientHash
-    )).to.be.revertedWithCustomError(router, "AmountBelowMinimum");
+    await expect(
+      router
+        .connect(sender)
+        .initiateTransfer(token.target, 1, 1, recipientHash),
+    ).to.be.revertedWithCustomError(router, "AmountBelowMinimum");
   });
 
   it("should revert transfer above maximum", async function () {
@@ -496,17 +774,26 @@ describe("CrossChainRouter - Branch Push", function () {
     await token.mint(sender.address, tooMuch);
     await token.connect(sender).approve(router.target, tooMuch);
     const recipientHash = ethers.keccak256(ethers.toUtf8Bytes("recipient"));
-    await expect(router.connect(sender).initiateTransfer(
-      token.target, tooMuch, 1, recipientHash
-    )).to.be.revertedWithCustomError(router, "AmountAboveMaximum");
+    await expect(
+      router
+        .connect(sender)
+        .initiateTransfer(token.target, tooMuch, 1, recipientHash),
+    ).to.be.revertedWithCustomError(router, "AmountAboveMaximum");
   });
 
   it("should revert transfer with unsupported token", async function () {
     const { router, sender, other } = await loadFixture(deployFixture);
     const recipientHash = ethers.keccak256(ethers.toUtf8Bytes("recipient"));
-    await expect(router.connect(sender).initiateTransfer(
-      other.address, ethers.parseUnits("100", 6), 1, recipientHash
-    )).to.be.revertedWithCustomError(router, "UnsupportedToken");
+    await expect(
+      router
+        .connect(sender)
+        .initiateTransfer(
+          other.address,
+          ethers.parseUnits("100", 6),
+          1,
+          recipientHash,
+        ),
+    ).to.be.revertedWithCustomError(router, "UnsupportedToken");
   });
 });
 
@@ -515,10 +802,29 @@ describe("CrossChainRouter - Branch Push", function () {
 // ================================================================
 describe("NoblePay - Branch Push", function () {
   async function deployFixture() {
-    const [admin, treasury, teeNode, complianceOfficer, business1, recipient, other] = await ethers.getSigners();
+    const [
+      admin,
+      treasury,
+      teeNode,
+      complianceOfficer,
+      business1,
+      recipient,
+      other,
+    ] = await ethers.getSigners();
     const NP = await ethers.getContractFactory("NoblePay");
     const baseFee = ethers.parseUnits("1", 6);
-    const noblepay = await NP.deploy(admin.address, treasury.address, baseFee, 50);
+    const noblepay = await NP.deploy(
+      admin.address,
+      treasury.address,
+      baseFee,
+      50,
+    );
+    const Registry = await ethers.getContractFactory("MockBusinessRegistry");
+    const registry = await Registry.deploy();
+    const Gate = await ethers.getContractFactory("MockSealSettlementGate");
+    const gate = await Gate.deploy(true);
+    await registry.setBusiness(business1.address, true, 0);
+    await noblepay.connect(admin).configureTrust(registry.target, gate.target);
 
     const MockERC20 = await ethers.getContractFactory("MockERC20");
     const usdc = await MockERC20.deploy("USD Coin", "USDC", 6);
@@ -526,7 +832,9 @@ describe("NoblePay - Branch Push", function () {
     const TEE_NODE_ROLE = await noblepay.TEE_NODE_ROLE();
     const COMPLIANCE_OFFICER_ROLE = await noblepay.COMPLIANCE_OFFICER_ROLE();
     await noblepay.connect(admin).grantRole(TEE_NODE_ROLE, teeNode.address);
-    await noblepay.connect(admin).grantRole(COMPLIANCE_OFFICER_ROLE, complianceOfficer.address);
+    await noblepay
+      .connect(admin)
+      .grantRole(COMPLIANCE_OFFICER_ROLE, complianceOfficer.address);
     await noblepay.connect(admin).setSupportedToken(usdc.target, true);
     await noblepay.connect(admin).syncBusiness(business1.address, 0, true);
 
@@ -534,81 +842,163 @@ describe("NoblePay - Branch Push", function () {
     await usdc.mint(business1.address, amount);
     await usdc.connect(business1).approve(noblepay.target, amount);
 
-    return { noblepay, usdc, admin, treasury, teeNode, complianceOfficer, business1, recipient, other };
+    return {
+      noblepay,
+      registry,
+      gate,
+      usdc,
+      admin,
+      treasury,
+      teeNode,
+      complianceOfficer,
+      business1,
+      recipient,
+      other,
+    };
   }
 
   it("should revert payment with unsupported token", async function () {
-    const { noblepay, business1, recipient, other } = await loadFixture(deployFixture);
-    await expect(noblepay.connect(business1).initiatePayment(
-      recipient.address, 1000, other.address, ethers.ZeroHash, "0x555344"
-    )).to.be.revertedWithCustomError(noblepay, "UnsupportedToken");
+    const { noblepay, business1, recipient, other } =
+      await loadFixture(deployFixture);
+    await expect(
+      noblepay
+        .connect(business1)
+        .initiatePayment(
+          recipient.address,
+          1000,
+          other.address,
+          ethers.ZeroHash,
+          "0x555344",
+        ),
+    ).to.be.revertedWithCustomError(noblepay, "UnsupportedToken");
   });
 
   it("should revert payment by unregistered business", async function () {
-    const { noblepay, usdc, other, recipient } = await loadFixture(deployFixture);
+    const { noblepay, usdc, other, recipient } =
+      await loadFixture(deployFixture);
     const amount = ethers.parseUnits("100", 6);
     await usdc.mint(other.address, amount);
     await usdc.connect(other).approve(noblepay.target, amount);
-    await expect(noblepay.connect(other).initiatePayment(
-      recipient.address, amount, usdc.target, ethers.ZeroHash, "0x555344"
-    )).to.be.revertedWithCustomError(noblepay, "NotRegisteredBusiness");
+    await expect(
+      noblepay
+        .connect(other)
+        .initiatePayment(
+          recipient.address,
+          amount,
+          usdc.target,
+          ethers.ZeroHash,
+          "0x555344",
+        ),
+    ).to.be.revertedWithCustomError(noblepay, "NotRegisteredBusiness");
   });
 
   it("should revert payment to zero address", async function () {
     const { noblepay, usdc, business1 } = await loadFixture(deployFixture);
-    await expect(noblepay.connect(business1).initiatePayment(
-      ethers.ZeroAddress, 1000, usdc.target, ethers.ZeroHash, "0x555344"
-    )).to.be.revertedWithCustomError(noblepay, "ZeroAddress");
+    await expect(
+      noblepay
+        .connect(business1)
+        .initiatePayment(
+          ethers.ZeroAddress,
+          1000,
+          usdc.target,
+          ethers.ZeroHash,
+          "0x555344",
+        ),
+    ).to.be.revertedWithCustomError(noblepay, "ZeroAddress");
   });
 
   it("should revert payment with zero amount", async function () {
-    const { noblepay, usdc, business1, recipient } = await loadFixture(deployFixture);
-    await expect(noblepay.connect(business1).initiatePayment(
-      recipient.address, 0, usdc.target, ethers.ZeroHash, "0x555344"
-    )).to.be.revertedWithCustomError(noblepay, "ZeroAmount");
+    const { noblepay, usdc, business1, recipient } =
+      await loadFixture(deployFixture);
+    await expect(
+      noblepay
+        .connect(business1)
+        .initiatePayment(
+          recipient.address,
+          0,
+          usdc.target,
+          ethers.ZeroHash,
+          "0x555344",
+        ),
+    ).to.be.revertedWithCustomError(noblepay, "ZeroAmount");
   });
 
   it("should revert refund of non-refundable payment", async function () {
-    const { noblepay, usdc, teeNode, business1, recipient } = await loadFixture(deployFixture);
+    const { noblepay, usdc, teeNode, business1, recipient } =
+      await loadFixture(deployFixture);
     const amount = ethers.parseUnits("100", 6);
-    const tx = await noblepay.connect(business1).initiatePayment(
-      recipient.address, amount, usdc.target, ethers.ZeroHash, "0x555344"
-    );
+    const tx = await noblepay
+      .connect(business1)
+      .initiatePayment(
+        recipient.address,
+        amount,
+        usdc.target,
+        ethers.ZeroHash,
+        "0x555344",
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "PaymentInitiated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "PaymentInitiated",
+    );
     const paymentId = event.args[0];
 
     // Approve the payment
-    await noblepay.connect(teeNode).submitComplianceResult(
-      paymentId, true, 30, true, ethers.ZeroHash, "0x1234"
-    );
+    await noblepay
+      .connect(teeNode)
+      .submitComplianceResult(
+        paymentId,
+        true,
+        30,
+        true,
+        ethers.ZeroHash,
+        "0x1234",
+      );
     // Settle it
     await noblepay.settlePayment(paymentId);
 
     // Try to refund settled payment
-    await expect(noblepay.refundPayment(paymentId))
-      .to.be.revertedWith("NoblePay: cannot refund this payment");
+    await expect(noblepay.refundPayment(paymentId)).to.be.revertedWith(
+      "NoblePay: cannot refund this payment",
+    );
   });
 
   it("should settle payment with percentage fee only (no base fee)", async function () {
-    const { noblepay, usdc, admin, teeNode, business1, recipient } = await loadFixture(deployFixture);
+    const { noblepay, usdc, admin, teeNode, business1, recipient } =
+      await loadFixture(deployFixture);
     // Set base fee to 0 but keep percentage fee
     await noblepay.connect(admin).setFees(0, 100);
 
     const amount = ethers.parseUnits("100", 6);
-    const tx = await noblepay.connect(business1).initiatePayment(
-      recipient.address, amount, usdc.target, ethers.ZeroHash, "0x555344"
-    );
+    const tx = await noblepay
+      .connect(business1)
+      .initiatePayment(
+        recipient.address,
+        amount,
+        usdc.target,
+        ethers.ZeroHash,
+        "0x555344",
+      );
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "PaymentInitiated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "PaymentInitiated",
+    );
     const paymentId = event.args[0];
 
-    await noblepay.connect(teeNode).submitComplianceResult(
-      paymentId, true, 30, true, ethers.ZeroHash, "0x1234"
-    );
+    await noblepay
+      .connect(teeNode)
+      .submitComplianceResult(
+        paymentId,
+        true,
+        30,
+        true,
+        ethers.ZeroHash,
+        "0x1234",
+      );
 
-    await expect(noblepay.settlePayment(paymentId))
-      .to.emit(noblepay, "PaymentSettled");
+    await expect(noblepay.settlePayment(paymentId)).to.emit(
+      noblepay,
+      "PaymentSettled",
+    );
   });
 });
 
@@ -634,9 +1024,13 @@ describe("StreamingPayments - Branch Push", function () {
     const { sp, token, sender, recipient } = await loadFixture(deployFixture);
     const amount = ethers.parseUnits("10000", 6);
     const duration = 86400;
-    const tx = await sp.connect(sender).createStream(recipient.address, token.target, amount, duration, 0);
+    const tx = await sp
+      .connect(sender)
+      .createStream(recipient.address, token.target, amount, duration, 0);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "StreamCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "StreamCreated",
+    );
     const streamId = event.args[0];
 
     // Advance half the duration
@@ -649,28 +1043,40 @@ describe("StreamingPayments - Branch Push", function () {
   });
 
   it("should revert withdraw by non-recipient", async function () {
-    const { sp, token, sender, recipient, other } = await loadFixture(deployFixture);
+    const { sp, token, sender, recipient, other } =
+      await loadFixture(deployFixture);
     const amount = ethers.parseUnits("10000", 6);
-    const tx = await sp.connect(sender).createStream(recipient.address, token.target, amount, 86400, 0);
+    const tx = await sp
+      .connect(sender)
+      .createStream(recipient.address, token.target, amount, 86400, 0);
     const receipt = await tx.wait();
-    const event = receipt.logs.find(l => l.fragment && l.fragment.name === "StreamCreated");
+    const event = receipt.logs.find(
+      (l) => l.fragment && l.fragment.name === "StreamCreated",
+    );
     const streamId = event.args[0];
 
     await time.increase(3600);
-    await expect(sp.connect(other).withdraw(streamId))
-      .to.be.revertedWithCustomError(sp, "Unauthorized");
+    await expect(
+      sp.connect(other).withdraw(streamId),
+    ).to.be.revertedWithCustomError(sp, "Unauthorized");
   });
 
   it("should revert creating stream to self", async function () {
     const { sp, token, sender } = await loadFixture(deployFixture);
-    await expect(sp.connect(sender).createStream(sender.address, token.target, 1000, 86400, 0))
-      .to.be.revertedWithCustomError(sp, "InvalidRecipient");
+    await expect(
+      sp
+        .connect(sender)
+        .createStream(sender.address, token.target, 1000, 86400, 0),
+    ).to.be.revertedWithCustomError(sp, "InvalidRecipient");
   });
 
   it("should revert creating stream with duration too short", async function () {
     const { sp, token, sender, recipient } = await loadFixture(deployFixture);
-    await expect(sp.connect(sender).createStream(recipient.address, token.target, 1000, 60, 0))
-      .to.be.revertedWithCustomError(sp, "InvalidDuration");
+    await expect(
+      sp
+        .connect(sender)
+        .createStream(recipient.address, token.target, 1000, 60, 0),
+    ).to.be.revertedWithCustomError(sp, "InvalidDuration");
   });
 });
 
@@ -689,20 +1095,28 @@ describe("BusinessRegistry - Branch Push", function () {
 
   it("should register and verify a business", async function () {
     const { br, verifier, biz1, officer1 } = await loadFixture(deployFixture);
-    await br.connect(biz1).registerBusiness("LIC001", "Test Corp", 0, officer1.address);
-    await expect(br.connect(verifier).verifyBusiness(biz1.address))
-      .to.emit(br, "BusinessVerified");
+    await br
+      .connect(biz1)
+      .registerBusiness("LIC001", "Test Corp", 0, officer1.address);
+    await expect(br.connect(verifier).verifyBusiness(biz1.address)).to.emit(
+      br,
+      "BusinessVerified",
+    );
   });
 
   it("should revert registration with zero address officer", async function () {
     const { br, biz1 } = await loadFixture(deployFixture);
-    await expect(br.connect(biz1).registerBusiness("LIC002", "Test Corp", 0, ethers.ZeroAddress))
-      .to.be.revertedWithCustomError(br, "ZeroAddress");
+    await expect(
+      br
+        .connect(biz1)
+        .registerBusiness("LIC002", "Test Corp", 0, ethers.ZeroAddress),
+    ).to.be.revertedWithCustomError(br, "ZeroAddress");
   });
 
   it("should revert registration with empty license", async function () {
     const { br, biz1, officer1 } = await loadFixture(deployFixture);
-    await expect(br.connect(biz1).registerBusiness("", "Test Corp", 0, officer1.address))
-      .to.be.revertedWithCustomError(br, "InvalidLicenseNumber");
+    await expect(
+      br.connect(biz1).registerBusiness("", "Test Corp", 0, officer1.address),
+    ).to.be.revertedWithCustomError(br, "InvalidLicenseNumber");
   });
 });

@@ -10,10 +10,7 @@ let mockAccount = {
 };
 let mockChainId = 7332;
 const mockConnect = jest.fn();
-const mockConnectAsync = jest.fn(async () => ({}));
 const mockDisconnect = jest.fn();
-const mockDisconnectAsync = jest.fn(async () => {});
-const mockReconnectAsync = jest.fn(async () => []);
 const mockSwitchChain = jest.fn();
 let mockNativeBalance: any = {
   value: BigInt(1_000_000_000_000_000_000),
@@ -28,14 +25,9 @@ jest.mock("wagmi", () => ({
   useChainId: () => mockChainId,
   useConnect: () => ({
     connect: mockConnect,
-    connectAsync: mockConnectAsync,
     connectors: [{ id: "injected", name: "MetaMask" }],
   }),
-  useDisconnect: () => ({
-    disconnect: mockDisconnect,
-    disconnectAsync: mockDisconnectAsync,
-  }),
-  useReconnect: () => ({ reconnectAsync: mockReconnectAsync }),
+  useDisconnect: () => ({ disconnect: mockDisconnect }),
   useSwitchChain: () => ({ switchChain: mockSwitchChain }),
   useBalance: (opts: any) => {
     if (!opts?.token) return { data: mockNativeBalance };
@@ -213,112 +205,17 @@ describe("AppContext", () => {
     expect(screen.getByTestId("usdtBalance")).toHaveTextContent("0");
   });
 
-  it("connectWallet calls wagmi connectAsync when a provider is injected", async () => {
-    const savedAccount = mockAccount;
-    mockAccount = { ...mockAccount, isConnected: false };
-    mockConnectAsync.mockClear();
-    (window as unknown as { ethereum?: unknown }).ethereum = {};
-    try {
-      render(
-        <AppProvider>
-          <TestConsumer />
-        </AppProvider>,
-      );
-
-      await act(async () => {
-        fireEvent.click(screen.getByTestId("connect-btn"));
-      });
-      expect(mockConnectAsync).toHaveBeenCalledWith(
-        expect.objectContaining({ connector: expect.any(Object), chainId: 7332 }),
-      );
-    } finally {
-      delete (window as unknown as { ethereum?: unknown }).ethereum;
-      mockAccount = savedAccount;
-    }
-  });
-
-  it("adopts an already-connected session instead of erroring (shared-origin residue)", async () => {
-    const savedAccount = mockAccount;
-    mockAccount = { ...mockAccount, isConnected: false };
-    mockConnectAsync.mockClear();
-    mockReconnectAsync.mockClear();
-    mockConnectAsync.mockRejectedValueOnce(
-      new Error("Connector already connected. Version: @wagmi/core@2.22.1"),
-    );
-    (window as unknown as { ethereum?: unknown }).ethereum = {};
-    try {
-      render(
-        <AppProvider>
-          <TestConsumer />
-        </AppProvider>,
-      );
-
-      await act(async () => {
-        fireEvent.click(screen.getByTestId("connect-btn"));
-      });
-      expect(mockReconnectAsync).toHaveBeenCalledWith(
-        expect.objectContaining({ connectors: [expect.any(Object)] }),
-      );
-      // adopted silently — no error notification
-      expect(screen.getByTestId("notifCount")).toHaveTextContent("0");
-    } finally {
-      delete (window as unknown as { ethereum?: unknown }).ethereum;
-      mockAccount = savedAccount;
-      mockConnectAsync.mockReset();
-      mockConnectAsync.mockResolvedValue({});
-    }
-  });
-
-  it("resets the connector and retries once when adoption fails", async () => {
-    const savedAccount = mockAccount;
-    mockAccount = { ...mockAccount, isConnected: false };
-    mockConnectAsync.mockClear();
-    mockDisconnectAsync.mockClear();
-    mockConnectAsync.mockRejectedValueOnce(new Error("Connector already connected."));
-    mockReconnectAsync.mockRejectedValueOnce(new Error("no persisted session"));
-    (window as unknown as { ethereum?: unknown }).ethereum = {};
-    try {
-      render(
-        <AppProvider>
-          <TestConsumer />
-        </AppProvider>,
-      );
-
-      await act(async () => {
-        fireEvent.click(screen.getByTestId("connect-btn"));
-      });
-      expect(mockDisconnectAsync).toHaveBeenCalledTimes(1);
-      expect(mockConnectAsync).toHaveBeenCalledTimes(2); // initial + clean retry
-    } finally {
-      delete (window as unknown as { ethereum?: unknown }).ethereum;
-      mockAccount = savedAccount;
-      mockConnectAsync.mockReset();
-      mockConnectAsync.mockResolvedValue({});
-      mockReconnectAsync.mockReset();
-      mockReconnectAsync.mockResolvedValue([]);
-    }
-  });
-
-  it("connectWallet surfaces a notification instead of a silent no-op without a provider", async () => {
-    // Remove the injected provider (extension missing/disabled for this site).
-    mockConnectAsync.mockClear();
-    const saved = (window as unknown as { ethereum?: unknown }).ethereum;
-    delete (window as unknown as { ethereum?: unknown }).ethereum;
+  it("connectWallet calls wagmi connect", () => {
     render(
       <AppProvider>
         <TestConsumer />
       </AppProvider>,
     );
 
-    try {
-      await act(async () => {
-        fireEvent.click(screen.getByTestId("connect-btn"));
-      });
-      expect(mockConnectAsync).not.toHaveBeenCalled();
-      expect(screen.getByTestId("notifCount")).not.toHaveTextContent(/^0$/);
-    } finally {
-      if (saved !== undefined) (window as unknown as { ethereum?: unknown }).ethereum = saved;
-    }
+    fireEvent.click(screen.getByTestId("connect-btn"));
+    expect(mockConnect).toHaveBeenCalledWith(
+      expect.objectContaining({ connector: expect.any(Object) }),
+    );
   });
 
   it("disconnectWallet calls wagmi disconnect", () => {
@@ -494,17 +391,14 @@ describe("AppContext", () => {
     expect(screen.getByTestId("notifCount")).toHaveTextContent("0");
   });
 
-  it("connectWallet uses fallback connector when no injected connector", async () => {
+  it("connectWallet uses fallback connector when no injected connector", () => {
     const wagmi = require("wagmi");
     const origConnect = wagmi.useConnect;
-    const fallbackConnectAsync = jest.fn(async () => ({}));
+    const fallbackConnect = jest.fn();
     wagmi.useConnect = () => ({
-      connect: jest.fn(),
-      connectAsync: fallbackConnectAsync,
+      connect: fallbackConnect,
       connectors: [{ id: "walletConnect", name: "WalletConnect" }],
     });
-    const savedAccount = mockAccount;
-    mockAccount = { ...mockAccount, isConnected: false };
 
     render(
       <AppProvider>
@@ -512,35 +406,24 @@ describe("AppContext", () => {
       </AppProvider>,
     );
 
-    (window as unknown as { ethereum?: unknown }).ethereum = {};
-    try {
-      await act(async () => {
-        fireEvent.click(screen.getByTestId("connect-btn"));
-      });
-      expect(fallbackConnectAsync).toHaveBeenCalledWith(
-        expect.objectContaining({
-          connector: { id: "walletConnect", name: "WalletConnect" },
-        }),
-      );
-    } finally {
-      delete (window as unknown as { ethereum?: unknown }).ethereum;
-      mockAccount = savedAccount;
-      wagmi.useConnect = origConnect;
-    }
+    fireEvent.click(screen.getByTestId("connect-btn"));
+    expect(fallbackConnect).toHaveBeenCalledWith(
+      expect.objectContaining({
+        connector: { id: "walletConnect", name: "WalletConnect" },
+      }),
+    );
+
+    wagmi.useConnect = origConnect;
   });
 
-  it("connectWallet does nothing when no connectors available", async () => {
+  it("connectWallet does nothing when no connectors available", () => {
     const wagmi = require("wagmi");
     const origConnect = wagmi.useConnect;
-    const noopConnectAsync = jest.fn(async () => ({}));
+    const noopConnect = jest.fn();
     wagmi.useConnect = () => ({
-      connect: jest.fn(),
-      connectAsync: noopConnectAsync,
+      connect: noopConnect,
       connectors: [],
     });
-    const savedAccount = mockAccount;
-    mockAccount = { ...mockAccount, isConnected: false };
-    (window as unknown as { ethereum?: unknown }).ethereum = {};
 
     render(
       <AppProvider>
@@ -548,16 +431,10 @@ describe("AppContext", () => {
       </AppProvider>,
     );
 
-    try {
-      await act(async () => {
-        fireEvent.click(screen.getByTestId("connect-btn"));
-      });
-      expect(noopConnectAsync).not.toHaveBeenCalled();
-    } finally {
-      delete (window as unknown as { ethereum?: unknown }).ethereum;
-      mockAccount = savedAccount;
-      wagmi.useConnect = origConnect;
-    }
+    fireEvent.click(screen.getByTestId("connect-btn"));
+    expect(noopConnect).not.toHaveBeenCalled();
+
+    wagmi.useConnect = origConnect;
   });
 });
 

@@ -175,10 +175,10 @@ describe("WalletButton", () => {
       expect(screen.getByText("0x1234...5678")).toBeInTheDocument();
     });
 
-    it("shows green dot indicator", () => {
+    it("shows an amber indicator until the wallet session is signed", () => {
       const { container } = render(<WalletButton />);
-      const greenDot = container.querySelector(".bg-emerald-400");
-      expect(greenDot).toBeInTheDocument();
+      const pendingSessionDot = container.querySelector(".bg-amber-400");
+      expect(pendingSessionDot).toBeInTheDocument();
     });
 
     it("toggles dropdown on click", () => {
@@ -259,12 +259,49 @@ describe("WalletButton", () => {
       expect(screen.getByText("WalletConnect")).toBeInTheDocument();
     });
 
-    it("calls connectWallet when a connector is selected", () => {
+    it("calls connectWallet with the selected connector", () => {
       render(<WalletButton />);
       fireEvent.click(screen.getByText("CONNECT WALLET"));
       fireEvent.click(screen.getByText("MetaMask"));
 
-      expect(mockAppState.connectWallet).toHaveBeenCalled();
+      expect(mockAppState.connectWallet).toHaveBeenCalledWith(
+        expect.objectContaining({ name: "MetaMask" }),
+      );
+    });
+
+    it("orders EIP-6963 wallets Aethelred-first with the Recommended tag and hides the generic fallback", () => {
+      mockConnectors = [
+        { id: "injected", uid: "inj-raw", name: "Injected" },
+        {
+          id: "io.metamask",
+          uid: "mm-6963",
+          name: "MetaMask",
+          icon: "data:image/svg+xml,fox",
+        },
+        {
+          id: "org.aethelred.wallet",
+          uid: "aw-6963",
+          name: "Aethelred Wallet",
+          icon: "data:image/svg+xml,cube",
+        },
+      ];
+
+      render(<WalletButton />);
+      fireEvent.click(screen.getByText("CONNECT WALLET"));
+
+      const optionButtons = screen
+        .getAllByRole("button")
+        .filter((b) => !/connect wallet/i.test(b.textContent ?? ""));
+      expect(optionButtons.map((b) => b.textContent)).toEqual([
+        "Aethelred WalletRecommended",
+        "MetaMask",
+      ]);
+      expect(screen.queryByText("Injected")).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByText("Aethelred Wallet"));
+      expect(mockAppState.connectWallet).toHaveBeenCalledWith(
+        expect.objectContaining({ id: "org.aethelred.wallet" }),
+      );
     });
 
     it("closes connector modal on outside click", () => {

@@ -1,25 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/access/AccessControlEnumerable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
-/// @notice Consensus-anchored corridor clearance (see SealSettlementGate.sol).
-interface ISealSettlementGate {
-    function isCleared(address payer, address payee) external view returns (bool);
-    function requireCleared(address payer, address payee) external view;
-}
+import "./interfaces/IBusinessRegistry.sol";
+import "./interfaces/ISealSettlementGate.sol";
 
 /**
  * @title NoblePay
  * @author Aethelred Team
  * @notice Core cross-border payment contract for the NoblePay platform.
- *         Supports AETHEL native token and ERC20 stablecoins (USDC/USDT) with
- *         TEE-backed compliance screening, FATF Travel Rule integration,
- *         and UAE regulatory compliance.
+ *         Escrows governance-approved 6-decimal USD-denominated ERC20 stablecoins
+ *         with authorized off-chain compliance screening, FATF Travel Rule
+ *         integration, and UAE regulatory compliance. Native AET is deliberately
+ *         excluded until a trustworthy price-normalization mechanism is deployed.
  *
  * @dev Architecture overview:
  *
@@ -29,8 +28,8 @@ interface ISealSettlementGate {
  * │  ┌─────────────┐  ┌──────────────────┐  ┌─────────────────┐    │
  * │  │  Payments    │  │  Compliance Gate  │  │  Settlement     │    │
  * │  │  ──────────  │  │  ──────────────── │  │  ────────────── │    │
- * │  │  • initiate  │  │  • TEE screening  │  │  • ERC20 xfer   │    │
- * │  │  • batch     │  │  • AML scoring    │  │  • native xfer  │    │
+ * │  │  • initiate  │  │  • governed result│  │  • ERC20 xfer   │    │
+ * │  │  • batch     │  │  • AML scoring    │  │  • fee snapshot │    │
  * │  │  • cancel    │  │  • sanctions      │  │  • fee split    │    │
  * │  └─────────────┘  └──────────────────┘  └─────────────────┘    │
  * │  ┌─────────────┐  ┌──────────────────┐  ┌─────────────────┐    │
@@ -43,13 +42,18 @@ interface ISealSettlementGate {
  * └───────────────────────────────────────────────────────────────────┘
  *
  * Trust model:
- *   - Compliance decisions are submitted exclusively by TEE nodes whose
- *     attestations have been verified by the ComplianceOracle contract.
- *   - PII never touches the chain; only hashed purpose codes and encrypted
- *     travel-rule data are stored on-chain.
- *   - Settlement is atomic: funds move only after compliance clearance.
+ *   - Compliance decisions are submitted by addresses granted TEE_NODE_ROLE.
+ *     This contract treats their attestation bytes as opaque audit evidence; it
+ *     does not call ComplianceOracle or verify hardware signatures on-chain.
+ *   - Governance must grant TEE_NODE_ROLE only to an independently audited
+ *     off-chain verifier and must revoke it if that verifier is compromised.
+ *   - A purpose hash is a public commitment to caller-provided text; hashing
+ *     alone does not make a low-entropy purpose confidential. Any travel-rule
+ *     payload stored by companion contracts requires separate encryption.
+ *   - Settlement is atomic and rechecks the configured Seal corridor gate
+ *     immediately before funds move.
  */
-contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
+contract NoblePay is AccessControlEnumerable, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
     // ──────────────────────────────────────────────────────────────
@@ -91,16 +95,16 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         address sender;
         address recipient;
         uint256 amount;
-        address token;                // address(0) for native AETHEL
-        bytes32 purposeHash;          // keccak256 of encrypted purpose code
+        address token;                // approved 6-decimal USD stablecoin
+        bytes32 purposeHash;          // public keccak256 commitment supplied by caller
         ComplianceStatus status;
-        bytes teeAttestation;         // TEE attestation for compliance proof
+        bytes teeAttestation;         // Opaque evidence supplied by the authorized verifier
         uint256 createdAt;
         uint256 settledAt;
         bytes3 currencyCode;          // ISO 4217 code (e.g., "AED", "USD")
     }
 
-    /// @notice Result of TEE-based compliance screening.
+    /// @notice Result submitted by an authorized off-chain compliance verifier.
     struct ComplianceResult {
         bool sanctionsClear;
         uint8 amlRiskScore;           // 0-100 scale
@@ -118,11 +122,19 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         bool processed;
     }
 
+    /// @notice Governed, time-delayed request to recover PASSED escrow when
+    ///         the immutable Seal settlement gate is still unavailable.
+    struct SettlementRecoveryRequest {
+        uint64 executeAfter;
+        uint64 expiresAt;
+        address requestedBy;
+    }
+
     // ──────────────────────────────────────────────────────────────
     // Fee configuration
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Base fee in wei/smallest unit charged per payment.
+    /// @notice Base fee in 6-decimal stablecoin units charged per payment.
     uint256 public baseFee;
 
     /// @notice Percentage fee in basis points (1 bp = 0.01%).
@@ -131,21 +143,21 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Maximum percentage fee cap (500 bp = 5%).
     uint256 public constant MAX_PERCENTAGE_FEE = 500;
 
+    /// @notice Mandatory notice period before a failed-settlement recovery can execute.
+    uint256 public constant SETTLEMENT_RECOVERY_DELAY = 2 days;
+
+    /// @notice Bounded execution window prevents an unavailable-gate request
+    ///         from remaining executable indefinitely after its notice period.
+    uint256 public constant SETTLEMENT_RECOVERY_WINDOW = 2 days;
+
     /// @notice Address that receives collected fees.
     address public treasury;
 
     // ──────────────────────────────────────────────────────────────
-    // Volume limits (in USD-equivalent, 6-decimal precision)
+    // Volume limits (approved USD stablecoins, 6-decimal precision)
     // ──────────────────────────────────────────────────────────────
 
-    /// @dev Daily limits per tier in smallest token unit (assuming 6 decimals).
-    /// @dev Tier volume limits are denominated in 6-decimal units (the USDC/
-    ///      USDT scale). Native AETHEL amounts arrive as 18-decimal wei and are
-    ///      normalized by this scaler before limit accounting, so 1 AETHEL
-    ///      counts as one unit toward the tier limits. Do not list an ERC-20
-    ///      with decimals != 6 as a supported token without revisiting this.
-    uint256 private constant NATIVE_LIMIT_SCALER = 1e12;
-
+    /// @dev Daily limits per tier in the required 6-decimal stablecoin unit.
     uint256 public constant STANDARD_DAILY_LIMIT = 50_000 * 1e6;
     uint256 public constant PREMIUM_DAILY_LIMIT = 500_000 * 1e6;
     uint256 public constant ENTERPRISE_DAILY_LIMIT = 5_000_000 * 1e6;
@@ -167,11 +179,23 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Reference to the BusinessRegistry contract for tier lookups.
     address public businessRegistry;
 
+    /// @notice Consensus-backed corridor clearance gate used at settlement.
+    address public sealSettlementGate;
+
+    /// @notice True after the immutable production trust dependencies are set.
+    bool public trustConfigured;
+
     /// @notice Supported ERC20 tokens (token address => supported flag).
     mapping(address => bool) public supportedTokens;
 
     /// @notice Payment records keyed by payment ID.
     mapping(bytes32 => Payment) public payments;
+
+    /// @notice Immutable fee amount captured when each payment is initiated.
+    mapping(bytes32 => uint256) public paymentFees;
+
+    /// @notice Pending settlement-recovery request for each PASSED payment.
+    mapping(bytes32 => SettlementRecoveryRequest) public settlementRecoveryRequests;
 
     /// @notice Compliance results keyed by payment ID.
     mapping(bytes32 => ComplianceResult) public complianceResults;
@@ -192,20 +216,6 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     mapping(address => BusinessTier) public businessTiers;
 
     // ──────────────────────────────────────────────────────────────
-    // Seal-anchored settlement gate (top assurance tier)
-    // ──────────────────────────────────────────────────────────────
-
-    /// @notice The consensus-anchored corridor-clearance gate (anchors
-    ///         clearances to Aethelred Digital Seals via ISeal).
-    ISealSettlementGate public sealGate;
-
-    /// @notice When true, settlement additionally requires a LIVE consensus
-    ///         clearance for the payment's payer→payee corridor in {sealGate}
-    ///         — the top assurance tier becomes enforced rather than opt-in.
-    ///         Even a compromised TEE node key cannot move funds past it.
-    bool public sealClearanceRequired;
-
-    // ──────────────────────────────────────────────────────────────
     // Events
     // ──────────────────────────────────────────────────────────────
 
@@ -223,13 +233,20 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     event PaymentBlocked(bytes32 indexed paymentId, bytes32 investigationHash);
     event PaymentSettled(bytes32 indexed paymentId, uint256 settledAt, uint256 feeCollected);
     event PaymentRefunded(bytes32 indexed paymentId, uint256 refundedAt);
+    event SettlementRecoveryRequested(
+        bytes32 indexed paymentId,
+        address indexed requestedBy,
+        uint256 executeAfter,
+        uint256 expiresAt
+    );
+    event SettlementRecoveryExecuted(bytes32 indexed paymentId, address indexed executedBy, uint256 refundedAt);
+    event PaymentFeeSnapshotted(bytes32 indexed paymentId, uint256 feeAmount);
     event BatchProcessed(bytes32 indexed batchId, uint256 paymentCount, uint256 totalAmount);
     event TokenSupported(address indexed token, bool supported);
     event FeeUpdated(uint256 baseFee, uint256 percentageFee);
     event TreasuryUpdated(address indexed oldTreasury, address indexed newTreasury);
     event BusinessSynced(address indexed business, BusinessTier tier, bool registered);
-    event SealGateUpdated(address indexed oldGate, address indexed newGate);
-    event SealClearanceRequirementUpdated(bool required);
+    event TrustConfigured(address indexed businessRegistry, address indexed sealSettlementGate);
 
     // ──────────────────────────────────────────────────────────────
     // Errors
@@ -247,12 +264,23 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     error InvalidRiskScore();
     error InvalidFee();
     error BatchEmpty();
-    error BatchAlreadyProcessed();
-    error InsufficientPayment();
-    error SealClearanceMissing(address sender, address recipient);
-    error SealGateNotSet();
-    error AmountBelowFee(uint256 amount, uint256 fee);
-    error IncorrectNativeAmount(uint256 sent, uint256 required);
+    error BatchNotFound();
+    error NativePaymentsDisabled();
+    error UnexpectedNativeValue(uint256 provided);
+    error InvalidTokenContract(address token);
+    error InvalidTokenDecimals(address token, uint8 decimals);
+    error FeeNotLessThanAmount(uint256 fee, uint256 amount);
+    error NonExactTokenTransfer(address token, uint256 expected, uint256 received);
+    error TrustNotConfigured();
+    error TrustAlreadyConfigured();
+    error InvalidTrustContract(address target);
+    error InvalidBusinessTier(uint8 tier);
+    error SettlementStillAvailable();
+    error SettlementRecoveryAlreadyRequested(uint256 expiresAt);
+    error SettlementRecoveryNotRequested();
+    error SettlementRecoveryDelayNotElapsed(uint256 executeAfter);
+    error SettlementRecoveryRequestExpired(uint256 expiresAt);
+    error SettlementRecoveryRequiresActiveSender();
 
     // ──────────────────────────────────────────────────────────────
     // Modifiers
@@ -260,13 +288,22 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
 
     /// @notice Restricts to registered businesses only.
     modifier onlyRegistered() {
-        if (!registeredBusinesses[msg.sender]) revert NotRegisteredBusiness();
+        if (!trustConfigured) revert TrustNotConfigured();
+        if (!IBusinessRegistry(businessRegistry).isBusinessActive(msg.sender)) {
+            revert NotRegisteredBusiness();
+        }
         _;
     }
 
     /// @notice Restricts to verified TEE nodes.
     modifier onlyTEENode() {
         _checkRole(TEE_NODE_ROLE);
+        _;
+    }
+
+    /// @notice Restricts to compliance officers.
+    modifier onlyComplianceOfficer() {
+        _checkRole(COMPLIANCE_OFFICER_ROLE);
         _;
     }
 
@@ -278,7 +315,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
      * @notice Deploys NoblePay with initial fee configuration and treasury.
      * @param _admin         Admin address with full control.
      * @param _treasury      Address that collects payment fees.
-     * @param _baseFee       Flat fee per payment in wei.
+     * @param _baseFee       Flat fee per payment in 6-decimal stablecoin units.
      * @param _percentageFee Percentage fee in basis points.
      */
     constructor(
@@ -307,9 +344,9 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     /**
      * @notice Initiates a single cross-border payment.
      * @param _recipient     Beneficiary address.
-     * @param _amount        Payment amount (token units or wei for native).
-     * @param _token         ERC20 token address; address(0) for native AETHEL.
-     * @param _purposeHash   keccak256 hash of the encrypted payment purpose.
+     * @param _amount        Payment amount in 6-decimal stablecoin units.
+     * @param _token         Governance-approved 6-decimal USD stablecoin address.
+     * @param _purposeHash   Public keccak256 commitment supplied by the caller.
      * @param _currencyCode  ISO 4217 currency code (3 bytes).
      * @return paymentId     Unique identifier for the payment.
      */
@@ -323,33 +360,21 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         if (_recipient == address(0)) revert ZeroAddress();
         if (_recipient == msg.sender) revert InvalidRecipient();
         if (_amount == 0) revert ZeroAmount();
+        if (msg.value != 0) revert UnexpectedNativeValue(msg.value);
 
-        // Validate token support
-        if (_token != address(0) && !supportedTokens[_token]) revert UnsupportedToken();
+        if (_token == address(0)) revert NativePaymentsDisabled();
+        if (!supportedTokens[_token]) revert UnsupportedToken();
 
-        // Reject un-settleable payments up front: if the amount does not exceed
-        // its fee, `settlePayment` would underflow (netAmount = amount - fee)
-        // and revert forever — and a PASSED payment can be neither refunded nor
-        // cancelled, so the escrow would be permanently locked. Fail fast at
-        // entry instead of escrowing funds that can never move.
-        uint256 entryFee = _calculateFee(_amount);
-        if (_amount <= entryFee) revert AmountBelowFee(_amount, entryFee);
+        uint256 fee = _calculateFee(_amount);
+        if (fee >= _amount) revert FeeNotLessThanAmount(fee, _amount);
 
-        // Enforce volume limits (normalized to 6-decimal limit units)
-        _enforceVolumeLimits(msg.sender, _limitUnits(_token, _amount));
+        // Enforce volume limits
+        _enforceVolumeLimits(msg.sender, _amount);
 
         // Generate unique payment ID
         paymentId = keccak256(abi.encodePacked(msg.sender, _recipient, _amount, block.timestamp, paymentNonce++));
 
-        // Escrow funds. Native escrow demands the exact amount and token
-        // payments demand zero value: any surplus native sent here would be
-        // unrecoverable (the contract has no sweep function by design).
-        if (_token == address(0)) {
-            if (msg.value != _amount) revert IncorrectNativeAmount(msg.value, _amount);
-        } else {
-            if (msg.value != 0) revert IncorrectNativeAmount(msg.value, 0);
-            IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
-        }
+        _escrowExact(_token, msg.sender, _amount);
 
         // Record payment
         payments[paymentId] = Payment({
@@ -364,8 +389,10 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
             settledAt: 0,
             currencyCode: _currencyCode
         });
+        paymentFees[paymentId] = fee;
 
         emit PaymentInitiated(paymentId, msg.sender, _recipient, _amount, _token, _currencyCode);
+        emit PaymentFeeSnapshotted(paymentId, fee);
     }
 
     /**
@@ -386,6 +413,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     ) external payable whenNotPaused onlyRegistered nonReentrant returns (bytes32 batchId) {
         uint256 count = _recipients.length;
         if (count == 0) revert BatchEmpty();
+        if (msg.value != 0) revert UnexpectedNativeValue(msg.value);
         require(
             count == _amounts.length &&
             count == _tokens.length &&
@@ -398,29 +426,23 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
 
         bytes32[] memory paymentIds = new bytes32[](count);
         uint256 totalAmount;
-        uint256 nativeRequired;
-        uint256 limitTotal;
 
         for (uint256 i; i < count;) {
             if (_recipients[i] == address(0)) revert ZeroAddress();
+            if (_recipients[i] == msg.sender) revert InvalidRecipient();
             if (_amounts[i] == 0) revert ZeroAmount();
-            if (_tokens[i] != address(0) && !supportedTokens[_tokens[i]]) revert UnsupportedToken();
-            // Same fund-lock guard as initiatePayment: reject amounts that
-            // cannot cover their settlement fee (checked after token support so
-            // an unsupported token still reverts as UnsupportedToken).
-            uint256 itemFee = _calculateFee(_amounts[i]);
-            if (_amounts[i] <= itemFee) revert AmountBelowFee(_amounts[i], itemFee);
+            if (_tokens[i] == address(0)) revert NativePaymentsDisabled();
+            if (!supportedTokens[_tokens[i]]) revert UnsupportedToken();
+
+            uint256 fee = _calculateFee(_amounts[i]);
+            if (fee >= _amounts[i]) revert FeeNotLessThanAmount(fee, _amounts[i]);
 
             bytes32 pid = keccak256(
                 abi.encodePacked(msg.sender, _recipients[i], _amounts[i], block.timestamp, paymentNonce++)
             );
             paymentIds[i] = pid;
 
-            if (_tokens[i] == address(0)) {
-                nativeRequired += _amounts[i];
-            } else {
-                IERC20(_tokens[i]).safeTransferFrom(msg.sender, address(this), _amounts[i]);
-            }
+            _escrowExact(_tokens[i], msg.sender, _amounts[i]);
 
             payments[pid] = Payment({
                 sender: msg.sender,
@@ -434,19 +456,17 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
                 settledAt: 0,
                 currencyCode: _currencyCodes[i]
             });
+            paymentFees[pid] = fee;
 
             totalAmount += _amounts[i];
-            limitTotal += _limitUnits(_tokens[i], _amounts[i]);
 
             emit PaymentInitiated(pid, msg.sender, _recipients[i], _amounts[i], _tokens[i], _currencyCodes[i]);
+            emit PaymentFeeSnapshotted(pid, fee);
 
             unchecked { ++i; }
         }
 
-        // Exact native escrow — surplus would be unrecoverable (no sweep).
-        if (msg.value != nativeRequired) revert IncorrectNativeAmount(msg.value, nativeRequired);
-
-        _enforceVolumeLimits(msg.sender, limitTotal);
+        _enforceVolumeLimits(msg.sender, totalAmount);
 
         batches[batchId] = PaymentBatch({
             batchId: batchId,
@@ -454,25 +474,27 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
             initiator: msg.sender,
             totalAmount: totalAmount,
             createdAt: block.timestamp,
-            processed: false
+            processed: true
         });
 
         emit BatchProcessed(batchId, count, totalAmount);
     }
 
     // ──────────────────────────────────────────────────────────────
-    // External — Compliance (TEE-only)
+    // External — Compliance (authorized verifier only)
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * @notice Submits a compliance screening result from a TEE node.
-     * @dev Only callable by addresses with TEE_NODE_ROLE.
+     * @notice Submits a compliance result from an authorized off-chain verifier.
+     * @dev Only callable by addresses with TEE_NODE_ROLE. The role name is retained
+     *      for ABI compatibility. `_attestation` is stored as opaque evidence and is
+     *      not parsed or cryptographically validated by this contract.
      * @param _paymentId       Payment to update.
      * @param _sanctionsClear  Whether the payment clears sanctions screening.
      * @param _amlRiskScore    AML risk score (0-100).
      * @param _travelRuleOk    Whether FATF Travel Rule requirements are met.
      * @param _investigationHash Hash of the full investigation report.
-     * @param _attestation     TEE attestation bytes proving enclave execution.
+     * @param _attestation     Opaque evidence supplied by the authorized verifier.
      */
     function submitComplianceResult(
         bytes32 _paymentId,
@@ -516,6 +538,90 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     // ──────────────────────────────────────────────────────────────
 
     /**
+     * @notice Starts a governed recovery notice for a PASSED payment whose
+     *         sender is still active but whose Seal corridor cannot currently settle.
+     * @dev A live, settleable corridor can never enter recovery. Expired
+     *      requests may be replaced, ensuring every execution has a recent
+     *      notice period instead of relying on an indefinitely stale approval.
+     * @param _paymentId Payment whose escrow may need to be returned.
+     */
+    function requestSettlementRecovery(bytes32 _paymentId)
+        external
+        onlyComplianceOfficer
+    {
+        Payment storage p = payments[_paymentId];
+        if (p.sender == address(0)) revert PaymentNotFound();
+        if (p.status != ComplianceStatus.PASSED) {
+            revert InvalidPaymentStatus(p.status, ComplianceStatus.PASSED);
+        }
+        if (!IBusinessRegistry(businessRegistry).isBusinessActive(p.sender)) {
+            revert SettlementRecoveryRequiresActiveSender();
+        }
+        if (_settlementAvailable(p.sender, p.recipient)) {
+            revert SettlementStillAvailable();
+        }
+
+        SettlementRecoveryRequest storage existing = settlementRecoveryRequests[_paymentId];
+        if (existing.executeAfter != 0 && block.timestamp <= existing.expiresAt) {
+            revert SettlementRecoveryAlreadyRequested(existing.expiresAt);
+        }
+
+        uint64 executeAfter = uint64(block.timestamp + SETTLEMENT_RECOVERY_DELAY);
+        uint64 expiresAt = uint64(uint256(executeAfter) + SETTLEMENT_RECOVERY_WINDOW);
+        settlementRecoveryRequests[_paymentId] = SettlementRecoveryRequest({
+            executeAfter: executeAfter,
+            expiresAt: expiresAt,
+            requestedBy: msg.sender
+        });
+
+        emit SettlementRecoveryRequested(_paymentId, msg.sender, executeAfter, expiresAt);
+    }
+
+    /**
+     * @notice Returns a PASSED payment's exact escrow to its sender after the
+     *         governed notice period, but only while settlement is still impossible.
+     * @dev The same non-reverting static check as {settlePayment}'s live gate is
+     *      repeated immediately before effects. Restored clearance therefore
+     *      makes execution fail, while a paused, revoked, or missing clearance
+     *      remains recoverable. State and request invalidation precede transfer.
+     * @param _paymentId Payment to recover.
+     */
+    function executeSettlementRecovery(bytes32 _paymentId)
+        external
+        onlyComplianceOfficer
+        nonReentrant
+    {
+        Payment storage p = payments[_paymentId];
+        if (p.sender == address(0)) revert PaymentNotFound();
+        if (p.status != ComplianceStatus.PASSED) {
+            revert InvalidPaymentStatus(p.status, ComplianceStatus.PASSED);
+        }
+
+        SettlementRecoveryRequest memory request = settlementRecoveryRequests[_paymentId];
+        if (request.executeAfter == 0) revert SettlementRecoveryNotRequested();
+        if (block.timestamp < request.executeAfter) {
+            revert SettlementRecoveryDelayNotElapsed(request.executeAfter);
+        }
+        if (block.timestamp > request.expiresAt) {
+            revert SettlementRecoveryRequestExpired(request.expiresAt);
+        }
+        if (!IBusinessRegistry(businessRegistry).isBusinessActive(p.sender)) {
+            revert SettlementRecoveryRequiresActiveSender();
+        }
+        if (_settlementAvailable(p.sender, p.recipient)) {
+            revert SettlementStillAvailable();
+        }
+
+        delete settlementRecoveryRequests[_paymentId];
+        p.status = ComplianceStatus.REFUNDED;
+
+        IERC20(p.token).safeTransfer(p.sender, p.amount);
+
+        emit SettlementRecoveryExecuted(_paymentId, msg.sender, block.timestamp);
+        emit PaymentRefunded(_paymentId, block.timestamp);
+    }
+
+    /**
      * @notice Settles a cleared payment, transferring funds to the recipient.
      * @param _paymentId Payment to settle.
      */
@@ -526,72 +632,53 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
             revert InvalidPaymentStatus(p.status, ComplianceStatus.PASSED);
         }
 
-        // Top assurance tier (when enforced): the payment's corridor must
-        // carry a LIVE consensus clearance — a Digital Seal minted by the
-        // Aethelred validator quorum for exactly this payer→payee pair, still
-        // ACTIVE, checked through the ISeal precompile. A role-held TEE key
-        // alone (PASSED status above) cannot move funds past this gate, and a
-        // seal revoked on-chain closes the corridor instantly.
-        if (sealClearanceRequired) {
-            if (!sealGate.isCleared(p.sender, p.recipient)) {
-                revert SealClearanceMissing(p.sender, p.recipient);
-            }
+        // Re-evaluate both trust dependencies immediately before any state or
+        // balance mutation. Registry suspension/expiry, gate pause, or seal
+        // revocation therefore closes settlement after screening has passed.
+        if (!IBusinessRegistry(businessRegistry).isBusinessActive(p.sender)) {
+            revert NotRegisteredBusiness();
         }
+        ISealSettlementGate(sealSettlementGate).requireCleared(p.sender, p.recipient);
 
+        delete settlementRecoveryRequests[_paymentId];
         p.status = ComplianceStatus.SETTLED;
         p.settledAt = block.timestamp;
 
-        // Defence in depth against a fee increase between initiation and
-        // settlement: the initiate-time guard rejects amount <= fee, but
-        // baseFee/percentageFee are governable, so cap the fee at the escrowed
-        // amount here. Without this, a post-initiation fee hike above `amount`
-        // would underflow (amount - fee) and permanently lock the escrow.
-        uint256 fee = _calculateFee(p.amount);
-        if (fee > p.amount) {
-            fee = p.amount;
-        }
+        uint256 fee = paymentFees[_paymentId];
         uint256 netAmount = p.amount - fee;
 
-        if (p.token == address(0)) {
-            // Native AETHEL transfer
-            (bool ok, ) = p.recipient.call{value: netAmount}("");
-            require(ok, "NoblePay: native transfer failed");
-            if (fee > 0) {
-                (bool feeOk, ) = treasury.call{value: fee}("");
-                require(feeOk, "NoblePay: fee transfer failed");
-            }
-        } else {
-            IERC20(p.token).safeTransfer(p.recipient, netAmount);
-            if (fee > 0) {
-                IERC20(p.token).safeTransfer(treasury, fee);
-            }
+        IERC20(p.token).safeTransfer(p.recipient, netAmount);
+        if (fee > 0) {
+            IERC20(p.token).safeTransfer(treasury, fee);
         }
 
         emit PaymentSettled(_paymentId, block.timestamp, fee);
     }
 
     /**
-     * @notice Refunds a blocked or flagged payment back to the sender.
-     * @dev Callable by compliance officers for FLAGGED, or automatically for BLOCKED.
+     * @notice Refunds a blocked, flagged, or no-longer-settleable payment.
+     * @dev BLOCKED refunds are permissionless. FLAGGED refunds require a
+     *      compliance officer. A compliance officer may also recover PASSED
+     *      escrow only after the live registry marks its sender inactive.
      * @param _paymentId Payment to refund.
      */
-    function refundPayment(bytes32 _paymentId) external nonReentrant whenNotPaused {
+    function refundPayment(bytes32 _paymentId) external nonReentrant {
         Payment storage p = payments[_paymentId];
         if (p.sender == address(0)) revert PaymentNotFound();
 
-        // Only BLOCKED or FLAGGED payments can be refunded
+        bool officer = hasRole(COMPLIANCE_OFFICER_ROLE, msg.sender);
+        bool inactivePassed = p.status == ComplianceStatus.PASSED &&
+            officer &&
+            !IBusinessRegistry(businessRegistry).isBusinessActive(p.sender);
         bool canRefund = p.status == ComplianceStatus.BLOCKED ||
-            (p.status == ComplianceStatus.FLAGGED && hasRole(COMPLIANCE_OFFICER_ROLE, msg.sender));
+            (p.status == ComplianceStatus.FLAGGED && officer) ||
+            inactivePassed;
         require(canRefund, "NoblePay: cannot refund this payment");
 
+        delete settlementRecoveryRequests[_paymentId];
         p.status = ComplianceStatus.REFUNDED;
 
-        if (p.token == address(0)) {
-            (bool ok, ) = p.sender.call{value: p.amount}("");
-            require(ok, "NoblePay: refund transfer failed");
-        } else {
-            IERC20(p.token).safeTransfer(p.sender, p.amount);
-        }
+        IERC20(p.token).safeTransfer(p.sender, p.amount);
 
         emit PaymentRefunded(_paymentId, block.timestamp);
     }
@@ -600,7 +687,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
      * @notice Cancels a PENDING payment. Only the original sender may cancel.
      * @param _paymentId Payment to cancel.
      */
-    function cancelPayment(bytes32 _paymentId) external nonReentrant whenNotPaused {
+    function cancelPayment(bytes32 _paymentId) external nonReentrant {
         Payment storage p = payments[_paymentId];
         if (p.sender == address(0)) revert PaymentNotFound();
         require(p.sender == msg.sender, "NoblePay: not payment sender");
@@ -610,12 +697,7 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
 
         p.status = ComplianceStatus.REFUNDED;
 
-        if (p.token == address(0)) {
-            (bool ok, ) = p.sender.call{value: p.amount}("");
-            require(ok, "NoblePay: cancel transfer failed");
-        } else {
-            IERC20(p.token).safeTransfer(p.sender, p.amount);
-        }
+        IERC20(p.token).safeTransfer(p.sender, p.amount);
 
         emit PaymentRefunded(_paymentId, block.timestamp);
     }
@@ -624,9 +706,39 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     // Admin functions
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Adds or removes a supported ERC20 token.
+    /// @notice Atomically and permanently configures NoblePay's production
+    ///         trust dependencies. There is deliberately no update path: a
+    ///         migration requires a new NoblePay deployment and explicit
+    ///         operational cut-over.
+    function configureTrust(address _businessRegistry, address _sealSettlementGate)
+        external
+        onlyRole(ADMIN_ROLE)
+    {
+        if (trustConfigured) revert TrustAlreadyConfigured();
+        if (_businessRegistry == address(0) || _businessRegistry.code.length == 0) {
+            revert InvalidTrustContract(_businessRegistry);
+        }
+        if (_sealSettlementGate == address(0) || _sealSettlementGate.code.length == 0) {
+            revert InvalidTrustContract(_sealSettlementGate);
+        }
+
+        businessRegistry = _businessRegistry;
+        sealSettlementGate = _sealSettlementGate;
+        trustConfigured = true;
+
+        emit TrustConfigured(_businessRegistry, _sealSettlementGate);
+    }
+
+    /// @notice Adds or removes a supported 6-decimal USD-denominated ERC20 token.
+    /// @dev Decimal validation is on-chain; governance is responsible for verifying
+    ///      the token's issuer, USD denomination, upgrade controls, and transfer semantics.
     function setSupportedToken(address _token, bool _supported) external onlyRole(ADMIN_ROLE) {
         if (_token == address(0)) revert ZeroAddress();
+        if (_supported) {
+            if (_token.code.length == 0) revert InvalidTokenContract(_token);
+            uint8 decimals = IERC20Metadata(_token).decimals();
+            if (decimals != 6) revert InvalidTokenDecimals(_token, decimals);
+        }
         supportedTokens[_token] = _supported;
         emit TokenSupported(_token, _supported);
     }
@@ -647,39 +759,14 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         emit TreasuryUpdated(old, _newTreasury);
     }
 
-    /**
-     * @notice Set the consensus-anchored settlement gate (top assurance tier).
-     * @dev address(0) clears the gate, which also forces enforcement off —
-     *      the contract must never be in the (required, no gate) state.
-     */
-    function setSealGate(address _sealGate) external onlyRole(ADMIN_ROLE) {
-        address old = address(sealGate);
-        sealGate = ISealSettlementGate(_sealGate);
-
-        if (_sealGate == address(0) && sealClearanceRequired) {
-            sealClearanceRequired = false;
-            emit SealClearanceRequirementUpdated(false);
-        }
-
-        emit SealGateUpdated(old, _sealGate);
-    }
-
-    /**
-     * @notice Toggle whether settlement requires a live corridor clearance.
-     * @dev Enabling requires a gate to be set (fail-closed wiring).
-     */
-    function setSealClearanceRequired(bool _required) external onlyRole(ADMIN_ROLE) {
-        if (_required && address(sealGate) == address(0)) revert SealGateNotSet();
-        sealClearanceRequired = _required;
-        emit SealClearanceRequirementUpdated(_required);
-    }
-
     /// @notice Syncs a business registration from the BusinessRegistry contract.
     function syncBusiness(
         address _business,
         BusinessTier _tier,
         bool _registered
     ) external onlyRole(ADMIN_ROLE) {
+        // Retained for ABI compatibility and historical UI reads only. Payment
+        // authorization and tiers are always sourced live from BusinessRegistry.
         registeredBusinesses[_business] = _registered;
         businessTiers[_business] = _tier;
         emit BusinessSynced(_business, _tier, _registered);
@@ -702,6 +789,12 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Returns the full payment record.
     function getPayment(bytes32 _paymentId) external view returns (Payment memory) {
         return payments[_paymentId];
+    }
+
+    /// @notice Returns the immutable payment identifiers created atomically by a batch.
+    function getBatchPaymentIds(bytes32 _batchId) external view returns (bytes32[] memory) {
+        if (batches[_batchId].initiator == address(0)) revert BatchNotFound();
+        return batches[_batchId].paymentIds;
     }
 
     /// @notice Returns the compliance result for a payment.
@@ -728,22 +821,15 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * @dev Converts a payment amount into the 6-decimal units the tier volume
-     *      limits are denominated in. Native AETHEL (18 decimals) scales down
-     *      by NATIVE_LIMIT_SCALER; supported ERC-20s (6-decimal stablecoins)
-     *      pass through unchanged.
-     */
-    function _limitUnits(address _token, uint256 _amount) internal pure returns (uint256) {
-        return _token == address(0) ? _amount / NATIVE_LIMIT_SCALER : _amount;
-    }
-
-    /**
      * @dev Enforces daily and monthly volume limits based on business tier.
      * @param _business Business address.
-     * @param _amount   Payment amount in 6-decimal limit units (see _limitUnits).
+     * @param _amount   Payment amount to validate.
      */
     function _enforceVolumeLimits(address _business, uint256 _amount) internal {
-        BusinessTier tier = businessTiers[_business];
+        if (!trustConfigured) revert TrustNotConfigured();
+        uint8 rawTier = IBusinessRegistry(businessRegistry).getBusinessTier(_business);
+        if (rawTier > uint8(BusinessTier.ENTERPRISE)) revert InvalidBusinessTier(rawTier);
+        BusinessTier tier = BusinessTier(rawTier);
 
         // Daily limit check
         uint256 today = block.timestamp / 1 days;
@@ -773,8 +859,40 @@ contract NoblePay is AccessControl, Pausable, ReentrancyGuard {
         return baseFee + (_amount * percentageFee / 10_000);
     }
 
-    // NOTE: deliberately NO receive()/fallback. Native funds enter only as
-    // exact escrow through initiatePayment/initiatePaymentBatch; a plain
-    // transfer to this contract would be permanently unrecoverable (there is
-    // no sweep function), so it must revert instead of being accepted.
+    /// @dev Executes the exact gate call used by settlement without propagating
+    ///      a gate revert. A successful call means settlement is available; any
+    ///      failure (missing/revoked clearance, gate pause, or missing gate code)
+    ///      keeps recovery eligible. Treating malformed trust code as unavailable
+    ///      can only return escrow to its original sender after governance delay.
+    function _settlementGateAllows(address _sender, address _recipient) internal view returns (bool) {
+        address gate = sealSettlementGate;
+        if (gate.code.length == 0) return false;
+        (bool success, ) = gate.staticcall(
+            abi.encodeCall(ISealSettlementGate.requireCleared, (_sender, _recipient))
+        );
+        return success;
+    }
+
+    /// @dev Recovery must model the exact availability of {settlePayment}, not
+    ///      only the external gate. A NoblePay emergency pause disables normal
+    ///      settlement, so a still-cleared corridor remains recoverable after
+    ///      the governed delay. If governance unpauses before execution, the
+    ///      live gate is rechecked and restored availability cancels recovery.
+    function _settlementAvailable(address _sender, address _recipient) internal view returns (bool) {
+        return !paused() && _settlementGateAllows(_sender, _recipient);
+    }
+
+    function _escrowExact(address _token, address _from, uint256 _amount) internal {
+        IERC20 token = IERC20(_token);
+        uint256 beforeBalance = token.balanceOf(address(this));
+        token.safeTransferFrom(_from, address(this), _amount);
+        uint256 received = token.balanceOf(address(this)) - beforeBalance;
+        if (received != _amount) revert NonExactTokenTransfer(_token, _amount, received);
+    }
+
+    /// @notice Rejects direct native transfers; NoblePay's production release is
+    ///         scoped to approved 6-decimal USD stablecoins.
+    receive() external payable {
+        revert UnexpectedNativeValue(msg.value);
+    }
 }

@@ -24,8 +24,6 @@ jest.mock("../../lib/logger", () => ({
   logger: mockLogger,
   generateCorrelationId: jest.fn().mockReturnValue("tenant-iso-corr-id"),
   createRequestLogger: jest.fn().mockReturnValue(mockLogger),
-  maskIdentifier: jest.fn((value?: string | null) => value ?? undefined),
-  maskTransactionHash: jest.fn((value?: string | null) => value ?? undefined),
 }));
 
 jest.mock("../../lib/metrics", () => ({
@@ -37,7 +35,6 @@ jest.mock("../../lib/metrics", () => ({
   activeBusinesses: { set: jest.fn() },
   httpRequestDuration: { observe: jest.fn() },
   httpRequestTotal: { inc: jest.fn() },
-  teeNodesActive: { set: jest.fn() },
   teeAttestationFailures: { inc: jest.fn() },
   register: { metrics: jest.fn() },
 }));
@@ -86,6 +83,24 @@ jest.mock("@prisma/client", () => ({
   },
 }));
 
+// Authentication is chain-authoritative in production. These route tests keep
+// that boundary intact while replacing RPC I/O with a verified registry
+// snapshot for the registered wallet under test.
+jest.mock("../../lib/business-registry-authorization", () => ({
+  getCurrentBusinessRegistryAuthorization: jest.fn(async (address: string) => ({
+    wallet: address,
+    status: "VERIFIED",
+    tier: "STANDARD",
+    active: true,
+    isAdmin: false,
+    registeredAt: 1n,
+    lastVerified: 1n,
+    expiresAt: 2n,
+    blockNumber: 100,
+    blockHash: `0x${"ab".repeat(32)}`,
+  })),
+}));
+
 // ─── Mock Services (data layer only, NOT auth/rbac) ─────────────────────────
 
 const mockPaymentService = {
@@ -93,8 +108,6 @@ const mockPaymentService = {
   listPayments: jest.fn(),
   getPayment: jest.fn(),
   getStats: jest.fn(),
-  cancelPayment: jest.fn(),
-  refundPayment: jest.fn(),
   batchProcessPayments: jest.fn(),
   validateBusinessLimits: jest.fn(),
   calculateFees: jest.fn(),
@@ -146,6 +159,7 @@ const mockCrossChainService = {
 const mockFXService = {
   getRates: jest.fn(),
   createHedge: jest.fn(),
+  listPositions: jest.fn(),
   markToMarket: jest.fn(),
   closePosition: jest.fn(),
   getExposure: jest.fn(),
@@ -237,9 +251,18 @@ function buildApp(): express.Express {
 
 const BIZ_A = "business-a-id";
 const BIZ_B = "business-b-id";
+const WALLET_A = "0x1111111111111111111111111111111111111111";
+const WALLET_B = "0x2222222222222222222222222222222222222222";
+const PAYMENT_A = "11111111-1111-4111-8111-111111111111";
+const PAYMENT_B = "22222222-2222-4222-8222-222222222222";
 
 function tokenFor(businessId: string, role: string): string {
-  return generateJWT(businessId, "STANDARD" as any, role, `user:${businessId}:test`);
+  return generateJWT(
+    businessId,
+    "STANDARD" as any,
+    role,
+    businessId === BIZ_A ? WALLET_A : WALLET_B,
+  );
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -255,46 +278,73 @@ describe("Tenant Isolation Integration Tests", () => {
   beforeEach(() => {
     jest.clearAllMocks();
 
+    mockPrisma.business.findUnique.mockImplementation(
+      ({ where }: { where: { id: string } }) => {
+        const address =
+          where.id === BIZ_A ? WALLET_A : where.id === BIZ_B ? WALLET_B : null;
+        return address ? { id: where.id, address } : null;
+      },
+    );
+
     // ── Default stubs: all services return data scoped to the caller ────
     mockPaymentService.listPayments.mockImplementation(
       (_filters: any, businessId?: string) => ({
-        data: businessId === BIZ_A
-          ? [{ id: "pay-a-1", businessId: BIZ_A, amount: 100n, currency: "USDC" }]
-          : [],
+        data:
+          businessId === BIZ_A
+            ? [
+                {
+                  id: PAYMENT_A,
+                  businessId: BIZ_A,
+                  amount: 100n,
+                  currency: "USDC",
+                },
+              ]
+            : [],
         pagination: { page: 1, limit: 20, total: businessId === BIZ_A ? 1 : 0 },
       }),
     );
 
-    mockPaymentService.getPayment.mockImplementation((id: string) => {
-      if (id === "pay-a-1") return { id: "pay-a-1", businessId: BIZ_A, amount: 100n };
-      if (id === "pay-b-1") return { id: "pay-b-1", businessId: BIZ_B, amount: 200n };
-      return null;
-    });
+    mockPaymentService.getPayment.mockImplementation(
+      (id: string, businessId?: string) => {
+        if (id === PAYMENT_A && businessId === BIZ_A) {
+          return { id: PAYMENT_A, businessId: BIZ_A, amount: 100n };
+        }
+        if (id === PAYMENT_B && businessId === BIZ_B) {
+          return { id: PAYMENT_B, businessId: BIZ_B, amount: 200n };
+        }
+        return null;
+      },
+    );
 
-    mockInvoiceService.listInvoices.mockImplementation(
-      (filters: any) => filters?.businessId === BIZ_A
+    mockInvoiceService.listInvoices.mockImplementation((filters: any) =>
+      filters?.businessId === BIZ_A
         ? [{ id: "inv-a-1", businessId: BIZ_A }]
         : [],
     );
 
-    mockStreamingService.listStreams.mockImplementation(
-      (filters: any) => filters?.businessId === BIZ_A
+    mockStreamingService.listStreams.mockImplementation((filters: any) =>
+      filters?.businessId === BIZ_A
         ? [{ id: "stream-a-1", businessId: BIZ_A }]
         : [],
     );
 
-    mockCrossChainService.listTransfers.mockImplementation(
-      (filters: any) => filters?.businessId === BIZ_A
+    mockCrossChainService.listTransfers.mockImplementation((filters: any) =>
+      filters?.businessId === BIZ_A
         ? [{ id: "xfer-a-1", businessId: BIZ_A }]
         : [],
     );
 
     mockCrossChainService.getTransfer.mockImplementation(
       (id: string, businessId?: string) => {
-        if (id === "xfer-a-1" && businessId === BIZ_A) return { id: "xfer-a-1", businessId: BIZ_A };
+        if (id === "xfer-a-1" && businessId === BIZ_A)
+          return { id: "xfer-a-1", businessId: BIZ_A };
         if (id === "xfer-a-1" && businessId !== BIZ_A) {
-          const err = new (jest.requireActual("../../services/crosschain").CrossChainError)(
-            "FORBIDDEN", "You do not have access to this transfer", 403,
+          const err = new (jest.requireActual(
+            "../../services/crosschain",
+          ).CrossChainError)(
+            "FORBIDDEN",
+            "You do not have access to this transfer",
+            403,
           );
           throw err;
         }
@@ -302,55 +352,67 @@ describe("Tenant Isolation Integration Tests", () => {
       },
     );
 
-    mockFXService.markToMarket.mockImplementation(
-      (businessId?: string) => businessId === BIZ_A
-        ? [{ id: "fx-a-1", businessId: BIZ_A }]
-        : [],
+    mockFXService.listPositions.mockImplementation((businessId?: string) =>
+      businessId === BIZ_A ? [{ id: "fx-a-1", businessId: BIZ_A }] : [],
     );
 
     mockLiquidityService.getPositions.mockImplementation(
-      (_provider: any, businessId?: string) => businessId === BIZ_A
-        ? [{ id: "lp-a-1", businessId: BIZ_A }]
-        : [],
+      (businessId?: string) =>
+        businessId === BIZ_A ? [{ id: "lp-a-1", businessId: BIZ_A }] : [],
     );
 
-    mockFXService.getExposure.mockImplementation(
-      (businessId: string) => ({
-        businessId,
-        totalNotional: businessId === BIZ_A ? "50000" : "0",
-        positions: [],
-      }),
-    );
+    mockFXService.getExposure.mockImplementation((businessId: string) => ({
+      businessId,
+      totalNotional: businessId === BIZ_A ? "50000" : "0",
+      positions: [],
+    }));
 
     // Stubs for mutation routes (so they succeed for authorized callers)
-    mockPaymentService.validateBusinessLimits.mockResolvedValue({ allowed: true });
-    mockPaymentService.calculateFees.mockReturnValue({ baseFee: "0.01", totalFee: "0.01" });
+    mockPaymentService.validateBusinessLimits.mockResolvedValue({
+      allowed: true,
+    });
+    mockPaymentService.calculateFees.mockReturnValue({
+      baseFee: "0.01",
+      totalFee: "0.01",
+    });
     mockPaymentService.createPayment.mockResolvedValue({
-      id: "pay-new", businessId: BIZ_A, amount: 100n, currency: "USDC", status: "PENDING",
+      id: "pay-new",
+      businessId: BIZ_A,
+      amount: 100n,
+      currency: "USDC",
+      status: "PENDING",
     });
 
     mockStreamingService.createStream.mockResolvedValue({
-      id: "stream-new", businessId: BIZ_A, status: "ACTIVE",
+      id: "stream-new",
+      businessId: BIZ_A,
+      status: "ACTIVE",
     });
 
     mockCrossChainService.initiateTransfer.mockResolvedValue({
-      id: "xfer-new", businessId: BIZ_A, status: "INITIATED",
+      id: "xfer-new",
+      businessId: BIZ_A,
+      status: "INITIATED",
     });
 
     mockFXService.createHedge.mockResolvedValue({
-      id: "fx-new", businessId: BIZ_A,
+      id: "fx-new",
+      businessId: BIZ_A,
     });
 
     mockInvoiceService.createInvoice.mockResolvedValue({
-      id: "inv-new", businessId: BIZ_A,
+      id: "inv-new",
+      businessId: BIZ_A,
     });
 
     mockLiquidityService.addLiquidity.mockResolvedValue({
-      id: "lp-new", businessId: BIZ_A,
+      id: "lp-new",
+      businessId: BIZ_A,
     });
 
     mockAuditService.listAuditEntries.mockResolvedValue({
-      data: [], pagination: { page: 1, limit: 20, total: 0 },
+      data: [],
+      pagination: { page: 1, limit: 20, total: 0 },
     });
   });
 
@@ -370,7 +432,7 @@ describe("Tenant Isolation Integration Tests", () => {
 
       expect(resA.status).toBe(200);
       expect(resA.body.data).toHaveLength(1);
-      expect(resA.body.data[0].id).toBe("pay-a-1");
+      expect(resA.body.data[0].id).toBe(PAYMENT_A);
 
       // Business B sees empty (no cross-tenant leak)
       const resB = await request(app)
@@ -395,12 +457,15 @@ describe("Tenant Isolation Integration Tests", () => {
       const tokenB = tokenFor(BIZ_B, "ADMIN");
 
       const res = await request(app)
-        .get("/v1/payments/pay-a-1")
+        .get(`/v1/payments/${PAYMENT_A}`)
         .set("Authorization", `Bearer ${tokenB}`);
 
-      // The route checks payment.businessId !== req.businessId => 403
-      expect(res.status).toBe(403);
-      expect(res.body.error).toBe("FORBIDDEN");
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe("PAYMENT_NOT_FOUND");
+      expect(mockPaymentService.getPayment).toHaveBeenCalledWith(
+        PAYMENT_A,
+        BIZ_B,
+      );
     });
 
     it("Business A cannot read Business B's invoices", async () => {
@@ -469,7 +534,10 @@ describe("Tenant Isolation Integration Tests", () => {
       expect(resB.status).toBe(200);
       expect(resB.body.data).toHaveLength(0);
 
-      expect(mockFXService.markToMarket).toHaveBeenCalledWith(BIZ_B);
+      expect(mockFXService.listPositions).toHaveBeenCalledWith(BIZ_B, {
+        page: 1,
+        limit: 50,
+      });
     });
 
     it("Business A cannot read Business B's liquidity positions", async () => {
@@ -483,8 +551,9 @@ describe("Tenant Isolation Integration Tests", () => {
       expect(resB.body.data).toHaveLength(0);
 
       expect(mockLiquidityService.getPositions).toHaveBeenCalledWith(
-        undefined,
         BIZ_B,
+        undefined,
+        { page: 1, limit: 50 },
       );
     });
 
@@ -517,7 +586,7 @@ describe("Tenant Isolation Integration Tests", () => {
       expect(res.body.error).toBe("FORBIDDEN");
     });
 
-    it("VIEWER denied POST /v1/businesses/:id/suspend (ADMIN only)", async () => {
+    it("denies the supported business suspension mutation to VIEWER", async () => {
       const res = await request(app)
         .post(`/v1/businesses/${BIZ_A}/suspend`)
         .set("Authorization", `Bearer ${viewerToken()}`);
@@ -591,7 +660,11 @@ describe("Tenant Isolation Integration Tests", () => {
       const res = await request(app)
         .post("/v1/audit/export")
         .set("Authorization", `Bearer ${viewerToken()}`)
-        .send({ format: "json", from: "2026-01-01T00:00:00Z", to: "2026-03-01T00:00:00Z" });
+        .send({
+          format: "json",
+          from: "2026-01-01T00:00:00Z",
+          to: "2026-03-01T00:00:00Z",
+        });
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe("FORBIDDEN");
@@ -643,12 +716,14 @@ describe("Tenant Isolation Integration Tests", () => {
         .post("/v1/payments/batch")
         .set("Authorization", `Bearer ${analystToken()}`)
         .send({
-          payments: [{
-            sender: "0x1234567890123456789012345678901234567890",
-            recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
-            amount: "50.00",
-            currency: "USDC",
-          }],
+          payments: [
+            {
+              sender: "0x1234567890123456789012345678901234567890",
+              recipient: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+              amount: "50.00",
+              currency: "USDC",
+            },
+          ],
         });
 
       expect(res.status).toBe(403);
@@ -669,7 +744,12 @@ describe("Tenant Isolation Integration Tests", () => {
       const res = await request(app)
         .post("/v1/crosschain/transfers")
         .set("Authorization", `Bearer ${analystToken()}`)
-        .send({ source: "ethereum", destination: "noble", token: "USDC", amount: "1000" });
+        .send({
+          source: "ethereum",
+          destination: "noble",
+          token: "USDC",
+          amount: "1000",
+        });
 
       expect(res.status).toBe(403);
       expect(res.body.error).toBe("FORBIDDEN");

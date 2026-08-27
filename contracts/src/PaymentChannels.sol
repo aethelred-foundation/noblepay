@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/access/AccessControlEnumerable.sol";
 import "@openzeppelin/contracts/security/Pausable.sol";
 import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/EIP712.sol";
+import "@openzeppelin/contracts/utils/cryptography/SignatureChecker.sol";
+
+import "./interfaces/IBusinessRegistry.sol";
 
 /**
  * @title PaymentChannels
@@ -14,7 +18,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
  * @notice High-frequency settlement channel contract for the NoblePay cross-border
  *         payment platform. Enables bi-directional payment channels for high-volume
  *         B2B payments with off-chain signing and on-chain settlement, dispute
- *         resolution, multi-hop routing, and HTLC conditional payments.
+ *         resolution, guaranteed exits, and HTLC conditional payments.
  *
  * @dev Architecture overview:
  *
@@ -30,12 +34,12 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
  * │  │  • batch ops     │  │  • on-chain final  │  │  • slash       │  │
  * │  └─────────────────┘  └──────────────────┘  └────────────────┘  │
  * │  ┌─────────────────┐  ┌──────────────────┐  ┌────────────────┐  │
- * │  │  Routing          │  │  HTLC             │  │  Watchtowers   │  │
+ * │  │  Exit safety      │  │  HTLC             │  │  Live KYC      │  │
  * │  │  ──────────────  │  │  ──────────────── │  │  ──────────── │  │
- * │  │  • multi-hop     │  │  • hash locks     │  │  • register    │  │
- * │  │  • intermediary  │  │  • time locks     │  │  • monitor     │  │
- * │  │  • fees          │  │  • conditional     │  │  • bounty      │  │
- * │  │  • path finding  │  │  • atomic swap     │  │  • alert       │  │
+ * │  │  • cancel open   │  │  • hash locks     │  │  • registry    │  │
+ * │  │  • current state │  │  • time locks     │  │  • suspension  │  │
+ * │  │  • challenge     │  │  • conditional     │  │  • revocation  │  │
+ * │  │  • fee recovery  │  │  • atomic swap     │  │  • expiry      │  │
  * │  └─────────────────┘  └──────────────────┘  └────────────────┘  │
  * └───────────────────────────────────────────────────────────────────┘
  *
@@ -47,19 +51,28 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
  *   2. Each state has a monotonically increasing nonce
  *   3. Either party can submit the latest state to close cooperatively
  *   4. Disputes use the challenge-response pattern with timeouts
- *   5. HTLCs enable conditional multi-hop payments
+ *   5. HTLCs enable conditional payments without an unverified routing facade
  */
-contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
+contract PaymentChannels is AccessControlEnumerable, Pausable, ReentrancyGuard, EIP712 {
     using SafeERC20 for IERC20;
-    using ECDSA for bytes32;
 
     // ──────────────────────────────────────────────────────────────
     // Roles
     // ──────────────────────────────────────────────────────────────
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
-    bytes32 public constant ROUTER_ROLE = keccak256("ROUTER_ROLE");
-    bytes32 public constant WATCHTOWER_ROLE = keccak256("WATCHTOWER_ROLE");
+    bytes32 public constant TREASURY_ROLE = keccak256("TREASURY_ROLE");
+
+    /// @notice EIP-712 type hash used for every signed channel state.
+    bytes32 public constant CHANNEL_STATE_TYPEHASH = keccak256(
+        "ChannelState(bytes32 channelId,uint256 balanceA,uint256 balanceB,uint256 nonce,uint256 stateEpoch,bytes32 stateType)"
+    );
+
+    /// @notice Typed-state discriminator for cooperative closes.
+    bytes32 public constant CLOSE_STATE_TYPE = keccak256("CLOSE");
+
+    /// @notice Typed-state discriminator for unilateral closes and disputes.
+    bytes32 public constant UPDATE_STATE_TYPE = keccak256("STATE");
 
     // ──────────────────────────────────────────────────────────────
     // Enums
@@ -99,11 +112,11 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         uint256 balanceB;            // Party B's current balance
         ChannelStatus status;
         uint256 nonce;               // Latest agreed state nonce
+        uint256 stateEpoch;          // Invalidates signatures across on-chain balance mutations
         uint256 openedAt;
         uint256 closingAt;           // When closing was initiated
         uint256 closedAt;
         uint256 challengePeriod;     // Duration of dispute window
-        uint256 routingFeeBps;       // Fee charged if used as routing hop
     }
 
     /// @notice Dispute record for a channel.
@@ -131,28 +144,6 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         uint256 createdAt;
     }
 
-    /// @notice Registered watchtower for channel monitoring.
-    struct Watchtower {
-        address operator;
-        uint256 stake;               // Staked collateral
-        uint256 bountyBps;           // Bounty rate in basis points
-        uint256 channelsMonitored;
-        uint256 disputesRaised;
-        bool active;
-        uint256 registeredAt;
-    }
-
-    /// @notice Multi-hop routing path record.
-    struct RoutingPath {
-        bytes32 pathId;
-        bytes32[] channelIds;        // Ordered list of channels in the path
-        address[] intermediaries;    // Routing nodes
-        uint256 totalFees;           // Sum of routing fees
-        uint256 amount;              // Payment amount
-        uint256 createdAt;
-        bool completed;
-    }
-
     // ──────────────────────────────────────────────────────────────
     // Constants
     // ──────────────────────────────────────────────────────────────
@@ -172,14 +163,8 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Maximum HTLC timelock (30 days).
     uint256 public constant MAX_HTLC_TIMELOCK = 30 days;
 
-    /// @notice Maximum routing fee in basis points (5%).
-    uint256 public constant MAX_ROUTING_FEE_BPS = 500;
-
-    /// @notice Maximum hops in a routing path.
-    uint256 public constant MAX_ROUTING_HOPS = 5;
-
-    /// @notice Minimum watchtower stake.
-    uint256 public constant MIN_WATCHTOWER_STAKE = 1 ether;
+    /// @notice Maximum protocol settlement fee in basis points (5%).
+    uint256 public constant MAX_PROTOCOL_FEE_BPS = 500;
 
     /// @notice Maximum batch operation size.
     uint256 public constant MAX_BATCH_SIZE = 20;
@@ -200,14 +185,8 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Active HTLCs per channel.
     mapping(bytes32 => bytes32[]) public channelHTLCs;
 
-    /// @notice Watchtower records keyed by operator address.
-    mapping(address => Watchtower) public watchtowers;
-
-    /// @notice Watchtower assignments: channelId => watchtower addresses.
-    mapping(bytes32 => address[]) public channelWatchtowers;
-
-    /// @notice Routing path records keyed by path ID.
-    mapping(bytes32 => RoutingPath) public routingPaths;
+    /// @notice Total channel balance currently reserved by unresolved HTLCs.
+    mapping(bytes32 => uint256) public activeHTLCLockedAmount;
 
     /// @notice Channels per address (for both parties).
     mapping(address => bytes32[]) public userChannels;
@@ -215,17 +194,14 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     /// @notice Supported settlement tokens.
     mapping(address => bool) public supportedTokens;
 
-    /// @notice KYC-verified parties (integration with NoblePay compliance).
-    mapping(address => bool) public kycVerified;
+    /// @notice Immutable-after-configuration source of current business KYC status.
+    IBusinessRegistry public businessRegistry;
 
     /// @notice Channel nonce for unique ID generation.
     uint256 public channelNonce;
 
     /// @notice HTLC nonce.
     uint256 public htlcNonce;
-
-    /// @notice Routing path nonce.
-    uint256 public routingNonce;
 
     /// @notice Protocol fee on channel closings in basis points.
     uint256 public protocolFeeBps;
@@ -258,6 +234,12 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
 
     event ChannelActivated(bytes32 indexed channelId);
 
+    event ChannelCancelled(
+        bytes32 indexed channelId,
+        address indexed opener,
+        uint256 refundAmount
+    );
+
     event ChannelCooperativeClose(
         bytes32 indexed channelId,
         uint256 finalBalanceA,
@@ -270,6 +252,14 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         address indexed initiator,
         uint256 claimedBalanceA,
         uint256 claimedBalanceB,
+        uint256 nonce
+    );
+
+    event ChannelCurrentStateClose(
+        bytes32 indexed channelId,
+        address indexed initiator,
+        uint256 balanceA,
+        uint256 balanceB,
         uint256 nonce
     );
 
@@ -314,31 +304,14 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
 
     event HTLCRefunded(bytes32 indexed htlcId);
 
-    event WatchtowerRegistered(
-        address indexed operator,
-        uint256 stake,
-        uint256 bountyBps
-    );
-
-    event WatchtowerDeregistered(address indexed operator, uint256 stakeReturned);
-
-    event WatchtowerAssigned(
-        bytes32 indexed channelId,
-        address indexed watchtower
-    );
-
-    event RoutingPathCreated(
-        bytes32 indexed pathId,
-        uint256 hops,
-        uint256 amount,
-        uint256 totalFees
-    );
-
-    event RoutingPathCompleted(bytes32 indexed pathId);
-
     event ChannelBatchOpened(uint256 count);
-    event KYCStatusUpdated(address indexed party, bool verified);
+    event BusinessRegistryConfigured(address indexed businessRegistry);
     event TokenSupported(address indexed token, bool supported);
+    event ProtocolTreasuryUpdated(
+        address indexed previousTreasury,
+        address indexed newTreasury
+    );
+    event ProtocolFeeUpdated(uint256 previousFeeBps, uint256 newFeeBps);
 
     // ──────────────────────────────────────────────────────────────
     // Errors
@@ -363,24 +336,26 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     error InvalidPreimage();
     error InvalidHTLCStatus(HTLCStatus current);
     error InvalidTimelock();
-    error WatchtowerNotFound();
-    error WatchtowerAlreadyRegistered();
-    error InsufficientStake();
-    error RoutingPathTooLong();
     error KYCRequired();
     error InvalidBalances();
     error BatchTooLarge();
     error ChannelAlreadyExists();
     error InvalidFee();
+    error InvalidSettlementToken(address token);
+    error InvalidTokenDecimals(uint8 provided);
+    error EscrowTransferMismatch(uint256 expected, uint256 received);
+    error ActiveHTLCLock(bytes32 channelId, uint256 amount);
+    error InvalidBusinessRegistry(address registry);
+    error BusinessRegistryAlreadyConfigured();
+    error NotChannelOpener();
 
     // ──────────────────────────────────────────────────────────────
     // Modifiers
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Requires both parties to be KYC-verified.
+    /// @notice Requires both parties to be currently active in BusinessRegistry.
     modifier onlyKYCVerified(address _partyA, address _partyB) {
-        if (!kycVerified[_partyA]) revert KYCRequired();
-        if (!kycVerified[_partyB]) revert KYCRequired();
+        _requireLiveKYC(_partyA, _partyB);
         _;
     }
 
@@ -405,13 +380,14 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         address _admin,
         address _protocolTreasury,
         uint256 _protocolFeeBps
-    ) {
+    ) EIP712("NoblePay PaymentChannels", "1") {
         if (_admin == address(0)) revert ZeroAddress();
         if (_protocolTreasury == address(0)) revert ZeroAddress();
-        if (_protocolFeeBps > 500) revert InvalidFee();
+        if (_protocolFeeBps > MAX_PROTOCOL_FEE_BPS) revert InvalidFee();
 
         _grantRole(DEFAULT_ADMIN_ROLE, _admin);
         _grantRole(ADMIN_ROLE, _admin);
+        _grantRole(TREASURY_ROLE, _admin);
 
         protocolTreasury = _protocolTreasury;
         protocolFeeBps = _protocolFeeBps;
@@ -427,23 +403,29 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
      * @param _token           ERC20 settlement token.
      * @param _depositAmount   Initial deposit from party A.
      * @param _challengePeriod Dispute challenge window in seconds.
-     * @param _routingFeeBps   Fee for routing through this channel.
      * @return channelId       Unique channel identifier.
      */
     function openChannel(
         address _partyB,
         address _token,
         uint256 _depositAmount,
-        uint256 _challengePeriod,
-        uint256 _routingFeeBps
+        uint256 _challengePeriod
     ) external whenNotPaused nonReentrant onlyKYCVerified(msg.sender, _partyB) returns (bytes32 channelId) {
-        if (_partyB == address(0) || _partyB == msg.sender) revert ZeroAddress();
+        _validateCounterparty(msg.sender, _partyB);
         if (!supportedTokens[_token]) revert UnsupportedToken();
         if (_depositAmount == 0) revert ZeroAmount();
-        _validateChannelParams(_challengePeriod, _routingFeeBps);
+        _validateChallengePeriod(_challengePeriod);
 
         channelId = keccak256(
-            abi.encodePacked(msg.sender, _partyB, _token, block.timestamp, channelNonce++)
+            abi.encode(
+                block.chainid,
+                address(this),
+                msg.sender,
+                _partyB,
+                _token,
+                block.timestamp,
+                channelNonce++
+            )
         );
 
         channels[channelId] = Channel({
@@ -457,17 +439,17 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
             balanceB: 0,
             status: ChannelStatus.OPEN,
             nonce: 0,
+            stateEpoch: 0,
             openedAt: block.timestamp,
             closingAt: 0,
             closedAt: 0,
-            challengePeriod: _challengePeriod,
-            routingFeeBps: _routingFeeBps
+            challengePeriod: _challengePeriod
         });
 
         userChannels[msg.sender].push(channelId);
         userChannels[_partyB].push(channelId);
 
-        IERC20(_token).safeTransferFrom(msg.sender, address(this), _depositAmount);
+        _pullExactEscrow(IERC20(_token), msg.sender, _depositAmount);
 
         emit ChannelOpened(channelId, msg.sender, _partyB, _token, _depositAmount, _challengePeriod);
     }
@@ -482,6 +464,7 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         uint256 _amount
     ) external whenNotPaused nonReentrant onlyChannelParty(_channelId) {
         Channel storage ch = channels[_channelId];
+        _requireLiveKYC(ch.partyA, ch.partyB);
         if (ch.status != ChannelStatus.OPEN && ch.status != ChannelStatus.FUNDED && ch.status != ChannelStatus.ACTIVE) {
             revert InvalidChannelStatus(ch.status);
         }
@@ -495,6 +478,11 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
             ch.balanceB += _amount;
         }
 
+        // A state may be signed with a future nonce and balances that anticipate this
+        // deposit. Advancing the epoch makes every pre-funding signature unusable once
+        // the channel's escrow and balances change.
+        ch.stateEpoch++;
+
         // Activate if both parties have funded
         if (ch.status == ChannelStatus.OPEN && ch.depositB > 0) {
             ch.status = ChannelStatus.FUNDED;
@@ -505,10 +493,41 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
             ch.status = ChannelStatus.ACTIVE;
         }
 
-        IERC20(ch.token).safeTransferFrom(msg.sender, address(this), _amount);
+        _pullExactEscrow(IERC20(ch.token), msg.sender, _amount);
 
         uint256 totalDeposit = msg.sender == ch.partyA ? ch.depositA : ch.depositB;
         emit ChannelFunded(_channelId, msg.sender, _amount, totalDeposit);
+    }
+
+    /**
+     * @notice Cancels a channel that the counterparty never funded and refunds
+     *         every escrowed token to the opener without charging a protocol fee.
+     * @dev This is an exit-only recovery path. It deliberately remains callable
+     *      while paused and after either party loses KYC status. Effects precede
+     *      the external transfer and `nonReentrant` prevents token callbacks from
+     *      attempting a second refund.
+     * @param _channelId Channel to cancel.
+     */
+    function cancelOpenChannel(bytes32 _channelId) external nonReentrant {
+        Channel storage ch = channels[_channelId];
+        if (ch.openedAt == 0) revert ChannelNotFound();
+        if (msg.sender != ch.partyA) revert NotChannelOpener();
+        if (ch.status != ChannelStatus.OPEN) revert InvalidChannelStatus(ch.status);
+
+        // OPEN can include opener top-ups, but party B has never funded and no
+        // off-chain/HTLC state can have consumed escrow in this lifecycle state.
+        if (ch.depositB != 0 || ch.balanceB != 0 || ch.balanceA != ch.depositA) {
+            revert InvalidBalances();
+        }
+
+        uint256 refundAmount = ch.balanceA;
+        ch.status = ChannelStatus.CLOSED;
+        ch.closedAt = block.timestamp;
+
+        IERC20(ch.token).safeTransfer(ch.partyA, refundAmount);
+
+        emit ChannelCancelled(_channelId, ch.partyA, refundAmount);
+        emit ChannelClosed(_channelId, refundAmount, 0);
     }
 
     /**
@@ -534,22 +553,27 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         if (ch.status != ChannelStatus.ACTIVE && ch.status != ChannelStatus.FUNDED) {
             revert InvalidChannelStatus(ch.status);
         }
+        _requireNoActiveHTLC(_channelId);
         if (_nonce <= ch.nonce) revert NonceTooLow(_nonce, ch.nonce);
 
         uint256 totalDeposit = ch.depositA + ch.depositB;
         if (_finalBalanceA + _finalBalanceB != totalDeposit) revert InvalidBalances();
 
-        // Verify both signatures
-        bytes32 stateHash = keccak256(
-            abi.encodePacked(_channelId, _finalBalanceA, _finalBalanceB, _nonce, "CLOSE")
+        // Verify both EIP-712 signatures. The digest commits to this chain and deployment.
+        bytes32 stateHash = _stateDigest(
+            _channelId,
+            _finalBalanceA,
+            _finalBalanceB,
+            _nonce,
+            CLOSE_STATE_TYPE
         );
-        bytes32 ethSignedHash = stateHash.toEthSignedMessageHash();
 
-        address signerA = ethSignedHash.recover(_signatureA);
-        address signerB = ethSignedHash.recover(_signatureB);
-
-        if (signerA != ch.partyA) revert InvalidSignature();
-        if (signerB != ch.partyB) revert InvalidSignature();
+        if (!SignatureChecker.isValidSignatureNow(ch.partyA, stateHash, _signatureA)) {
+            revert InvalidSignature();
+        }
+        if (!SignatureChecker.isValidSignatureNow(ch.partyB, stateHash, _signatureB)) {
+            revert InvalidSignature();
+        }
 
         _settleChannel(ch, _finalBalanceA, _finalBalanceB, _nonce);
 
@@ -577,20 +601,24 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         if (ch.status != ChannelStatus.ACTIVE && ch.status != ChannelStatus.FUNDED) {
             revert InvalidChannelStatus(ch.status);
         }
+        _requireNoActiveHTLC(_channelId);
         if (_nonce <= ch.nonce) revert NonceTooLow(_nonce, ch.nonce);
 
         uint256 totalDeposit = ch.depositA + ch.depositB;
         if (_balanceA + _balanceB != totalDeposit) revert InvalidBalances();
 
-        // Verify counterparty's signature
-        bytes32 stateHash = keccak256(
-            abi.encodePacked(_channelId, _balanceA, _balanceB, _nonce, "STATE")
+        // Verify the counterparty's EIP-712 signature.
+        bytes32 stateHash = _stateDigest(
+            _channelId,
+            _balanceA,
+            _balanceB,
+            _nonce,
+            UPDATE_STATE_TYPE
         );
-        bytes32 ethSignedHash = stateHash.toEthSignedMessageHash();
-        address signer = ethSignedHash.recover(_signature);
-
         address counterparty = msg.sender == ch.partyA ? ch.partyB : ch.partyA;
-        if (signer != counterparty) revert InvalidSignature();
+        if (!SignatureChecker.isValidSignatureNow(counterparty, stateHash, _signature)) {
+            revert InvalidSignature();
+        }
 
         ch.status = ChannelStatus.CLOSING;
         ch.closingAt = block.timestamp;
@@ -615,12 +643,56 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     }
 
     /**
+     * @notice Starts a unilateral close from the contract's canonical balances
+     *         without requiring either party to have signed an off-chain state.
+     * @dev This guarantees an ACTIVE channel can always make progress if a party
+     *      refuses to produce the first signature. The normal challenge period
+     *      applies, and either party may counter with a higher, jointly signed
+     *      state. As an exit-only path it remains available while paused and
+     *      after KYC suspension, revocation, or expiry.
+     * @param _channelId Channel to close from its current on-chain balances.
+     */
+    function initiateCurrentStateClose(
+        bytes32 _channelId
+    ) external nonReentrant onlyChannelParty(_channelId) {
+        Channel storage ch = channels[_channelId];
+        if (ch.status != ChannelStatus.ACTIVE) revert InvalidChannelStatus(ch.status);
+        _requireNoActiveHTLC(_channelId);
+
+        ch.status = ChannelStatus.CLOSING;
+        ch.closingAt = block.timestamp;
+
+        uint256 expiresAt = block.timestamp + ch.challengePeriod;
+        disputes[_channelId] = ChannelDispute({
+            channelId: _channelId,
+            challenger: msg.sender,
+            challengeNonce: ch.nonce,
+            challengeBalanceA: ch.balanceA,
+            challengeBalanceB: ch.balanceB,
+            initiatedAt: block.timestamp,
+            expiresAt: expiresAt,
+            resolved: false
+        });
+
+        emit ChannelCurrentStateClose(
+            _channelId,
+            msg.sender,
+            ch.balanceA,
+            ch.balanceB,
+            ch.nonce
+        );
+        emit DisputeInitiated(_channelId, msg.sender, ch.nonce, expiresAt);
+    }
+
+    /**
      * @notice Counters a unilateral close with a higher-nonce state.
      * @param _channelId    Channel being disputed.
      * @param _balanceA     Correct balance for party A.
      * @param _balanceB     Correct balance for party B.
      * @param _nonce        Higher nonce than the challenger's.
      * @param _signature    Other party's signature of this state.
+     * @dev Remains callable while paused so an emergency pause cannot consume
+     *      the victim's challenge window and finalize a stale state.
      */
     function counterDispute(
         bytes32 _channelId,
@@ -628,7 +700,7 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         uint256 _balanceB,
         uint256 _nonce,
         bytes calldata _signature
-    ) external whenNotPaused onlyChannelParty(_channelId) {
+    ) external onlyChannelParty(_channelId) {
         Channel storage ch = channels[_channelId];
         if (ch.status != ChannelStatus.CLOSING) revert InvalidChannelStatus(ch.status);
 
@@ -639,15 +711,18 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         uint256 totalDeposit = ch.depositA + ch.depositB;
         if (_balanceA + _balanceB != totalDeposit) revert InvalidBalances();
 
-        // Verify signature
-        bytes32 stateHash = keccak256(
-            abi.encodePacked(_channelId, _balanceA, _balanceB, _nonce, "STATE")
+        // Verify the counterparty's EIP-712 signature.
+        bytes32 stateHash = _stateDigest(
+            _channelId,
+            _balanceA,
+            _balanceB,
+            _nonce,
+            UPDATE_STATE_TYPE
         );
-        bytes32 ethSignedHash = stateHash.toEthSignedMessageHash();
-        address signer = ethSignedHash.recover(_signature);
-
         address counterparty = msg.sender == ch.partyA ? ch.partyB : ch.partyA;
-        if (signer != counterparty) revert InvalidSignature();
+        if (!SignatureChecker.isValidSignatureNow(counterparty, stateHash, _signature)) {
+            revert InvalidSignature();
+        }
 
         // Update dispute with higher nonce state
         d.challengeNonce = _nonce;
@@ -669,12 +744,16 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
      */
     function finalizeClose(
         bytes32 _channelId
-    ) external whenNotPaused nonReentrant {
+    ) external nonReentrant {
         Channel storage ch = channels[_channelId];
         if (ch.status != ChannelStatus.CLOSING) revert InvalidChannelStatus(ch.status);
+        _requireNoActiveHTLC(_channelId);
 
         ChannelDispute storage d = disputes[_channelId];
-        if (block.timestamp < d.expiresAt) revert ChallengeNotExpired();
+        // Counter-disputes are valid through `expiresAt`; settlement becomes
+        // valid only in the first block strictly after it, eliminating the
+        // equality-block race where both actions were previously executable.
+        if (block.timestamp <= d.expiresAt) revert ChallengeNotExpired();
 
         d.resolved = true;
 
@@ -689,7 +768,7 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
 
     /**
      * @notice Creates an HTLC for a conditional payment within a channel.
-     * @dev Used for multi-hop routing: the sender locks funds that can only
+     * @dev The sender locks funds that can only
      *      be claimed by revealing the preimage of the hash lock.
      * @param _channelId Channel containing the HTLC.
      * @param _amount    Amount locked in the HTLC.
@@ -704,6 +783,7 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         uint256 _timelock
     ) external whenNotPaused onlyChannelParty(_channelId) returns (bytes32 htlcId) {
         Channel storage ch = channels[_channelId];
+        _requireLiveKYC(ch.partyA, ch.partyB);
         if (ch.status != ChannelStatus.ACTIVE) revert InvalidChannelStatus(ch.status);
         if (_amount == 0) revert ZeroAmount();
         if (_timelock < block.timestamp + MIN_HTLC_TIMELOCK) revert InvalidTimelock();
@@ -739,6 +819,8 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         });
 
         channelHTLCs[_channelId].push(htlcId);
+        activeHTLCLockedAmount[_channelId] += _amount;
+        ch.stateEpoch++;
 
         emit HTLCCreated(htlcId, _channelId, msg.sender, _amount, _hashLock, _timelock);
     }
@@ -747,11 +829,13 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
      * @notice Claims an HTLC by revealing the preimage.
      * @param _htlcId   HTLC to claim.
      * @param _preimage Secret preimage whose hash matches the hash lock.
+     * @dev Remains callable while paused because its absolute timelock continues
+     *      to advance and the preimage holder must retain the full claim window.
      */
     function claimHTLC(
         bytes32 _htlcId,
         bytes32 _preimage
-    ) external whenNotPaused {
+    ) external {
         HTLC storage h = htlcs[_htlcId];
         if (h.createdAt == 0) revert HTLCNotFound();
         if (h.status != HTLCStatus.ACTIVE) revert InvalidHTLCStatus(h.status);
@@ -759,6 +843,7 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         if (keccak256(abi.encodePacked(_preimage)) != h.hashLock) revert InvalidPreimage();
 
         h.status = HTLCStatus.CLAIMED;
+        activeHTLCLockedAmount[h.channelId] -= h.amount;
 
         // Credit receiver's channel balance
         Channel storage ch = channels[h.channelId];
@@ -767,6 +852,7 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         } else {
             ch.balanceB += h.amount;
         }
+        ch.stateEpoch++;
 
         emit HTLCClaimed(_htlcId, _preimage);
     }
@@ -774,14 +860,17 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     /**
      * @notice Refunds an expired HTLC back to the sender.
      * @param _htlcId HTLC to refund.
+     * @dev Remains callable while paused so an expired conditional lock cannot
+     *      strand channel funds until governance restores unrelated operations.
      */
-    function refundHTLC(bytes32 _htlcId) external whenNotPaused {
+    function refundHTLC(bytes32 _htlcId) external {
         HTLC storage h = htlcs[_htlcId];
         if (h.createdAt == 0) revert HTLCNotFound();
         if (h.status != HTLCStatus.ACTIVE) revert InvalidHTLCStatus(h.status);
         if (block.timestamp <= h.timelock) revert HTLCNotExpired();
 
         h.status = HTLCStatus.REFUNDED;
+        activeHTLCLockedAmount[h.channelId] -= h.amount;
 
         // Return funds to sender's channel balance
         Channel storage ch = channels[h.channelId];
@@ -790,143 +879,9 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         } else {
             ch.balanceB += h.amount;
         }
+        ch.stateEpoch++;
 
         emit HTLCRefunded(_htlcId);
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // External — Multi-Hop Routing
-    // ──────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Registers a multi-hop routing path through intermediary channels.
-     * @dev Called by routing nodes to establish a payment path. Each hop
-     *      has an associated channel and routing fee.
-     * @param _channelIds     Ordered array of channel IDs forming the path.
-     * @param _intermediaries Addresses of routing nodes.
-     * @param _amount         Payment amount.
-     * @return pathId         Unique path identifier.
-     */
-    function registerRoutingPath(
-        bytes32[] calldata _channelIds,
-        address[] calldata _intermediaries,
-        uint256 _amount
-    ) external whenNotPaused onlyRole(ROUTER_ROLE) returns (bytes32 pathId) {
-        if (_channelIds.length == 0) revert ZeroAmount();
-        if (_channelIds.length > MAX_ROUTING_HOPS) revert RoutingPathTooLong();
-        require(
-            _channelIds.length == _intermediaries.length + 1,
-            "PaymentChannels: invalid path structure"
-        );
-
-        uint256 totalFees;
-        for (uint256 i; i < _channelIds.length;) {
-            Channel storage ch = channels[_channelIds[i]];
-            if (ch.openedAt == 0) revert ChannelNotFound();
-            if (ch.status != ChannelStatus.ACTIVE) revert InvalidChannelStatus(ch.status);
-            totalFees += (_amount * ch.routingFeeBps) / 10_000;
-
-            unchecked { ++i; }
-        }
-
-        pathId = keccak256(
-            abi.encodePacked(msg.sender, _amount, block.timestamp, routingNonce++)
-        );
-
-        routingPaths[pathId] = RoutingPath({
-            pathId: pathId,
-            channelIds: _channelIds,
-            intermediaries: _intermediaries,
-            totalFees: totalFees,
-            amount: _amount,
-            createdAt: block.timestamp,
-            completed: false
-        });
-
-        emit RoutingPathCreated(pathId, _channelIds.length, _amount, totalFees);
-    }
-
-    /**
-     * @notice Marks a routing path as completed.
-     * @param _pathId Path to mark as completed.
-     */
-    function completeRoutingPath(bytes32 _pathId) external onlyRole(ROUTER_ROLE) {
-        RoutingPath storage path = routingPaths[_pathId];
-        require(path.createdAt > 0, "PaymentChannels: path not found");
-        require(!path.completed, "PaymentChannels: already completed");
-
-        path.completed = true;
-        emit RoutingPathCompleted(_pathId);
-    }
-
-    // ──────────────────────────────────────────────────────────────
-    // External — Watchtower Management
-    // ──────────────────────────────────────────────────────────────
-
-    /**
-     * @notice Registers as a watchtower for channel monitoring.
-     * @param _bountyBps Bounty rate in basis points for successful disputes.
-     */
-    function registerWatchtower(
-        uint256 _bountyBps
-    ) external payable whenNotPaused nonReentrant {
-        if (watchtowers[msg.sender].registeredAt != 0) revert WatchtowerAlreadyRegistered();
-        if (msg.value < MIN_WATCHTOWER_STAKE) revert InsufficientStake();
-        if (_bountyBps > MAX_ROUTING_FEE_BPS) revert InvalidFee();
-
-        watchtowers[msg.sender] = Watchtower({
-            operator: msg.sender,
-            stake: msg.value,
-            bountyBps: _bountyBps,
-            channelsMonitored: 0,
-            disputesRaised: 0,
-            active: true,
-            registeredAt: block.timestamp
-        });
-
-        _grantRole(WATCHTOWER_ROLE, msg.sender);
-
-        emit WatchtowerRegistered(msg.sender, msg.value, _bountyBps);
-    }
-
-    /**
-     * @notice Deregisters a watchtower and returns stake.
-     */
-    function deregisterWatchtower() external nonReentrant {
-        Watchtower storage wt = watchtowers[msg.sender];
-        if (wt.registeredAt == 0) revert WatchtowerNotFound();
-
-        uint256 stakeToReturn = wt.stake;
-        wt.active = false;
-        wt.stake = 0;
-
-        _revokeRole(WATCHTOWER_ROLE, msg.sender);
-
-        if (stakeToReturn > 0) {
-            (bool ok, ) = msg.sender.call{value: stakeToReturn}("");
-            require(ok, "PaymentChannels: stake return failed");
-        }
-
-        emit WatchtowerDeregistered(msg.sender, stakeToReturn);
-    }
-
-    /**
-     * @notice Assigns a watchtower to monitor a channel.
-     * @param _channelId  Channel to monitor.
-     * @param _watchtower Watchtower address.
-     */
-    function assignWatchtower(
-        bytes32 _channelId,
-        address _watchtower
-    ) external onlyChannelParty(_channelId) whenNotPaused {
-        if (channels[_channelId].openedAt == 0) revert ChannelNotFound();
-        Watchtower storage wt = watchtowers[_watchtower];
-        if (!wt.active) revert WatchtowerNotFound();
-
-        channelWatchtowers[_channelId].push(_watchtower);
-        wt.channelsMonitored++;
-
-        emit WatchtowerAssigned(_channelId, _watchtower);
     }
 
     // ──────────────────────────────────────────────────────────────
@@ -939,32 +894,41 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
      * @param _token          Shared settlement token.
      * @param _deposits       Array of initial deposits.
      * @param _challengePeriod Shared challenge period.
-     * @param _routingFeeBps  Shared routing fee.
      * @return channelIds     Array of created channel IDs.
      */
     function batchOpenChannels(
         address[] calldata _counterparties,
         address _token,
         uint256[] calldata _deposits,
-        uint256 _challengePeriod,
-        uint256 _routingFeeBps
+        uint256 _challengePeriod
     ) external whenNotPaused nonReentrant returns (bytes32[] memory channelIds) {
         uint256 count = _counterparties.length;
         if (count == 0) revert ZeroAmount();
         if (count > MAX_BATCH_SIZE) revert BatchTooLarge();
         require(count == _deposits.length, "PaymentChannels: array mismatch");
         if (!supportedTokens[_token]) revert UnsupportedToken();
-        _validateChannelParams(_challengePeriod, _routingFeeBps);
+        _validateChallengePeriod(_challengePeriod);
 
         channelIds = new bytes32[](count);
         uint256 totalDeposit;
 
+        if (!kycVerified(msg.sender)) revert KYCRequired();
+
         for (uint256 i; i < count;) {
-            if (!kycVerified[msg.sender] || !kycVerified[_counterparties[i]]) revert KYCRequired();
+            _validateCounterparty(msg.sender, _counterparties[i]);
+            if (!kycVerified(_counterparties[i])) revert KYCRequired();
             if (_deposits[i] == 0) revert ZeroAmount();
 
             bytes32 id = keccak256(
-                abi.encodePacked(msg.sender, _counterparties[i], _token, block.timestamp, channelNonce++)
+                abi.encode(
+                    block.chainid,
+                    address(this),
+                    msg.sender,
+                    _counterparties[i],
+                    _token,
+                    block.timestamp,
+                    channelNonce++
+                )
             );
             channelIds[i] = id;
 
@@ -979,11 +943,11 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
                 balanceB: 0,
                 status: ChannelStatus.OPEN,
                 nonce: 0,
+                stateEpoch: 0,
                 openedAt: block.timestamp,
                 closingAt: 0,
                 closedAt: 0,
-                challengePeriod: _challengePeriod,
-                routingFeeBps: _routingFeeBps
+                challengePeriod: _challengePeriod
             });
 
             userChannels[msg.sender].push(id);
@@ -995,7 +959,7 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
             unchecked { ++i; }
         }
 
-        IERC20(_token).safeTransferFrom(msg.sender, address(this), totalDeposit);
+        _pullExactEscrow(IERC20(_token), msg.sender, totalDeposit);
 
         emit ChannelBatchOpened(count);
     }
@@ -1029,31 +993,44 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         return userChannels[_user];
     }
 
-    /// @notice Returns a watchtower record.
-    function getWatchtower(address _operator) external view returns (Watchtower memory) {
-        return watchtowers[_operator];
+    /// @notice Returns whether a party is verified, unsuspended, unrevoked, and
+    ///         within BusinessRegistry's annual re-verification window.
+    /// @dev Keeps the historical `kycVerified(address)` read selector while making
+    ///      the result live and fail-closed rather than an administrator-maintained snapshot.
+    function kycVerified(address _party) public view returns (bool) {
+        IBusinessRegistry registry = businessRegistry;
+        if (address(registry) == address(0) || address(registry).code.length == 0) return false;
+
+        try registry.isBusinessActive(_party) returns (bool active) {
+            return active;
+        } catch {
+            return false;
+        }
     }
 
-    /// @notice Returns assigned watchtowers for a channel.
-    function getChannelWatchtowers(bytes32 _channelId) external view returns (address[] memory) {
-        return channelWatchtowers[_channelId];
-    }
-
-    /// @notice Returns a routing path record.
-    function getRoutingPath(bytes32 _pathId) external view returns (RoutingPath memory) {
-        return routingPaths[_pathId];
-    }
-
-    /// @notice Computes the state hash for off-chain signing.
+    /**
+     * @notice Computes the final EIP-712 digest that wallets must sign for a channel state.
+     * @dev The digest includes the EIP-712 domain (name `NoblePay PaymentChannels`, version
+     *      `1`, current chain ID, and this contract as verifying contract). `_type` must be
+     *      `CLOSE` for cooperative close or `STATE` for unilateral/dispute state updates.
+     *      It also commits to the channel's current `stateEpoch`, so any signature produced
+     *      before a funding/top-up or HTLC create, claim, or refund can never be replayed
+     *      after that on-chain balance mutation.
+     *      Callers should normally use `eth_signTypedData_v4`, not `personal_sign`.
+     */
     function computeStateHash(
         bytes32 _channelId,
         uint256 _balanceA,
         uint256 _balanceB,
         uint256 _nonce,
         string calldata _type
-    ) external pure returns (bytes32) {
-        return keccak256(
-            abi.encodePacked(_channelId, _balanceA, _balanceB, _nonce, _type)
+    ) external view returns (bytes32) {
+        return _stateDigest(
+            _channelId,
+            _balanceA,
+            _balanceB,
+            _nonce,
+            keccak256(bytes(_type))
         );
     }
 
@@ -1061,30 +1038,33 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     // Admin Functions
     // ──────────────────────────────────────────────────────────────
 
-    /// @notice Updates KYC verification status for a party.
-    function setKYCStatus(address _party, bool _verified) external onlyRole(ADMIN_ROLE) {
-        if (_party == address(0)) revert ZeroAddress();
-        kycVerified[_party] = _verified;
-        emit KYCStatusUpdated(_party, _verified);
-    }
-
-    /// @notice Batch updates KYC verification status.
-    function batchSetKYCStatus(
-        address[] calldata _parties,
-        bool[] calldata _statuses
-    ) external onlyRole(ADMIN_ROLE) {
-        require(_parties.length == _statuses.length, "PaymentChannels: array mismatch");
-        for (uint256 i; i < _parties.length;) {
-            if (_parties[i] == address(0)) revert ZeroAddress();
-            kycVerified[_parties[i]] = _statuses[i];
-            emit KYCStatusUpdated(_parties[i], _statuses[i]);
-            unchecked { ++i; }
+    /// @notice Configures the canonical BusinessRegistry exactly once.
+    /// @dev Channel entry and balance-increasing operations remain fail-closed until
+    ///      this is configured. A registry migration requires a new PaymentChannels
+    ///      deployment and explicit operational cut-over, matching NoblePay's trust model.
+    function configureBusinessRegistry(address _registry) external onlyRole(ADMIN_ROLE) {
+        if (address(businessRegistry) != address(0)) revert BusinessRegistryAlreadyConfigured();
+        if (_registry == address(0) || _registry.code.length == 0) {
+            revert InvalidBusinessRegistry(_registry);
         }
+
+        // Probe the exact selector before making this trust dependency permanent.
+        // A failed decode or revert identifies an ABI-incompatible target and avoids
+        // irreversibly bricking all channel entry operations.
+        try IBusinessRegistry(_registry).isBusinessActive(address(this)) returns (bool) {
+            // Either true or false is a valid registry decision for this address.
+        } catch {
+            revert InvalidBusinessRegistry(_registry);
+        }
+
+        businessRegistry = IBusinessRegistry(_registry);
+        emit BusinessRegistryConfigured(_registry);
     }
 
     /// @notice Adds or removes a supported settlement token.
     function setSupportedToken(address _token, bool _supported) external onlyRole(ADMIN_ROLE) {
         if (_token == address(0)) revert ZeroAddress();
+        if (_supported) _validateSettlementToken(_token);
         supportedTokens[_token] = _supported;
         emit TokenSupported(_token, _supported);
     }
@@ -1093,6 +1073,32 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     function setNoblePayContract(address _noblepay) external onlyRole(ADMIN_ROLE) {
         if (_noblepay == address(0)) revert ZeroAddress();
         noblePayContract = _noblepay;
+    }
+
+    /// @notice Rotates the fee beneficiary if the current treasury is unavailable
+    ///         or blocked by a supported stablecoin.
+    /// @dev Kept separate from operational administration through TREASURY_ROLE.
+    ///      Rotation itself transfers no funds and is safe while paused.
+    function setProtocolTreasury(
+        address _newTreasury
+    ) external onlyRole(TREASURY_ROLE) {
+        if (_newTreasury == address(0)) revert ZeroAddress();
+        address previousTreasury = protocolTreasury;
+        protocolTreasury = _newTreasury;
+        emit ProtocolTreasuryUpdated(previousTreasury, _newTreasury);
+    }
+
+    /// @notice Updates the bounded protocol settlement fee, including zero-fee
+    ///         emergency recovery when no safe treasury can receive a token.
+    /// @dev The 5% hard cap cannot be increased by governance. The dedicated
+    ///      TREASURY_ROLE may invoke this while paused before settlement resumes.
+    function setProtocolFeeBps(
+        uint256 _newFeeBps
+    ) external onlyRole(TREASURY_ROLE) {
+        if (_newFeeBps > MAX_PROTOCOL_FEE_BPS) revert InvalidFee();
+        uint256 previousFeeBps = protocolFeeBps;
+        protocolFeeBps = _newFeeBps;
+        emit ProtocolFeeUpdated(previousFeeBps, _newFeeBps);
     }
 
     /// @notice Emergency pause.
@@ -1110,15 +1116,81 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
     // ──────────────────────────────────────────────────────────────
 
     /**
-     * @dev Validates channel parameters shared by openChannel and batchOpenChannels.
+     * @dev Validates the challenge period shared by openChannel and batchOpenChannels.
      * @param _challengePeriod Dispute challenge window in seconds.
-     * @param _routingFeeBps   Fee for routing through this channel.
      */
-    function _validateChannelParams(uint256 _challengePeriod, uint256 _routingFeeBps) internal pure {
+    function _validateChallengePeriod(uint256 _challengePeriod) internal pure {
         if (_challengePeriod < MIN_CHALLENGE_PERIOD || _challengePeriod > MAX_CHALLENGE_PERIOD) {
             revert InvalidChallengePeriod();
         }
-        if (_routingFeeBps > MAX_ROUTING_FEE_BPS) revert InvalidFee();
+    }
+
+    /// @dev Enforces identical counterparty constraints for single and batch opening.
+    function _validateCounterparty(address partyA, address partyB) internal pure {
+        if (partyB == address(0) || partyB == partyA) revert ZeroAddress();
+    }
+
+    /// @dev Uses live registry state for both channel parties and fails closed on
+    ///      an unconfigured, unavailable, or ABI-incompatible trust dependency.
+    function _requireLiveKYC(address partyA, address partyB) internal view {
+        if (!kycVerified(partyA) || !kycVerified(partyB)) revert KYCRequired();
+    }
+
+    /// @dev Builds the EIP-712 digest consumed by EOA and ERC-1271 signature checks.
+    function _stateDigest(
+        bytes32 _channelId,
+        uint256 _balanceA,
+        uint256 _balanceB,
+        uint256 _nonce,
+        bytes32 _stateType
+    ) internal view returns (bytes32) {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                CHANNEL_STATE_TYPEHASH,
+                _channelId,
+                _balanceA,
+                _balanceB,
+                _nonce,
+                channels[_channelId].stateEpoch,
+                _stateType
+            )
+        );
+        return _hashTypedDataV4(structHash);
+    }
+
+    /// @dev Rejects EOAs, incomplete token facades, and non-six-decimal assets.
+    function _validateSettlementToken(address _token) internal view {
+        if (_token.code.length == 0) revert InvalidSettlementToken(_token);
+
+        uint8 tokenDecimals;
+        try IERC20Metadata(_token).decimals() returns (uint8 decimals_) {
+            tokenDecimals = decimals_;
+        } catch {
+            revert InvalidSettlementToken(_token);
+        }
+        if (tokenDecimals != 6) revert InvalidTokenDecimals(tokenDecimals);
+
+        try IERC20(_token).totalSupply() returns (uint256) {} catch {
+            revert InvalidSettlementToken(_token);
+        }
+        try IERC20(_token).balanceOf(address(this)) returns (uint256) {} catch {
+            revert InvalidSettlementToken(_token);
+        }
+    }
+
+    /// @dev Pulls escrow only when this contract receives exactly the accounted amount.
+    function _pullExactEscrow(IERC20 _token, address _from, uint256 _amount) internal {
+        uint256 balanceBefore = _token.balanceOf(address(this));
+        _token.safeTransferFrom(_from, address(this), _amount);
+        uint256 balanceAfter = _token.balanceOf(address(this));
+        uint256 received = balanceAfter >= balanceBefore ? balanceAfter - balanceBefore : 0;
+        if (received != _amount) revert EscrowTransferMismatch(_amount, received);
+    }
+
+    /// @dev Settlement cannot account for funds still reserved by conditional transfers.
+    function _requireNoActiveHTLC(bytes32 _channelId) internal view {
+        uint256 lockedAmount = activeHTLCLockedAmount[_channelId];
+        if (lockedAmount != 0) revert ActiveHTLCLock(_channelId, lockedAmount);
     }
 
     /**
@@ -1167,6 +1239,4 @@ contract PaymentChannels is AccessControl, Pausable, ReentrancyGuard {
         emit ChannelClosed(ch.channelId, _finalBalanceA, _finalBalanceB);
     }
 
-    /// @notice Allows the contract to receive native tokens for watchtower stakes.
-    receive() external payable {}
 }

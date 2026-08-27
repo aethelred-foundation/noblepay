@@ -1,21 +1,104 @@
 import { Router, Response } from "express";
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "../lib/db";
 import { AuthenticatedRequest, authenticateAPIKey } from "../middleware/auth";
 import {
   validate,
   ComplianceScreeningSchema,
+  FlaggedPaymentsQuerySchema,
   ReviewDecisionSchema,
+  TravelRuleAuthorizationSchema,
+  TravelRuleChallengeSchema,
 } from "../middleware/validation";
 import { ComplianceService, ComplianceError } from "../services/compliance";
 import { AuditService } from "../services/audit";
-import { extractRole, requirePermission, requireRole } from "../middleware/rbac";
+import {
+  extractRole,
+  requireCurrentPlatformAdmin,
+  requirePermission,
+} from "../middleware/rbac";
 import { logger } from "../lib/logger";
+import { wsService, WSEventType, WSTenantChannel } from "../services/websocket";
+import { TravelRuleError, TravelRuleService } from "../services/travel-rule";
 
-const prisma = new PrismaClient();
 const auditService = new AuditService(prisma);
-const complianceService = new ComplianceService(prisma, auditService);
+const travelRuleService = new TravelRuleService(prisma);
+const complianceService = new ComplianceService(
+  prisma,
+  auditService,
+  undefined,
+  travelRuleService,
+);
 
 const router = Router();
+
+// ─── Travel Rule wallet authorization ──────────────────────────────────────
+
+router.get(
+  "/travel-rule/requirements/:paymentId",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("compliance:manage"),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const result = await travelRuleService.getRequirement(
+        req.params.paymentId,
+        req.businessId!,
+      );
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ success: true, data: result });
+    } catch (error) {
+      handleError(error, res);
+    }
+  },
+);
+
+router.post(
+  "/travel-rule/challenge",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("compliance:manage"),
+  validate(TravelRuleChallengeSchema),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const result = await travelRuleService.createChallenge({
+        paymentRecordId: req.body.paymentId,
+        data: req.body.data,
+        businessId: req.businessId!,
+        signerId: req.signerId,
+        apiKeyId: req.apiKeyId,
+      });
+      res.setHeader("Cache-Control", "no-store");
+      res.status(201).json({ success: true, data: result });
+    } catch (error) {
+      handleError(error, res);
+    }
+  },
+);
+
+router.post(
+  "/travel-rule/authorize",
+  authenticateAPIKey,
+  extractRole,
+  requirePermission("compliance:manage"),
+  validate(TravelRuleAuthorizationSchema),
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+    try {
+      const result = await travelRuleService.authorize({
+        paymentRecordId: req.body.paymentId,
+        challengeId: req.body.challengeId,
+        signature: req.body.signature,
+        data: req.body.data,
+        businessId: req.businessId!,
+        signerId: req.signerId,
+        apiKeyId: req.apiKeyId,
+      });
+      res.setHeader("Cache-Control", "no-store");
+      res.status(201).json({ success: true, data: result });
+    } catch (error) {
+      handleError(error, res);
+    }
+  },
+);
 
 // ─── POST /v1/compliance/screen — Submit payment for screening ──────────────
 
@@ -27,7 +110,29 @@ router.post(
   validate(ComplianceScreeningSchema),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const result = await complianceService.submitForScreening(req.body);
+      const result = await complianceService.submitForScreening(
+        req.body,
+        req.businessId!,
+      );
+      const event = {
+        event: "screening_completed",
+        screeningId: result.id,
+        paymentId: result.paymentId,
+        status: result.status,
+        riskScore: result.amlRiskScore,
+        sanctionsClear: result.sanctionsClear,
+        travelRuleCompliant: result.travelRuleCompliant,
+        submissionTxHash: result.submissionTxHash,
+        submissionBlockNumber: result.submissionBlockNumber,
+        confirmations: result.confirmations,
+      };
+      publishTenantEvent(
+        "compliance",
+        "compliance_decision",
+        event,
+        req.businessId!,
+      );
+      publishTenantEvent("risk", "risk_update", event, req.businessId!);
 
       res.status(200).json({
         success: true,
@@ -48,22 +153,16 @@ router.get(
   requirePermission("compliance:read"),
   async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const sanctions = complianceService.getSanctionsStatus();
-      const teeNodes = await prisma.tEENode.findMany({
-        where: { status: "ACTIVE" },
-      });
+      const sanctions = await complianceService.getSanctionsStatus();
+      const checkedAt = new Date().toISOString();
 
       res.json({
         success: true,
         data: {
-          engineStatus: "operational",
+          engineStatus: "healthy",
+          checkedAt,
+          settlementEvidence: "verified_per_submission",
           sanctions,
-          activeTEENodes: teeNodes.length,
-          teeNodes: teeNodes.map((n) => ({
-            address: n.address,
-            lastHeartbeat: n.lastHeartbeat,
-            attestationValid: n.attestationValid,
-          })),
         },
       });
     } catch (error) {
@@ -79,9 +178,11 @@ router.get(
   authenticateAPIKey,
   extractRole,
   requirePermission("compliance:read"),
-  async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const metrics = await complianceService.getComplianceMetrics();
+      const metrics = await complianceService.getComplianceMetrics(
+        req.businessId!,
+      );
 
       res.json({
         success: true,
@@ -104,6 +205,7 @@ router.get(
     try {
       const screenings = await complianceService.getScreeningResult(
         req.params.paymentId,
+        req.businessId!,
       );
 
       res.json({
@@ -122,10 +224,10 @@ router.post(
   "/sanctions/update",
   authenticateAPIKey,
   extractRole,
-  requireRole("ADMIN"),
-  async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
+  requireCurrentPlatformAdmin,
+  async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const result = await complianceService.updateSanctionsList();
+      const result = await complianceService.updateSanctionsList(req.signerId!);
 
       res.json({
         success: true,
@@ -146,7 +248,7 @@ router.get(
   requirePermission("compliance:read"),
   async (_req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const status = complianceService.getSanctionsStatus();
+      const status = await complianceService.getSanctionsStatus();
 
       res.json({
         success: true,
@@ -165,18 +267,26 @@ router.get(
   authenticateAPIKey,
   extractRole,
   requirePermission("compliance:read"),
+  validate(FlaggedPaymentsQuerySchema, "query"),
   async (req: AuthenticatedRequest, res: Response): Promise<void> => {
     try {
-      const page = parseInt(req.query.page as string) || 1;
-      const limit = parseInt(req.query.limit as string) || 20;
+      const { page, limit } = req.query as unknown as {
+        page: number;
+        limit: number;
+      };
 
-      const result = await complianceService.getFlaggedPayments(page, limit);
+      const result = await complianceService.getFlaggedPayments(
+        req.businessId!,
+        page,
+        limit,
+      );
 
       res.json({
         success: true,
         data: result.data.map((p) => ({
           ...p,
           amount: p.amount.toString(),
+          blockNumber: p.blockNumber?.toString() || null,
         })),
         pagination: result.pagination,
       });
@@ -200,8 +310,26 @@ router.post(
         req.params.id,
         req.body.decision,
         req.body.reason,
-        req.body.reviewerAddress,
+        req.signerId!,
+        req.businessId!,
       );
+      const event = {
+        event: "review_recorded",
+        paymentId: result.paymentId,
+        decision: result.decision,
+        status: result.newStatus,
+        reviewedAt:
+          result.reviewedAt instanceof Date
+            ? result.reviewedAt.toISOString()
+            : result.reviewedAt,
+      };
+      publishTenantEvent(
+        "compliance",
+        "compliance_decision",
+        event,
+        req.businessId!,
+      );
+      publishTenantEvent("risk", "risk_update", event, req.businessId!);
 
       res.json({
         success: true,
@@ -213,10 +341,33 @@ router.post(
   },
 );
 
+function publishTenantEvent(
+  channel: WSTenantChannel,
+  type: WSEventType,
+  payload: Record<string, unknown>,
+  businessId: string,
+): void {
+  const reportFailure = (_error: unknown) => {
+    // The service transaction has committed. Live delivery is best-effort;
+    // persisted screening and review records remain the source of truth.
+    logger.warn("Compliance WebSocket notification failed", {
+      channel,
+    });
+  };
+
+  try {
+    void Promise.resolve(
+      wsService.broadcast(channel, type, payload, businessId),
+    ).catch(reportFailure);
+  } catch (error) {
+    reportFailure(error);
+  }
+}
+
 // ─── Error Handler ──────────────────────────────────────────────────────────
 
 function handleError(error: unknown, res: Response): void {
-  if (error instanceof ComplianceError) {
+  if (error instanceof ComplianceError || error instanceof TravelRuleError) {
     res.status(error.statusCode).json({
       error: error.code,
       message: error.message,
@@ -224,10 +375,7 @@ function handleError(error: unknown, res: Response): void {
     return;
   }
 
-  logger.error("Unhandled compliance error", {
-    error: (error as Error).message,
-    stack: (error as Error).stack,
-  });
+  logger.error("Unhandled compliance error");
 
   res.status(500).json({
     error: "INTERNAL_ERROR",

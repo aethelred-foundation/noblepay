@@ -121,19 +121,3 @@ export const MULTI_SIG_TREASURY_ABI = [
   "event ProposalExecuted(bytes32 indexed proposalId, address indexed executor)",
   "event ProposalVoted(bytes32 indexed proposalId, address indexed voter, bool support)",
 ] as const;
-
-// ---------------------------------------------------------------------------
-// PaymentChannels — Off-chain payment channels for high-frequency settlements
-// ---------------------------------------------------------------------------
-
-export const PAYMENT_CHANNELS_ABI = [
-  "function openChannel(address counterparty, address token, uint256 deposit) external returns (bytes32 channelId)",
-  "function closeChannel(bytes32 channelId, uint256 finalBalanceA, uint256 finalBalanceB, bytes calldata signatureA, bytes calldata signatureB) external",
-  "function disputeChannel(bytes32 channelId, uint256 claimedBalanceA, uint256 claimedBalanceB, bytes calldata proof) external",
-  "function topUpChannel(bytes32 channelId, uint256 amount) external",
-  "function getChannel(bytes32 channelId) external view returns (address partyA, address partyB, address token, uint256 depositA, uint256 depositB, uint8 status, uint256 openedAt)",
-  "function getChannelBalance(bytes32 channelId) external view returns (uint256 balanceA, uint256 balanceB, uint256 nonce)",
-  "event ChannelOpened(bytes32 indexed channelId, address indexed partyA, address indexed partyB, uint256 deposit)",
-  "event ChannelClosed(bytes32 indexed channelId, uint256 finalBalanceA, uint256 finalBalanceB)",
-  "event ChannelDisputed(bytes32 indexed channelId, address indexed disputant)",
-] as const;
