@@ -25,7 +25,6 @@ function evaluationEnv(
 ): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {
     COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT: ACK,
-    NEXT_PUBLIC_CHAIN_ENV: "testnet",
     NOBLEPAY_CHAIN_ID: "7332",
   };
   for (const [k, v] of Object.entries(over)) {
@@ -51,20 +50,37 @@ describe("complianceEvaluationAcknowledged", () => {
     }
   });
 
-  it("cannot be reached on mainnet", () => {
+  it("cannot be reached on any chain but the public testnet", () => {
+    // 7331 is the neighbouring devnet: a single-character typo must not open
+    // a compliance gate. 1 is Ethereum mainnet. 73320 catches a prefix match.
+    for (const chainId of ["1", "7331", "73320", "0", "", " "]) {
+      expect(
+        complianceEvaluationAcknowledged(evaluationEnv({ NOBLEPAY_CHAIN_ID: chainId })),
+      ).toBe(false);
+    }
     expect(
       complianceEvaluationAcknowledged(
-        evaluationEnv({ NEXT_PUBLIC_CHAIN_ENV: "mainnet" }),
+        evaluationEnv({ NOBLEPAY_CHAIN_ID: undefined }),
       ),
     ).toBe(false);
   });
 
-  it("cannot be reached on another chain id", () => {
-    expect(
-      complianceEvaluationAcknowledged(
-        evaluationEnv({ NOBLEPAY_CHAIN_ID: "1" }),
-      ),
-    ).toBe(false);
+  it("does not depend on NEXT_PUBLIC_CHAIN_ENV", () => {
+    /*
+     * Regression test for a gate that could never open. An earlier version also
+     * required NEXT_PUBLIC_CHAIN_ENV=testnet, but Compose passes that variable
+     * only to the FRONTEND build -- the backend container has never received
+     * it, so evaluation mode was unreachable in the only environment it exists
+     * for. The chain id is the authoritative signal and it is backend-owned.
+     */
+    expect(complianceEvaluationAcknowledged(evaluationEnv())).toBe(true);
+    for (const chainEnv of ["mainnet", "production", ""]) {
+      expect(
+        complianceEvaluationAcknowledged(
+          evaluationEnv({ NEXT_PUBLIC_CHAIN_ENV: chainEnv }),
+        ),
+      ).toBe(true);
+    }
   });
 
   it("is off when nothing is set", () => {
@@ -82,7 +98,6 @@ describe("boot validation", () => {
   it("still demands compliance configuration without the acknowledgement", () => {
     const errors = collectProductionEnvErrors({
       ...base,
-      NEXT_PUBLIC_CHAIN_ENV: "testnet",
       NOBLEPAY_CHAIN_ID: "7332",
     } as NodeJS.ProcessEnv);
     expect(errors.join("\n")).toMatch(/COMPLIANCE_API_KEY/u);

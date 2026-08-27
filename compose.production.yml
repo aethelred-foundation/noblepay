@@ -56,8 +56,18 @@ services:
       BUSINESS_VERIFIER_ADDRESS: ${BUSINESS_VERIFIER_ADDRESS:?set BUSINESS_VERIFIER_ADDRESS}
       NOBLEPAY_MIN_CONFIRMATIONS: ${NOBLEPAY_MIN_CONFIRMATIONS:?set NOBLEPAY_MIN_CONFIRMATIONS}
       NOBLEPAY_TOKEN_CONFIG: ${NOBLEPAY_TOKEN_CONFIG:?set NOBLEPAY_TOKEN_CONFIG}
-      COMPLIANCE_API_URL: ${COMPLIANCE_API_URL:?set COMPLIANCE_API_URL}
-      COMPLIANCE_API_KEY: ${COMPLIANCE_API_KEY:?set COMPLIANCE_API_KEY}
+      # Compliance configuration is deliberately optional HERE and required by
+      # the services themselves. Compose interpolation cannot express "required
+      # unless COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT is set", and a ":?" default
+      # aborts the whole command -- including for services excluded by profile,
+      # since interpolation runs before profile filtering. The backend refuses
+      # to boot without these unless the evaluation acknowledgement is present
+      # (backend/src/lib/env-validation.ts) and the gateway refuses outright
+      # (services/gateway/internal/config/config.go). Do not restore a ":?" here:
+      # it makes evaluation mode unreachable without adding any guarantee.
+      COMPLIANCE_API_URL: ${COMPLIANCE_API_URL:-}
+      COMPLIANCE_API_KEY: ${COMPLIANCE_API_KEY:-}
+      COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT: ${COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT:-}
       COMPLIANCE_MAX_DATASET_AGE_HOURS: ${COMPLIANCE_MAX_DATASET_AGE_HOURS:?set COMPLIANCE_MAX_DATASET_AGE_HOURS}
       TRAVEL_RULE_THRESHOLD_USD: ${TRAVEL_RULE_THRESHOLD_USD:?set TRAVEL_RULE_THRESHOLD_USD}
       TRAVEL_RULE_ACTIVE_KEY_ID: ${TRAVEL_RULE_ACTIVE_KEY_ID:?set TRAVEL_RULE_ACTIVE_KEY_ID}
@@ -130,8 +140,8 @@ services:
       GATEWAY_PORT: "4018"
       GATEWAY_API_KEY: ${GATEWAY_API_KEY:-}
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
-      COMPLIANCE_API_URL: ${COMPLIANCE_API_URL:?set COMPLIANCE_API_URL}
-      COMPLIANCE_API_KEY: ${COMPLIANCE_API_KEY:?set COMPLIANCE_API_KEY}
+      COMPLIANCE_API_URL: ${COMPLIANCE_API_URL:-}
+      COMPLIANCE_API_KEY: ${COMPLIANCE_API_KEY:-}
       COMPLIANCE_MAX_DATASET_AGE_HOURS: ${COMPLIANCE_MAX_DATASET_AGE_HOURS:?set COMPLIANCE_MAX_DATASET_AGE_HOURS}
       COMPLIANCE_TIMEOUT_SECS: ${COMPLIANCE_TIMEOUT_SECS:-5}
       CHAIN_RPC_URL: ${AETHELRED_RPC_URL:?set AETHELRED_RPC_URL}

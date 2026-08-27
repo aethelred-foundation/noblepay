@@ -504,8 +504,14 @@ For an evaluation deployment with no compliance vendor yet, set:
 COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT=acknowledge-evaluation-only-no-compliance-screening
 ```
 
-It is accepted only alongside `NEXT_PUBLIC_CHAIN_ENV=testnet` and
-`NOBLEPAY_CHAIN_ID=7332`. Mainnet cannot reach this state.
+It is accepted only alongside `NOBLEPAY_CHAIN_ID=7332`, the public testnet.
+Mainnet cannot reach this state, because mainnet does not run on 7332.
+
+Leave `COMPLIANCE_API_URL` and `COMPLIANCE_API_KEY` **empty** — delete the
+`replace-with-...` placeholders rather than substituting anything. A placeholder
+origin is rejected on purpose: a half-configured compliance service is a worse
+state than none at all, so a value that looks configured but is not must fail
+loudly. Compose no longer demands either variable, so an empty value is enough.
 
 What it does and does not do:
 

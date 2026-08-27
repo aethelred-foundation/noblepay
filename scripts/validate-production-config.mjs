@@ -35,6 +35,8 @@ const operatorRunbook = read("deploy/PUBLIC_TESTNET_OPERATOR_RUNBOOK.md");
 const deploymentRunbook = read("deploy/README.md");
 const coreDeploymentEnvExample = read("deploy/core-deployment.env.example");
 const productionEnvExample = read("deploy/production.env.example");
+const envValidation = read("backend/src/lib/env-validation.ts");
+const productionConfig = read("backend/src/lib/production-config.ts");
 const nodePackages = [
   JSON.parse(read("package.json")),
   JSON.parse(read("backend/package.json")),
@@ -207,12 +209,34 @@ const deploymentEnv =
   envFileIndex >= 0 ? readEnvFile(process.argv[envFileIndex + 1]) : process.env;
 
 validatePrivateRPCURL(deploymentEnv.AETHELRED_RPC_URL);
-const complianceAPIURL = deploymentEnv.COMPLIANCE_API_URL;
+/*
+ * Mirrors complianceEvaluationAcknowledged() in backend/src/lib/production-config.ts.
+ * Duplicated rather than imported because this validator is plain ESM and that
+ * module is TypeScript; the literal is pinned against its source below so the
+ * two cannot drift apart silently.
+ */
+const COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT =
+  "acknowledge-evaluation-only-no-compliance-screening";
 assert.ok(
-  complianceAPIURL,
-  "COMPLIANCE_API_URL is required for production validation",
+  productionConfig.includes(`"${COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT}"`),
+  "The acknowledgement pinned here must match backend/src/lib/production-config.ts",
 );
-validateExternalComplianceOrigin(complianceAPIURL);
+const complianceEvaluation =
+  (deploymentEnv.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT ?? "").trim() ===
+    COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT &&
+  (deploymentEnv.NOBLEPAY_CHAIN_ID ?? "").trim() === "7332";
+
+const complianceAPIURL = deploymentEnv.COMPLIANCE_API_URL;
+if (complianceAPIURL) {
+  // Supplied, so it must be sound whether or not evaluation mode is on: a
+  // half-configured compliance service is a worse state than none at all.
+  validateExternalComplianceOrigin(complianceAPIURL);
+} else {
+  assert.ok(
+    complianceEvaluation,
+    "COMPLIANCE_API_URL is required for production validation unless COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT is set on the public testnet",
+  );
+}
 assert.match(
   deploymentEnv.COMPLIANCE_MAX_DATASET_AGE_HOURS ?? "",
   /^[1-9][0-9]*$/u,
@@ -575,10 +599,33 @@ assert.doesNotMatch(
   /^  compliance:/mu,
   "Compose must not package the test-only Rust service",
 );
+/*
+ * The compliance-origin requirement no longer lives in Compose. Interpolation
+ * cannot express "required unless the evaluation acknowledgement is present",
+ * and a ${VAR:?} aborts the entire command -- including for services excluded
+ * by profile, because interpolation runs before profile filtering. It moved to
+ * backend/src/lib/env-validation.ts, which can express the condition.
+ *
+ * Three properties survive, and the last two are pinned because the first cut
+ * of evaluation mode got them wrong: Compose must never bake in an origin of
+ * its own, it must actually forward the acknowledgement to the backend (it did
+ * not, so the gate could never open under Compose), and the requirement must
+ * still be enforced at boot for anyone who has not acknowledged.
+ */
+assert.doesNotMatch(
+  compose,
+  /COMPLIANCE_API_URL: \$\{COMPLIANCE_API_URL:-[^}]+\}/u,
+  "Compose must never supply a compliance-service origin of its own",
+);
 assert.match(
   compose,
-  /COMPLIANCE_API_URL: \$\{COMPLIANCE_API_URL:\?set COMPLIANCE_API_URL\}/u,
-  "Production must require an external compliance-service origin",
+  /COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT: \$\{COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT:-\}/u,
+  "Compose must forward the compliance evaluation acknowledgement to the backend, or evaluation mode cannot be reached where it is meant to be used",
+);
+assert.match(
+  envValidation,
+  /if \(!complianceEvaluation\) \{\s*try \{\s*parseExternalComplianceUrl\(env\.COMPLIANCE_API_URL\);/u,
+  "Boot validation must still require a compliance-service origin from any deployment that has not acknowledged evaluation mode",
 );
 assert.doesNotMatch(
   compose,
@@ -773,11 +820,33 @@ assert.match(
   /run: node [.][.]\/scripts\/deploy-devnet-core[.]mjs --verify-artifacts/u,
   "Contract CI must validate regenerated deployment artifacts",
 );
-assert.match(
-  nodePackages[0].scripts?.["validate:contracts"] ?? "",
-  /npx hardhat clean && npx hardhat compile && node [.][.]\/scripts\/deploy-devnet-core[.]mjs --verify-artifacts && node [.][.]\/scripts\/test-deployment-governance[.]mjs && node [.][.]\/scripts\/test-testnet-token-provisioning[.]mjs && npx hardhat test/u,
-  "Local contract validation must verify artifacts and the test-token ceremony immediately after a clean compile",
-);
+/*
+ * Asserted as an ordered SUBSEQUENCE rather than an exact chain. The property
+ * that matters is that every required validation runs, in order, after a clean
+ * compile and before the contract tests -- not that nothing else may run
+ * between them. As an exact chain this pin broke the moment
+ * test-operator-artifact-permissions.mjs was added to the script, which made
+ * ADDING a validation step a CI failure: precisely backwards.
+ */
+const contractSteps = (nodePackages[0].scripts?.["validate:contracts"] ?? "")
+  .split("&&")
+  .map((step) => step.trim());
+let contractStepCursor = -1;
+for (const requiredStep of [
+  "npx hardhat clean",
+  "npx hardhat compile",
+  "node ../scripts/deploy-devnet-core.mjs --verify-artifacts",
+  "node ../scripts/test-deployment-governance.mjs",
+  "node ../scripts/test-testnet-token-provisioning.mjs",
+  "npx hardhat test",
+]) {
+  const at = contractSteps.indexOf(requiredStep, contractStepCursor + 1);
+  assert.ok(
+    at > contractStepCursor,
+    `Local contract validation must run "${requiredStep}", in order, after a clean compile`,
+  );
+  contractStepCursor = at;
+}
 assert.match(
   deploymentScript,
   /build input \$\{inputSourceName\} differs from the checked-out source/u,

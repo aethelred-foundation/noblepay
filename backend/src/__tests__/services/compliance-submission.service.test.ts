@@ -894,7 +894,6 @@ describe("ComplianceService verified submission", () => {
     delete process.env.COMPLIANCE_API_KEY;
     process.env.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT =
       "acknowledge-evaluation-only-no-compliance-screening";
-    process.env.NEXT_PUBLIC_CHAIN_ENV = "testnet";
 
     const payment: any = {
       id: PAYMENT_DB_ID,
@@ -937,6 +936,5 @@ describe("ComplianceService verified submission", () => {
     expect(prisma.$transaction).not.toHaveBeenCalled();
 
     delete process.env.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT;
-    delete process.env.NEXT_PUBLIC_CHAIN_ENV;
   });
 });

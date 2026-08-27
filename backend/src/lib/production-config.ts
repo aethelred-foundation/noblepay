@@ -128,11 +128,21 @@ const AETHELRED_PUBLIC_TESTNET_CHAIN_ID = "7332";
  * difference is between a container that will not start and a container that
  * starts and declines to process payments.
  *
- * Conditions are conjunctive and none of them is a default:
+ * Conditions are conjunctive and neither is a default:
  *   - the exact acknowledgement string
- *   - NEXT_PUBLIC_CHAIN_ENV=testnet
- *   - the public-testnet chain id
- * Mainnet cannot reach this state no matter what is set.
+ *   - NOBLEPAY_CHAIN_ID is the public-testnet chain id
+ *
+ * Mainnet cannot reach this state no matter what is set, because mainnet does
+ * not run on 7332.
+ *
+ * An earlier version of this gate also required NEXT_PUBLIC_CHAIN_ENV=testnet.
+ * That was wrong twice over: NEXT_PUBLIC_* is a frontend BUILD-time namespace
+ * meaning "safe to inline into the browser bundle", which is a claim about
+ * publicity and not about which network this is; and the backend container is
+ * never given that variable, so the gate could not open at all under Compose.
+ * NOBLEPAY_CHAIN_ID is backend-owned, already required, and already bound to
+ * the operator-confirmed network anchor -- so it is the authoritative signal,
+ * and a second variable restating it would only add a way to misconfigure.
  */
 export function complianceEvaluationAcknowledged(
   env: NodeJS.ProcessEnv = process.env,
@@ -140,7 +150,6 @@ export function complianceEvaluationAcknowledged(
   return (
     env.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT?.trim() ===
       COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT &&
-    env.NEXT_PUBLIC_CHAIN_ENV?.trim() === "testnet" &&
     env.NOBLEPAY_CHAIN_ID?.trim() === AETHELRED_PUBLIC_TESTNET_CHAIN_ID
   );
 }
