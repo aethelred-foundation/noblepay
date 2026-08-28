@@ -149,7 +149,25 @@ function validateExternalComplianceOrigin(raw) {
   );
 }
 
-function validatePublicURL(name, raw, protocol, { originOnly = false } = {}) {
+/*
+ * The one sanctioned route to a plaintext chain endpoint, shared with
+ * backend/src/lib/production-config.ts and scripts/lib/rpc-transport-policy.mjs:
+ * the exact acknowledgement conjoined with the public-testnet chain id.
+ */
+function plaintextEvaluationAcknowledged(env) {
+  return (
+    (env.ALLOW_INSECURE_TESTNET_RPC ?? "").trim() ===
+      TESTNET_HTTP_RPC_ACKNOWLEDGEMENT &&
+    (env.NOBLEPAY_CHAIN_ID ?? "").trim() === "7332"
+  );
+}
+
+function validatePublicURL(
+  name,
+  raw,
+  protocol,
+  { originOnly = false, plaintextProtocol = null, plaintextAcknowledged = false } = {},
+) {
   assert.ok(raw, `${name} is required for production validation`);
   let parsed;
   try {
@@ -157,11 +175,28 @@ function validatePublicURL(name, raw, protocol, { originOnly = false } = {}) {
   } catch {
     throw new Error(`${name} must be an absolute URL`);
   }
-  assert.equal(
-    parsed.protocol,
-    protocol,
-    `${name} must use ${protocol.slice(0, -1)}`,
-  );
+  /*
+   * Only a call site that names a plaintextProtocol can be downgraded at all,
+   * and then only under the acknowledgement — mirroring src/config/chains.ts,
+   * where exactly the chain RPC and its websocket opt in while the explorer,
+   * site origin and application API stay https/wss unconditionally.
+   */
+  const downgraded =
+    plaintextAcknowledged &&
+    plaintextProtocol !== null &&
+    parsed.protocol === plaintextProtocol;
+  if (!downgraded) {
+    assert.equal(
+      parsed.protocol,
+      protocol,
+      `${name} must use ${protocol.slice(0, -1)}` +
+        (plaintextProtocol
+          ? `; ${plaintextProtocol.slice(0, -1)} is evaluation-only and requires ` +
+            `ALLOW_INSECURE_TESTNET_RPC=${TESTNET_HTTP_RPC_ACKNOWLEDGEMENT} ` +
+            "on the public testnet (NOBLEPAY_CHAIN_ID=7332)"
+          : ""),
+    );
+  }
   assert.equal(parsed.username, "", `${name} must not contain credentials`);
   assert.equal(parsed.password, "", `${name} must not contain credentials`);
   assert.equal(parsed.search, "", `${name} must not contain a query`);
@@ -189,10 +224,7 @@ function validatePrivateRPCURL(raw, env) {
    * applies to deployments and backend/src/lib/env-validation.ts applies at
    * boot. Anything else must be HTTPS.
    */
-  const plaintextAcknowledged =
-    (env.ALLOW_INSECURE_TESTNET_RPC ?? "").trim() ===
-      TESTNET_HTTP_RPC_ACKNOWLEDGEMENT &&
-    (env.NOBLEPAY_CHAIN_ID ?? "").trim() === "7332";
+  const plaintextAcknowledged = plaintextEvaluationAcknowledged(env);
   if (!(parsed.protocol === "http:" && plaintextAcknowledged)) {
     assert.equal(
       parsed.protocol,
@@ -391,15 +423,25 @@ if (deploymentEnv.NEXT_PUBLIC_AETHELRED_NETWORK_ANCHOR_HASH) {
     "frontend and backend network anchor hashes must match",
   );
 }
+const publicChainPlaintextAcknowledged =
+  plaintextEvaluationAcknowledged(deploymentEnv);
 validatePublicURL(
   "PUBLIC_AETHELRED_RPC_URL",
   deploymentEnv.PUBLIC_AETHELRED_RPC_URL,
   "https:",
+  {
+    plaintextProtocol: "http:",
+    plaintextAcknowledged: publicChainPlaintextAcknowledged,
+  },
 );
 validatePublicURL(
   "PUBLIC_AETHELRED_WS_URL",
   deploymentEnv.PUBLIC_AETHELRED_WS_URL,
   "wss:",
+  {
+    plaintextProtocol: "ws:",
+    plaintextAcknowledged: publicChainPlaintextAcknowledged,
+  },
 );
 validatePublicURL(
   "PUBLIC_AETHELRED_EXPLORER_URL",
