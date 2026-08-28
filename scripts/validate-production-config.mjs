@@ -7,6 +7,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { FINALIZED_ENVIRONMENT_KEYS } from "./lib/operator-artifacts.mjs";
+import { TESTNET_HTTP_RPC_ACKNOWLEDGEMENT } from "./lib/rpc-transport-policy.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
@@ -174,18 +175,36 @@ function validatePublicURL(name, raw, protocol, { originOnly = false } = {}) {
   }
 }
 
-function validatePrivateRPCURL(raw) {
+function validatePrivateRPCURL(raw, env) {
   assert.ok(raw, "AETHELRED_RPC_URL is required for production validation");
   let parsed;
   try {
     parsed = new URL(raw);
   } catch {
-    throw new Error("AETHELRED_RPC_URL must be an absolute HTTPS URL");
+    throw new Error("AETHELRED_RPC_URL must be an absolute HTTP(S) URL");
+  }
+  /*
+   * Plaintext http is permitted only as acknowledged evaluation mode on the
+   * public testnet — the same policy scripts/lib/rpc-transport-policy.mjs
+   * applies to deployments and backend/src/lib/env-validation.ts applies at
+   * boot. Anything else must be HTTPS.
+   */
+  const plaintextAcknowledged =
+    (env.ALLOW_INSECURE_TESTNET_RPC ?? "").trim() ===
+      TESTNET_HTTP_RPC_ACKNOWLEDGEMENT &&
+    (env.NOBLEPAY_CHAIN_ID ?? "").trim() === "7332";
+  if (!(parsed.protocol === "http:" && plaintextAcknowledged)) {
+    assert.equal(
+      parsed.protocol,
+      "https:",
+      "AETHELRED_RPC_URL must use HTTPS in release mode; a plaintext http RPC is evaluation-only and requires " +
+        `ALLOW_INSECURE_TESTNET_RPC=${TESTNET_HTTP_RPC_ACKNOWLEDGEMENT} on the public testnet (NOBLEPAY_CHAIN_ID=7332)`,
+    );
   }
   assert.equal(
-    parsed.protocol,
-    "https:",
-    "AETHELRED_RPC_URL must use HTTPS in release mode; http://54.165.44.130 is explicitly unsupported",
+    parsed.search,
+    "",
+    "AETHELRED_RPC_URL must not contain a query",
   );
   assert.equal(
     parsed.username,
@@ -208,7 +227,7 @@ const envFileIndex = process.argv.indexOf("--env-file");
 const deploymentEnv =
   envFileIndex >= 0 ? readEnvFile(process.argv[envFileIndex + 1]) : process.env;
 
-validatePrivateRPCURL(deploymentEnv.AETHELRED_RPC_URL);
+validatePrivateRPCURL(deploymentEnv.AETHELRED_RPC_URL, deploymentEnv);
 /*
  * Mirrors complianceEvaluationAcknowledged() in backend/src/lib/production-config.ts.
  * Duplicated rather than imported because this validator is plain ESM and that
@@ -220,6 +239,20 @@ const COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT =
 assert.ok(
   productionConfig.includes(`"${COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT}"`),
   "The acknowledgement pinned here must match backend/src/lib/production-config.ts",
+);
+assert.ok(
+  productionConfig.includes(`"${TESTNET_HTTP_RPC_ACKNOWLEDGEMENT}"`),
+  "The backend's plaintext-RPC acknowledgement literal must match scripts/lib/rpc-transport-policy.mjs",
+);
+assert.match(
+  compose,
+  /ALLOW_INSECURE_TESTNET_RPC: \$\{ALLOW_INSECURE_TESTNET_RPC:-\}/u,
+  "Compose must forward the plaintext-RPC acknowledgement to the backend, or acknowledged plaintext deployments cannot boot",
+);
+assert.match(
+  envValidation,
+  /plaintextTestnetRpcAcknowledged\(env\)/u,
+  "Boot validation must gate plaintext chain RPC on the explicit acknowledgement rather than dropping the HTTPS requirement",
 );
 const complianceEvaluation =
   (deploymentEnv.COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT ?? "").trim() ===

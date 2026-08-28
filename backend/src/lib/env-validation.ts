@@ -1,5 +1,7 @@
 import {
   complianceEvaluationAcknowledged,
+  plaintextTestnetRpcAcknowledged,
+  PLAINTEXT_RPC_ACKNOWLEDGEMENT,
   configuredSanctionsMaxAgeMs,
   loadNoblePayChainConfiguration,
   parseBusinessVerifierAddress,
@@ -57,8 +59,28 @@ export function collectProductionEnvErrors(
 
   try {
     const chain = loadNoblePayChainConfiguration(env);
-    if (new URL(chain.rpcUrl).protocol !== "https:") {
-      errors.push("AETHELRED_RPC_URL must use HTTPS in production");
+    const rpc = new URL(chain.rpcUrl);
+    if (rpc.protocol !== "https:") {
+      /*
+       * Plaintext is permitted only as acknowledged evaluation mode on the
+       * public testnet, mirroring scripts/lib/rpc-transport-policy.mjs. The
+       * chain-id and network-anchor checks stay mandatory either way, so this
+       * weakens the transport of the hop, never which network is accepted.
+       */
+      if (!plaintextTestnetRpcAcknowledged(env)) {
+        errors.push(
+          "AETHELRED_RPC_URL must use HTTPS in production; a plaintext http " +
+            "RPC is evaluation-only and requires " +
+            `ALLOW_INSECURE_TESTNET_RPC=${PLAINTEXT_RPC_ACKNOWLEDGEMENT} ` +
+            "on the public testnet (NOBLEPAY_CHAIN_ID=7332)",
+        );
+      } else if (rpc.username || rpc.password || rpc.search || rpc.hash) {
+        errors.push(
+          "A plaintext AETHELRED_RPC_URL must not contain credentials, " +
+            "query parameters, or fragments — anything in the URL crosses " +
+            "the network unencrypted",
+        );
+      }
     }
   } catch (error) {
     errors.push((error as Error).message);

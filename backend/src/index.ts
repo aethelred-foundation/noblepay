@@ -8,7 +8,7 @@ import { logger, generateCorrelationId } from "./lib/logger";
 import { register, httpRequestDuration, httpRequestTotal } from "./lib/metrics";
 import { disconnectDatabase } from "./lib/db";
 import { collectProductionEnvErrors } from "./lib/env-validation";
-import { complianceEvaluationAcknowledged } from "./lib/production-config";
+import { complianceEvaluationAcknowledged, plaintextTestnetRpcAcknowledged } from "./lib/production-config";
 import {
   authenticateAPIKey,
   createTierRateLimit,
@@ -77,6 +77,18 @@ export function validateProductionEnv(): void {
         "Compliance screening is DISABLED and every payment requiring a " +
         "screening verdict will be REFUSED with 501. Acknowledged via " +
         "COMPLIANCE_EVALUATION_ACKNOWLEDGEMENT. Never use this for real traffic.",
+    );
+  }
+  if (
+    plaintextTestnetRpcAcknowledged() &&
+    process.env.AETHELRED_RPC_URL?.trim().startsWith("http://")
+  ) {
+    logger.warn(
+      "EVALUATION MODE: the chain RPC transport is PLAINTEXT http. " +
+        "Traffic to the node is neither encrypted nor authenticated in " +
+        "transit. Chain-id and network-anchor checks remain mandatory. " +
+        "Acknowledged via ALLOW_INSECURE_TESTNET_RPC. Never use this for " +
+        "real traffic.",
     );
   }
 }

@@ -144,6 +144,36 @@ const AETHELRED_PUBLIC_TESTNET_CHAIN_ID = "7332";
  * the operator-confirmed network anchor -- so it is the authoritative signal,
  * and a second variable restating it would only add a way to misconfigure.
  */
+/**
+ * The exact acknowledgement that permits a PLAINTEXT (http) chain RPC.
+ *
+ * The same literal the deploy scripts and the frontend build already use
+ * (scripts/lib/rpc-transport-policy.mjs, next.config.js); the backend adopts
+ * it rather than inventing a second one. The validator pins the two literals
+ * against each other so they cannot drift.
+ */
+export const PLAINTEXT_RPC_ACKNOWLEDGEMENT =
+  "acknowledge-evaluation-only-plaintext-rpc";
+
+/**
+ * Whether this deployment may talk to its chain RPC over plaintext http.
+ *
+ * Same shape as complianceEvaluationAcknowledged, for the same reasons: the
+ * exact string (a boolean can be set by accident), conjoined with the
+ * backend-owned public-testnet chain id. Mainnet cannot reach this state, and
+ * the network-anchor check still binds whatever answers the URL to the
+ * operator-confirmed chain: a plaintext transport weakens confidentiality and
+ * integrity of the hop, not which network the backend will accept.
+ */
+export function plaintextTestnetRpcAcknowledged(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  return (
+    env.ALLOW_INSECURE_TESTNET_RPC?.trim() === PLAINTEXT_RPC_ACKNOWLEDGEMENT &&
+    env.NOBLEPAY_CHAIN_ID?.trim() === AETHELRED_PUBLIC_TESTNET_CHAIN_ID
+  );
+}
+
 export function complianceEvaluationAcknowledged(
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
